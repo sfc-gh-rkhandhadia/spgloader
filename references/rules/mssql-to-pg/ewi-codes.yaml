@@ -1,0 +1,306 @@
+# ewi-codes.yaml
+# ---------------------------------------------------------------------------
+# Unified SPG EWI (Error, Warning, Issue) code catalog.
+#
+# Consolidates two previously disconnected numbering schemes:
+#
+#   Annotation codes (SPG-EWI-NNNN) — emitted in converted SQL file headers
+#   by convert_objects.py to indicate what transformations were applied.
+#   These are informational and do not block migration.
+#
+#   Assessment codes (SPG-BLOCK/WARN/RESOLVE-NNN) — emitted by assess.py
+#   during Phase 3.5 (the SPG compatibility guardrail). BLOCK codes halt
+#   the migration; WARN codes require acknowledgement; RESOLVE codes provide
+#   an automatic fix (usually CREATE EXTENSION).
+#
+# Fields (all codes):
+#   severity     : BLOCK | WARN | RESOLVE | INFO
+#   title        : Short one-line description
+#   description  : Detailed explanation
+#
+# Additional fields (BLOCK/WARN/RESOLVE codes only):
+#   spg_rule          : The specific SPG restriction this code maps to
+#   auto_resolution   : SQL to run to automatically resolve (or null)
+#   extension_prereq  : Extension name required (or null)
+# ---------------------------------------------------------------------------
+
+codes:
+
+  # =========================================================================
+  # ANNOTATION CODES — conversion-pass informational markers
+  # =========================================================================
+
+  SPG-EWI-0001:
+    severity:    INFO
+    title:       "Type mapping applied"
+    description: >
+      One or more T-SQL data types were mapped to PostgreSQL equivalents
+      (e.g. NVARCHAR→VARCHAR, DATETIME→TIMESTAMP, UNIQUEIDENTIFIER→UUID).
+
+  SPG-EWI-0002:
+    severity:    INFO
+    title:       "Function or syntax substitution applied"
+    description: >
+      One or more T-SQL built-in functions, string-concatenation operators,
+      or syntax patterns were rewritten to PostgreSQL equivalents
+      (e.g. ISNULL→COALESCE, GETDATE()→NOW(), + for strings → ||).
+
+  SPG-EWI-0003:
+    severity:    INFO
+    title:       "SSMS DDL artifact removed"
+    description: >
+      One or more SQL Server Management Studio DDL export artifacts were
+      stripped (e.g. ON [PRIMARY], WITH(PAD_INDEX=OFF), TEXTIMAGE_ON,
+      ALTER TABLE ADD CONSTRAINT DEFAULT).
+
+  SPG-EWI-0004:
+    severity:    WARN
+    title:       "Stored procedure or function: T-SQL body requires PL/pgSQL rewrite"
+    description: >
+      The stored procedure or function body was converted with best-effort
+      T-SQL→PL/pgSQL pattern matching. Complex control flow, cursors, or
+      dynamic SQL may require manual review and correction.
+
+  SPG-EWI-0005:
+    severity:    WARN
+    title:       "Trigger converted"
+    description: >
+      The trigger was converted to a PL/pgSQL trigger function + CREATE TRIGGER
+      statement. Trigger semantics (INSTEAD OF, ordering, etc.) may differ
+      between SQL Server and PostgreSQL.
+
+  SPG-EWI-0006:
+    severity:    INFO
+    title:       "TOP N converted to LIMIT"
+    description: >
+      SELECT TOP N was converted by removing TOP N from the SELECT clause.
+      A LIMIT clause must be appended at the end of the query manually if
+      the N value was variable or part of a complex expression.
+
+  SPG-EWI-0007:
+    severity:    WARN
+    title:       "PIVOT clause detected — converted to CTE + FILTER"
+    description: >
+      A T-SQL PIVOT clause was converted to a PostgreSQL CTE with
+      MAX(value) FILTER (WHERE key = 'col') aggregates. Verify the
+      grouping columns and pivot column list are correct.
+
+  SPG-EWI-0008:
+    severity:    WARN
+    title:       "Cross-database reference detected"
+    description: >
+      The object references a table or view in another database
+      (three-part name: database.schema.table). PostgreSQL does not support
+      cross-database references. The reference was remapped if a
+      cross_db_remap rule was configured; otherwise it needs manual resolution.
+
+  SPG-EWI-0009:
+    severity:    INFO
+    title:       "NOLOCK hint removed"
+    description: >
+      WITH (NOLOCK) or (NOLOCK) query hints were removed. PostgreSQL uses
+      MVCC for read isolation and has no NOLOCK equivalent.
+
+  SPG-EWI-0010:
+    severity:    WARN
+    title:       "Schema prefix added to unqualified table reference"
+    description: >
+      A table or view was referenced without a schema qualifier in a view
+      or procedure body. The schema prefix was added based on the
+      schema_prefix rule in view-fixes.yaml.
+
+  SPG-EWI-0011:
+    severity:    INFO
+    title:       "NOLOCK hint removed"
+    description: >
+      WITH (NOLOCK) / (NOLOCK) removed. Alias for SPG-EWI-0009 (retained
+      for backwards compatibility with converted files using this code).
+
+  # =========================================================================
+  # BLOCK CODES — migration cannot proceed until resolved
+  # =========================================================================
+
+  SPG-BLOCK-001:
+    severity:    BLOCK
+    title:       "Non-PL/pgSQL procedural language"
+    description: >
+      Object uses a procedural language not supported in Snowflake Postgres
+      (PL/Python, PL/Perl, PL/Tcl, PL/V8, CLR, T-SQL).
+    spg_rule:    "SPG only supports PL/pgSQL. Custom procedural languages cannot be installed."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-BLOCK-002:
+    severity:    BLOCK
+    title:       "Superuser creation or assumption"
+    description: >
+      Object creates a superuser or attempts SET ROLE to a superuser role.
+    spg_rule:    "Cannot create superusers or assume superuser roles (postgres, snowflake_superuser) in SPG."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-BLOCK-003:
+    severity:    BLOCK
+    title:       "ALTER SYSTEM statement"
+    description: >
+      DDL contains ALTER SYSTEM, which is reserved for Snowflake-managed
+      server configuration.
+    spg_rule:    "ALTER SYSTEM is blocked in SPG; protected parameters are managed by Snowflake."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-BLOCK-004:
+    severity:    BLOCK
+    title:       "Filesystem access function"
+    description: >
+      Object uses pg_read_file, pg_ls_dir, pg_write_file, lo_import,
+      lo_export, or COPY TO/FROM PROGRAM.
+    spg_rule:    "Generic file access functions are blocked in SPG; no filesystem access is permitted."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-BLOCK-005:
+    severity:    BLOCK
+    title:       "Direct system catalog modification"
+    description: >
+      Object modifies pg_catalog or information_schema tables directly.
+    spg_rule:    "Direct modification of system catalog tables is restricted in SPG."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-BLOCK-006:
+    severity:    BLOCK
+    title:       "Extension not in SPG catalog"
+    description: >
+      Object depends on an extension not available in Snowflake Postgres.
+    spg_rule:    "Only extensions in the official SPG catalog can be installed. Custom .so/.dll extensions are not permitted."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-BLOCK-007:
+    severity:    BLOCK
+    title:       "Exceeds 64-role limit"
+    description: "Source schema contains more than 64 roles."
+    spg_rule:    "SPG enforces a maximum of 64 roles per instance."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-BLOCK-008:
+    severity:    BLOCK
+    title:       "Exceeds 32-database limit"
+    description: "Source schema contains more than 32 databases."
+    spg_rule:    "SPG enforces a maximum of 32 databases per instance."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  # =========================================================================
+  # WARN CODES — proceed with acknowledgement; risk acknowledged
+  # =========================================================================
+
+  SPG-WARN-001:
+    severity:    WARN
+    title:       "Spatial/geometry type detected"
+    description: "Object uses GEOGRAPHY, GEOMETRY, or SDO_GEOMETRY types."
+    spg_rule:    "PostGIS IS available in SPG but must be enabled explicitly."
+    auto_resolution: "CREATE EXTENSION IF NOT EXISTS postgis;"
+    extension_prereq: postgis
+
+  SPG-WARN-002:
+    severity:    WARN
+    title:       "Superuser-level operation (non-creation)"
+    description: "Object uses an operation that typically requires superuser."
+    spg_rule:    "snowflake_admin is not a full superuser; some elevated operations may fail."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-WARN-003:
+    severity:    WARN
+    title:       "Protected server configuration reference"
+    description: "Object references configuration parameters managed by Snowflake."
+    spg_rule:    "Protected server-level parameters cannot be changed by customers in SPG."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-WARN-004:
+    severity:    WARN
+    title:       "Oracle package or synonym"
+    description: "Object is an Oracle PACKAGE or SYNONYM with no direct PostgreSQL equivalent."
+    spg_rule:    "Oracle packages have no direct PG equivalent. orafce provides Oracle function emulation."
+    auto_resolution: "CREATE EXTENSION IF NOT EXISTS orafce;"
+    extension_prereq: orafce
+
+  SPG-WARN-005:
+    severity:    WARN
+    title:       "Scheduled job (DBMS_SCHEDULER / pg_agent)"
+    description: "Object contains a scheduled job or Oracle DBMS_SCHEDULER call."
+    spg_rule:    "pg_cron IS available in SPG. Jobs must be migrated to pg_cron syntax."
+    auto_resolution: "CREATE EXTENSION IF NOT EXISTS pg_cron;"
+    extension_prereq: pg_cron
+
+  SPG-WARN-006:
+    severity:    WARN
+    title:       "Non-Postgres foreign data wrapper"
+    description: "Object uses an FDW to a non-PostgreSQL source (oracle_fdw, mysql_fdw, tds_fdw)."
+    spg_rule:    "Only postgres_fdw is available in SPG. FDWs to Oracle, MySQL, MSSQL are not supported."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-WARN-007:
+    severity:    WARN
+    title:       "Cursor loop in procedure"
+    description: "Object uses explicit cursor OPEN/FETCH/CLOSE loops."
+    spg_rule:    "Cursors are supported in PL/pgSQL but set-based SQL is preferred for performance."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  SPG-WARN-008:
+    severity:    WARN
+    title:       "Dynamic SQL with dialect-specific syntax"
+    description: "Object uses EXECUTE IMMEDIATE (Oracle), sp_executesql (MSSQL), or PREPARE/EXECUTE (MySQL)."
+    spg_rule:    "Dynamic SQL is supported via EXECUTE in PL/pgSQL, but bind variable syntax differs."
+    auto_resolution: ~
+    extension_prereq: ~
+
+  # =========================================================================
+  # RESOLVE CODES — advisory; automatic resolution available
+  # =========================================================================
+
+  SPG-RESOLVE-001:
+    severity:    RESOLVE
+    title:       "Extension prerequisite: postgis"
+    description: "Spatial types or functions detected — PostGIS must be enabled before deploying."
+    spg_rule:    "PostGIS is available in SPG."
+    auto_resolution: "CREATE EXTENSION IF NOT EXISTS postgis;"
+    extension_prereq: postgis
+
+  SPG-RESOLVE-002:
+    severity:    RESOLVE
+    title:       "Extension prerequisite: orafce (Oracle emulation)"
+    description: "Oracle source — orafce provides Oracle-compatible functions."
+    spg_rule:    "orafce is available in SPG and eases Oracle migrations."
+    auto_resolution: "CREATE EXTENSION IF NOT EXISTS orafce;"
+    extension_prereq: orafce
+
+  SPG-RESOLVE-003:
+    severity:    RESOLVE
+    title:       "Extension prerequisite: uuid-ossp or pg_uuidv7"
+    description: "UUID generation functions detected (NEWID, UUID, SYS_GUID)."
+    spg_rule:    "uuid-ossp and pg_uuidv7 are both available in SPG."
+    auto_resolution: 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+    extension_prereq: uuid-ossp
+
+  SPG-RESOLVE-004:
+    severity:    RESOLVE
+    title:       "Extension prerequisite: pg_trgm (fuzzy matching)"
+    description: "Fuzzy string matching or similarity functions detected."
+    spg_rule:    "pg_trgm is available in SPG."
+    auto_resolution: "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+    extension_prereq: pg_trgm
+
+  SPG-RESOLVE-005:
+    severity:    RESOLVE
+    title:       "Extension prerequisite: pgcrypto"
+    description: "Cryptographic functions detected (HASHBYTES, MD5, SHA1, ENCRYPT)."
+    spg_rule:    "pgcrypto is available in SPG."
+    auto_resolution: "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+    extension_prereq: pgcrypto

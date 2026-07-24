@@ -1,0 +1,147 @@
+# view-fixes-template.yaml
+# ---------------------------------------------------------------------------
+# TEMPLATE for project-specific view fix rules.
+#
+# HOW TO USE THIS FOR A NEW MIGRATION PROJECT:
+#
+#   1. Copy this file to your migration workspace:
+#      cp references/fix-mappings/view-fixes-template.yaml \
+#         ~/.spgloader/<workspace>/view-fixes.yaml
+#
+#   2. Fill in the four project-specific sections:
+#
+#      schema_prefix.tables  — list every table name that appears without
+#         a schema qualifier in your view files. Run this query on the source DB:
+#         SELECT TABLE_SCHEMA+'.'+TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+#         WHERE TABLE_SCHEMA = 'dbo' ORDER BY TABLE_NAME;
+#
+#      cross_db_remaps  — if views reference tables in other databases
+#         (e.g. other_db.dbo.table), add a remap entry for each foreign DB.
+#
+#      known_multi_word_aliases  — multi-word column aliases unique to your
+#         schema. To auto-detect these, run:
+#         python scripts/analyze_views.py --work-dir <workspace>
+#
+#      pivot_rules.inner_tables  — if your views use PIVOT, map the
+#         T-SQL table names (as they appear in the inner query) to their
+#         fully-qualified PG names.
+#
+#   3. All generic pattern_fix flags are pre-set to sensible defaults.
+#      Disable any flag that causes false positives for your schema.
+#
+# Generic conversion rules (type mappings, function substitutions, DDL cleanup,
+# date unit maps) are loaded automatically from:
+#   references/rules/mssql-to-pg/
+# — you do NOT need to duplicate those here.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# SECTION 1 — Schema prefix  (PROJECT-SPECIFIC: fill in for your schema)
+#
+# Tables and views referenced without a schema qualifier in FROM/JOIN clauses.
+# fix_views.py adds the prefix defined below to each listed name.
+# ---------------------------------------------------------------------------
+schema_prefix:
+  schema: dbo     # change if your target schema is different
+  tables: []      # <-- FILL IN: list of unqualified table names from your schema
+  # Example:
+  # tables:
+  #   - customers
+  #   - orders
+  #   - orderitems
+  #   - products
+
+
+# ---------------------------------------------------------------------------
+# SECTION 2 — Cross-database remaps  (PROJECT-SPECIFIC)
+#
+# PostgreSQL does not support cross-database references (db.schema.table).
+# Each remap strips the foreign database prefix and replaces it.
+# ---------------------------------------------------------------------------
+cross_db_remaps: []
+# Example:
+# cross_db_remaps:
+#   - from_prefix: "legacy_db.dbo."
+#     to_prefix:   "dbo."
+
+
+# ---------------------------------------------------------------------------
+# SECTION 3 — Pattern-based fixes  (generic defaults — adjust as needed)
+#
+# All boolean flags control the corresponding handler in fix_views.py.
+# Generic maps (DATEPART units, DATEADD units, DATEDIFF divisors) are loaded
+# automatically from references/rules/mssql-to-pg/date-units.yaml.
+# ---------------------------------------------------------------------------
+pattern_fixes:
+  single_quoted_alias:           true   # AS 'Name'  →  AS name
+  column_equals_alias:           true   # alias = expr  →  expr AS alias
+  embedded_column_equals_alias:  true   # pathid, alias=expr  →  pathid, expr AS alias
+  multi_word_alias:              true   # uses known_multi_word_aliases list below
+  bare_limit:                    true   # LIMIT;  →  (removed)
+  tsql_string_concat:            true   # expr + 'str'  →  expr || 'str'
+  now_date_cast:                 true   # CAST(convert(date,NOW(AS TEXT)))  →  CURRENT_DATE
+  datepart:                      true   # DATEPART(unit, expr)  →  EXTRACT(unit FROM expr)
+  dateadd:                       true   # DATEADD(unit, n, expr)  →  interval arithmetic
+  convert_typed:                 true   # CONVERT(VarChar(N), expr)  →  CAST(expr AS VARCHAR(N))
+  cast_format_code:              true   # CAST(expr,101 AS TEXT)  →  CAST(expr AS DATE)
+  datediff_in_cast:              true   # CAST(DATEDIFF(unit, a, b AS TEXT))  →  numeric epoch
+  objectkey_cast:                true   # ObjectKey = int_col  →  ObjectKey = CAST(int_col AS TEXT)
+  now_minus_int:                 true   # NOW()-N  →  NOW() - INTERVAL 'N days'
+  current_timestamp_minus_int:   true   # CURRENT_TIMESTAMP-N  →  CURRENT_TIMESTAMP - INTERVAL 'N days'
+  datetrunc_idiom:               true   # DATEADD(u, DATEDIFF(u, 0, expr), 0)  →  DATE_TRUNC
+  eomonth:                       true   # EOMONTH(expr)  →  last-day-of-month expression
+  cast_interval_to_numeric:      true   # CAST(date-date AS REAL)  →  epoch / 86400
+  datalength:                    true   # DATALENGTH(expr)  →  OCTET_LENGTH(expr)
+  now_to_current_timestamp:      true   # NOW()  →  CURRENT_TIMESTAMP (before DATEADD conversion)
+  vendorfirm_contact_cols:       false  # DISABLED: only safe when vf alias exists; enable if needed
+
+  # ID columns for ObjectKey type-cast fix.
+  # List the integer primary-key column names in your schema that get compared
+  # to addresses.ObjectKey (which is VARCHAR).
+  objectkey_cast_id_cols:
+    - orderid
+    - orderitemid
+
+
+# ---------------------------------------------------------------------------
+# SECTION 3b — Multi-word column alias list  (PROJECT-SPECIFIC)
+#
+# Column aliases in your schema's views that contain spaces.
+# Each entry is replaced with its double-quoted lowercase form everywhere.
+#
+# To auto-detect these, run:
+#   python scripts/analyze_views.py --work-dir <workspace>
+# ---------------------------------------------------------------------------
+known_multi_word_aliases: []
+# Example:
+# known_multi_word_aliases:
+#   - "billing system id"
+#   - "client name"
+#   - "address line 1"
+
+
+# ---------------------------------------------------------------------------
+# SECTION 4 — PIVOT conversion rules  (PROJECT-SPECIFIC if PIVOT views exist)
+#
+# When a view contains the PIVOT keyword, fix_views.py auto-converts it to a
+# CTE + FILTER aggregate pattern.
+#
+# Fill in inner_tables only if your PIVOT views use different table names.
+# ---------------------------------------------------------------------------
+pivot_rules:
+  agg_function:  MAX
+  value_column:  Value
+  key_column:    FieldName
+  # Grouping columns are auto-detected from the inner SELECT list.
+  # Override here if auto-detection fails:
+  group_by_cols: []
+
+  # Qualified table names to substitute inside the PIVOT inner query.
+  # Keys = T-SQL table names as they appear in the view source.
+  # Values = fully-qualified PostgreSQL names.
+  inner_tables: {}
+  # Example (from an MSSQL form-data schema):
+  # inner_tables:
+  #   OrderItems:              dbo.orderitems
+  #   OrderItemFormDataFields: dbo.orderitemformdatafields

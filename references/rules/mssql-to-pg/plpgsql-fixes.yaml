@@ -1,0 +1,203 @@
+# plpgsql-fixes.yaml
+# ---------------------------------------------------------------------------
+# Rule-based PL/pgSQL body transformation rules.
+#
+# Applied by scripts/fix_functions.py to converted function/procedure files.
+# Rules complement the generic type and function substitutions in
+# references/rules/mssql-to-pg/function-substitutions.yaml — those apply
+# during the initial conversion pass; these apply as a post-conversion fix.
+#
+# Fields (same schema as function-substitutions.yaml):
+#   name         : Short identifier used in fix reports.
+#   description  : Human-readable explanation.
+#   pattern      : Python regex (single-quoted).
+#   replacement  : Replacement string. Backreferences: \1, \2, etc.
+#   flags        : List of re flags (default: [IGNORECASE]).
+#   enabled      : false = handled in Python code, not as a regex.
+#   note         : Optional extra context.
+# ---------------------------------------------------------------------------
+
+body_transforms:
+
+  # ── Variable assignment ───────────────────────────────────────────────────
+
+  - name:        set_variable_assign
+    description: "SET var = expr → var := expr  (single-variable assignment)"
+    # Covers the residual SET assignments not caught in the first conversion pass.
+    pattern:     '\bSET\s+(\w+)\s*='
+    replacement: '\1 :='
+    flags:       [IGNORECASE]
+
+  - name:        select_assign_single_from
+    description: "SELECT var = expr FROM table → SELECT expr INTO var FROM table"
+    # T-SQL: SELECT @x = col FROM t WHERE ...
+    # Handles single-variable case with FROM clause.
+    # Multi-variable case is handled structurally in Python (select_assign_multi pass).
+    pattern:     '\bSELECT\s+(\w+)\s*=\s*([^,\n]+?)\s+FROM\b'
+    replacement: 'SELECT \2 INTO \1 FROM'
+    flags:       [IGNORECASE]
+
+  - name:        select_assign_single_nofrom
+    description: "SELECT var = expr  (no FROM) → var := expr"
+    # T-SQL: SELECT @TotalDays = DATEDIFF(Day, @MonthStart, @MonthEnd)
+    pattern:     '\bSELECT\s+(\w+)\s*=\s*([^,\n;]+?)\s*;'
+    replacement: '\1 := \2;'
+    flags:       [IGNORECASE]
+
+  # ── Control-flow fixes ────────────────────────────────────────────────────
+
+  - name:        else_if_to_elsif
+    description: "ELSE IF → ELSIF  (PL/pgSQL does not use ELSE IF)"
+    pattern:     '\bELSE\s+IF\b'
+    replacement: 'ELSIF'
+    flags:       [IGNORECASE]
+
+  - name:        if_no_then
+    description: "IF condition\\n    action  →  IF condition THEN\\n    action"
+    # Catches single-statement IF without THEN on the same line.
+    # Already partially handled in convert_function, but may miss edge cases.
+    # Negative lookbehind ensures we don't add THEN if line already ends with it.
+    pattern:     '\bIF\s+([^\n]+?(?<!\bTHEN))\n(\s+)(?!THEN|--|\()'
+    replacement: 'IF \1 THEN\n\2'
+    flags:       [IGNORECASE]
+
+  - name:        dedupe_then
+    description: "IF ... THEN THEN  →  IF ... THEN  (remove accidental duplicate THEN)"
+    pattern:     '\bTHEN\s+THEN\b'
+    replacement: 'THEN'
+    flags:       [IGNORECASE]
+
+  - name:        while_no_loop
+    description: "WHILE condition\\n    action → WHILE condition LOOP\\n    action"
+    # Single-statement WHILE body without LOOP keyword.
+    pattern:     '\bWHILE\s+([^\n]+)\n(\s+)(?!LOOP|--)'
+    replacement: 'WHILE \1 LOOP\n\2'
+    flags:       [IGNORECASE]
+
+  - name:        dedupe_loop
+    description: "LOOP LOOP  →  LOOP  (remove accidental duplicate LOOP)"
+    pattern:     '\bLOOP\s+LOOP\b'
+    replacement: 'LOOP'
+    flags:       [IGNORECASE]
+
+  - name:        readonly_param
+    description: "READONLY / READ ONLY → (removed)  (T-SQL UDTT param keyword not valid in PG)"
+    pattern:     '\s+(?:READONLY|READ\s+ONLY)\b'
+    replacement: ''
+    flags:       [IGNORECASE]
+
+  - name:        semicolon_after_select_into
+    description: "SELECT ... INTO ... (no ;) then new statement → add ;"
+    # Targets only SELECT INTO lines that are missing their trailing semicolon.
+    # These are multi-line statements where the WHERE clause ends the SELECT.
+    # Only fires when the NEXT line starts a new PL/pgSQL statement.
+    pattern:     '(SELECT[^\n]+\bINTO\b[^\n]+\b\w+)([ \t\n]+)(\w+\s*:=|\bELSE\b|\bELSIF\b|\bEND\s+IF\b|\bEND\s+LOOP\b|\bRETURN\b)'
+    replacement: '\1;\n\3'
+    flags:       [IGNORECASE]
+
+  - name:        semicolon_before_else
+    description: "statement ELSE → statement; ELSE  (PL/pgSQL needs ; before ELSE)"
+    # Handles multiple newlines and tabs between statement and ELSE/ELSIF.
+    pattern:     '([^\s;])([ \t\n]*)(ELSE|ELSIF)\b'
+    replacement: '\1;\n\3'
+    flags:       [IGNORECASE]
+
+  - name:        semicolon_before_assignment
+    description: "closing ) then assignment  →  add ; after )"
+    pattern:     '\)([ \t\n]*)(\w+\s*:=)'
+    replacement: ');\n\2'
+    flags:       [IGNORECASE]
+
+  - name:        semicolon_before_end_if
+    description: "closing ) then END IF  →  add ;"
+    pattern:     '\)([ \t\n]*)(END\s+IF\b)'
+    replacement: ');\n\2'
+    flags:       [IGNORECASE]
+
+  - name:        semicolon_before_return
+    description: "unclosed statement before RETURN → add ;"
+    pattern:     '\)([ \t\n]*)(RETURN\b)'
+    replacement: ');\n\2'
+    flags:       [IGNORECASE]
+
+  # ── DATEPART / DATEADD in function bodies ────────────────────────────────
+
+  - name:        datepart_hour
+    description: "DATEPART(HOUR, expr) → EXTRACT(HOUR FROM expr)"
+    pattern:     '\bDATEPART\s*\(\s*(?:HOUR|HH)\s*,\s*([^)]+)\)'
+    replacement: 'EXTRACT(HOUR FROM \1)'
+    flags:       [IGNORECASE]
+
+  - name:        datepart_minute
+    description: "DATEPART(MINUTE, expr) → EXTRACT(MINUTE FROM expr)"
+    pattern:     '\bDATEPART\s*\(\s*(?:MINUTE|MI|N)\s*,\s*([^)]+)\)'
+    replacement: 'EXTRACT(MINUTE FROM \1)'
+    flags:       [IGNORECASE]
+
+  - name:        datepart_year
+    description: "DATEPART(YEAR/YY/YYYY, expr) → EXTRACT(YEAR FROM expr)"
+    pattern:     '\bDATEPART\s*\(\s*(?:YEAR|YY|YYYY)\s*,\s*([^)]+)\)'
+    replacement: 'EXTRACT(YEAR FROM \1)'
+    flags:       [IGNORECASE]
+
+  - name:        datepart_month
+    description: "DATEPART(MONTH/MM/M, expr) → EXTRACT(MONTH FROM expr)"
+    pattern:     '\bDATEPART\s*\(\s*(?:MONTH|MM|M)\s*,\s*([^)]+)\)'
+    replacement: 'EXTRACT(MONTH FROM \1)'
+    flags:       [IGNORECASE]
+
+  - name:        dateadd_hour
+    description: "DATEADD(HOUR, n, expr) → expr + n * INTERVAL '1 hour'"
+    pattern:     '\bDATEADD\s*\(\s*(?:HOUR|HH)\s*,\s*(-?\s*\d+|\w+(?:\.\w+)*)\s*,\s*([^)]+)\)'
+    replacement: '(\2 + (\1) * INTERVAL ''1 hour'')'
+    flags:       [IGNORECASE]
+
+  - name:        dateadd_minute
+    description: "DATEADD(MINUTE, n, expr) → expr + n * INTERVAL '1 minute'"
+    pattern:     '\bDATEADD\s*\(\s*(?:MINUTE|MI|N)\s*,\s*(-?\s*\d+|\w+(?:\.\w+)*)\s*,\s*([^)]+)\)'
+    replacement: '(\2 + (\1) * INTERVAL ''1 minute'')'
+    flags:       [IGNORECASE]
+
+  - name:        dateadd_day
+    description: "DATEADD(DAY, n, expr) → expr + n * INTERVAL '1 day'"
+    pattern:     '\bDATEADD\s*\(\s*(?:DAY|DD|D)\s*,\s*(-?\s*\d+|\w+(?:\.\w+)*)\s*,\s*([^)]+)\)'
+    replacement: '(\2 + (\1) * INTERVAL ''1 day'')'
+    flags:       [IGNORECASE]
+
+  - name:        dateadd_month
+    description: "DATEADD(MONTH, n, expr) → expr + n * INTERVAL '1 month'"
+    pattern:     '\bDATEADD\s*\(\s*(?:MONTH|MM|M)\s*,\s*(-?\s*\d+|\w+(?:\.\w+)*)\s*,\s*([^)]+)\)'
+    replacement: '(\2 + (\1) * INTERVAL ''1 month'')'
+    flags:       [IGNORECASE]
+
+  - name:        dateadd_year
+    description: "DATEADD(YEAR, n, expr) → expr + n * INTERVAL '1 year'"
+    pattern:     '\bDATEADD\s*\(\s*(?:YEAR|YY|YYYY)\s*,\s*(-?\s*\d+|\w+(?:\.\w+)*)\s*,\s*([^)]+)\)'
+    replacement: '(\2 + (\1) * INTERVAL ''1 year'')'
+    flags:       [IGNORECASE]
+
+  # ── String / utility function fixes ──────────────────────────────────────
+
+  - name:        ltrim_rtrim_to_btrim
+    description: "LTRIM(RTRIM(x)) → BTRIM(x)"
+    pattern:     '\bLTRIM\s*\(\s*RTRIM\s*\(([^)]+)\)\s*\)'
+    replacement: 'BTRIM(\1)'
+    flags:       [IGNORECASE]
+
+  - name:        rtrim_ltrim_to_btrim
+    description: "RTRIM(LTRIM(x)) → BTRIM(x)"
+    pattern:     '\bRTRIM\s*\(\s*LTRIM\s*\(([^)]+)\)\s*\)'
+    replacement: 'BTRIM(\1)'
+    flags:       [IGNORECASE]
+
+  - name:        return_without_semicolon
+    description: "RETURN expr  →  RETURN expr; (add trailing semicolon if missing)"
+    pattern:     '\bRETURN\s+(\S[^\n;]*[^\s;])\s*\n'
+    replacement: 'RETURN \1;\n'
+    flags:       [IGNORECASE]
+
+  # ── Schema prefix for table references inside function bodies ────────────
+  # (Applied using the schema_prefix rules from view-fixes.yaml / project config)
+  - name:        schema_prefix
+    description: "Unqualified table references in FROM/JOIN → add schema prefix"
+    enabled:     false  # handled by fix_functions.py using project view-fixes.yaml

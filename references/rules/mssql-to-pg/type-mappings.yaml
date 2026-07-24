@@ -1,0 +1,228 @@
+# type-mappings.yaml
+# ---------------------------------------------------------------------------
+# T-SQL → PostgreSQL data type substitution rules.
+#
+# Each rule is applied as a word-boundary regex substitution (IGNORECASE).
+# Rules are applied in listed order — order matters when one type name is a
+# substring of another (e.g. SMALLMONEY before MONEY, DATETIME2 before DATETIME).
+#
+# Fields:
+#   pattern      : Python regex. Single-quoted to avoid YAML escape processing.
+#                  Word-boundary (\b) is automatically prepended unless the
+#                  pattern already starts with \b, (, or [.
+#   replacement  : Replacement string. Supports \1, \2 backreferences.
+#   ewi_code     : EWI code emitted when this rule matches (default: SPG-EWI-0001).
+#   context      : 'pre_downcase' (default), 'post_downcase', or 'both'.
+#                  pre_downcase  — applied before bracket-stripping and downcase
+#                                 (used by convert_objects.py).
+#                  post_downcase — applied after bracket-strip + downcase
+#                                 (used by deploy_tables_spg.py).
+#                  both          — applied in both contexts.
+#   note         : Optional human-readable explanation.
+# ---------------------------------------------------------------------------
+
+substitutions:
+
+  # ---- Unicode / N-prefixed types ----
+  - pattern:     'NVARCHAR\s*\(MAX\)'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    note:        'NVARCHAR(MAX) has no length limit; TEXT is the PG equivalent'
+
+  - pattern:     'VARCHAR\s*\(MAX\)'
+    replacement: 'TEXT'
+    context:     pre_downcase
+
+  - pattern:     'NVARCHAR\s*\((\d+)\)'
+    replacement: 'VARCHAR(\1)'
+    context:     pre_downcase
+    note:        'Strip the N prefix; VARCHAR is identical to NVARCHAR in PG'
+
+  - pattern:     'NTEXT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+
+  - pattern:     'NCHAR\s*\((\d+)\)'
+    replacement: 'CHAR(\1)'
+    context:     pre_downcase
+
+  # ---- post_downcase equivalents (after bracket strip + downcase) ----
+  - pattern:     'nvarchar\s*\(max\)'
+    replacement: 'text'
+    context:     post_downcase
+
+  - pattern:     'varchar\s*\(max\)'
+    replacement: 'text'
+    context:     post_downcase
+
+  - pattern:     'nvarchar\s*\((\d+)\)'
+    replacement: 'varchar(\1)'
+    context:     post_downcase
+
+  - pattern:     'nchar\s*\((\d+)\)'
+    replacement: 'char(\1)'
+    context:     post_downcase
+
+  - pattern:     '\bntext\b'
+    replacement: 'text'
+    context:     post_downcase
+
+  # ---- Integer types ----
+  - pattern:     'TINYINT\b'
+    replacement: 'SMALLINT'
+    context:     pre_downcase
+    note:        'PG has no TINYINT; SMALLINT (2-byte signed) is the closest match'
+
+  - pattern:     'tinyint\b'
+    replacement: 'smallint'
+    context:     post_downcase
+
+  # ---- Date/time types ----
+  - pattern:     'DATETIME2\b'
+    replacement: 'TIMESTAMP'
+    context:     pre_downcase
+    note:        'Must appear before DATETIME and SMALLDATETIME to avoid partial match'
+
+  - pattern:     'DATETIMEOFFSET\b'
+    replacement: 'TIMESTAMPTZ'
+    context:     pre_downcase
+
+  - pattern:     'SMALLDATETIME\b'
+    replacement: 'TIMESTAMP'
+    context:     pre_downcase
+    note:        'Must appear before DATETIME\b to avoid partial match'
+
+  - pattern:     'DATETIME\b'
+    replacement: 'TIMESTAMP'
+    context:     pre_downcase
+
+  - pattern:     'datetime2\b'
+    replacement: 'timestamp'
+    context:     post_downcase
+
+  - pattern:     'datetimeoffset\b'
+    replacement: 'timestamptz'
+    context:     post_downcase
+
+  - pattern:     'smalldatetime\b'
+    replacement: 'timestamp'
+    context:     post_downcase
+    note:        'Must appear BEFORE datetime\b to avoid partial match'
+
+  - pattern:     'datetime\b'
+    replacement: 'timestamp'
+    context:     post_downcase
+
+  # ---- Currency types ----
+  - pattern:     'SMALLMONEY\b'
+    replacement: 'NUMERIC(10,4)'
+    context:     pre_downcase
+    note:        'Must appear before MONEY to avoid partial match'
+
+  - pattern:     'MONEY\b'
+    replacement: 'NUMERIC(19,4)'
+    context:     pre_downcase
+
+  - pattern:     'smallmoney\b'
+    replacement: 'numeric(10,4)'
+    context:     post_downcase
+
+  - pattern:     '\bmoney\b'
+    replacement: 'numeric(19,4)'
+    context:     post_downcase
+
+  # ---- Boolean ----
+  - pattern:     'BIT\b'
+    replacement: 'BOOLEAN'
+    context:     pre_downcase
+
+  - pattern:     '\bbit\b'
+    replacement: 'boolean'
+    context:     post_downcase
+
+  # ---- Binary types ----
+  - pattern:     'VARBINARY\s*\(MAX\)'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     'VARBINARY\s*\(\d+\)'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     'IMAGE\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     'varbinary\s*\(max\)'
+    replacement: 'bytea'
+    context:     post_downcase
+
+  - pattern:     'varbinary\s*\(\d+\)'
+    replacement: 'bytea'
+    context:     post_downcase
+
+  - pattern:     'image\b'
+    replacement: 'bytea'
+    context:     post_downcase
+
+  # ---- UUID ----
+  - pattern:     'UNIQUEIDENTIFIER\b'
+    replacement: 'UUID'
+    context:     pre_downcase
+
+  - pattern:     'uniqueidentifier\b'
+    replacement: 'uuid'
+    context:     post_downcase
+
+  # ---- XML ----
+  - pattern:     'XML\b'
+    replacement: 'XML'
+    context:     pre_downcase
+    note:        'SPG supports the XML type natively'
+
+  # ---- Deprecated / no-equivalent types ----
+  - pattern:     'ROWVERSION\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+    ewi_code:    'SPG-EWI-0001'
+    note:        'Not a real timestamp; used for optimistic concurrency in MSSQL'
+
+  - pattern:     'SQL_VARIANT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    note:        'No direct PG equivalent; TEXT is the safest fallback'
+
+  - pattern:     'HIERARCHYID\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    note:        'No direct PG equivalent'
+
+  # ---- Declare-section types (used inside stored procedure DECLARE blocks) ----
+  # These are simple lowercase forms used after bracket-stripping in procedure bodies.
+  - pattern:     'datetime\b'
+    replacement: 'TIMESTAMP'
+    context:     declare
+
+  - pattern:     'nvarchar\b'
+    replacement: 'TEXT'
+    context:     declare
+
+  - pattern:     'varchar\b'
+    replacement: 'TEXT'
+    context:     declare
+
+  - pattern:     '\bbit\b'
+    replacement: 'BOOLEAN'
+    context:     declare
+
+  - pattern:     '\bint\b'
+    replacement: 'INTEGER'
+    context:     declare
+
+  - pattern:     '\bfloat\b'
+    replacement: 'FLOAT'
+    context:     declare
+
+  - pattern:     '\bmoney\b'
+    replacement: 'NUMERIC(19,4)'
+    context:     declare

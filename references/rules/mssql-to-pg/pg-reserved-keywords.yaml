@@ -1,0 +1,119 @@
+# pg-reserved-keywords.yaml
+# ---------------------------------------------------------------------------
+# PostgreSQL reserved words and built-in type names that must be double-quoted
+# when they appear as column, table, or alias identifiers in converted DDL.
+#
+# Used by deploy_tables_spg.py to requote identifiers after downcasing.
+# Used by fix_views.py to validate multi-word alias quoting.
+#
+# Sources:
+#   https://www.postgresql.org/docs/current/sql-keywords-appendix.html
+#   Subset that commonly appears as column names in MSSQL schemas.
+# ---------------------------------------------------------------------------
+
+# Keywords that must be double-quoted when used as identifiers.
+# Extend this list if new reserved-word conflicts are encountered.
+reserved_keywords:
+  - user
+  - order
+  - date
+  - table
+  - check
+  - desc
+  - asc
+  - by
+  - select
+  - group
+  - where
+  - from
+  - into
+  - with
+  - end
+  - begin
+  - between
+  - case
+  - when
+  - then
+  - else
+  - cast
+  - in
+  - is
+  - not
+  - 'null'
+  - 'true'
+  - 'false'
+  - default
+  - primary
+  - key
+  - references
+  - unique
+  - index
+  - type
+  - value
+  - values
+  - language
+  - all
+  - any
+  - some
+  - exists
+  - like
+  - similar
+  - left
+  - right
+  - inner
+  - outer
+  - full
+  - join
+  - 'on'
+  - as
+  - distinct
+  - over
+  - having
+  - limit
+  - offset
+  - union
+  - intersect
+  - except
+  - returning
+  - trigger
+  - function
+  - procedure
+  - schema
+  - database
+  - sequence
+  - view
+  - column
+
+# PG built-in type names that can conflict with column names after downcasing.
+# These are not technically reserved but cause parse errors when used unquoted
+# as column identifiers in some contexts.
+type_names:
+  - varchar
+  - char
+  - int
+  - integer
+  - bigint
+  - smallint
+  - boolean
+  - bool
+  - text
+  - timestamp
+  - timestamptz
+  - date
+  - time
+  - timetz
+  - interval
+  - numeric
+  - decimal
+  - float
+  - float4
+  - float8
+  - real
+  - double
+  - bytea
+  - uuid
+  - json
+  - jsonb
+  - xml
+  - bit
+  - money

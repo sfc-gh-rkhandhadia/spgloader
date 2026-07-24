@@ -1,0 +1,269 @@
+# ddl-cleanup.yaml
+# ---------------------------------------------------------------------------
+# SSMS DDL export artifact removal patterns.
+#
+# SQL Server Management Studio generates CREATE TABLE scripts with many
+# SQL Server-specific clauses that are invalid in PostgreSQL and must be
+# stripped before deployment to SPG.
+#
+# Rules are applied in listed order. IMPORTANT: patterns that reference
+# bracket-notation ([col], [PRIMARY]) must run BEFORE bracket stripping
+# (which converts [x] to "x"). Patterns that work on downcased identifiers
+# must run AFTER bracket stripping.
+#
+# Fields:
+#   name          : Short identifier (used in reporting/debugging).
+#   description   : Human-readable explanation.
+#   pattern       : Python regex (single-quoted, no YAML escape needed).
+#   replacement   : Replacement string (usually empty string to delete).
+#   flags         : List of re flags: IGNORECASE, DOTALL, MULTILINE.
+#   phase         : 'pre_bracket' (before [ ] stripping) or 'post_bracket' (after).
+#                   Default: pre_bracket.
+#   note          : Optional details.
+# ---------------------------------------------------------------------------
+
+patterns:
+
+  # ── Phase: pre_bracket (must run while [bracketed] identifiers are still present) ──
+
+  - name:        filegroup_spec
+    description: "ON [PRIMARY] / ON [filegroup_name] — storage filegroup clause"
+    pattern:     '\s*\bON\s+\[[^\]]+\]'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        textimage_on
+    description: "TEXTIMAGE_ON [PRIMARY] — large-object storage filegroup clause"
+    pattern:     '\s+TEXTIMAGE_ON\s+\[[^\]]+\]'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        index_options
+    description: "WITH (PAD_INDEX=OFF, ...) — SQL Server index/table option block"
+    pattern:     '\s*WITH\s*\([^)]*(?:PAD_INDEX|STATISTICS_NORECOMPUTE|FILLFACTOR|IGNORE_DUP_KEY|ALLOW_ROW_LOCKS|ALLOW_PAGE_LOCKS|SORT_IN_TEMPDB|OPTIMIZE_FOR_SEQUENTIAL_KEY)[^)]*\)'
+    replacement: ''
+    flags:       [IGNORECASE, DOTALL]
+    phase:       pre_bracket
+
+  - name:        identity_column
+    description: "IDENTITY(seed,increment) → GENERATED ALWAYS AS IDENTITY"
+    pattern:     '\bIDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)'
+    replacement: 'GENERATED ALWAYS AS IDENTITY'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        clustered_keyword
+    description: "CLUSTERED keyword in PRIMARY KEY / UNIQUE (PG does not use it)"
+    pattern:     '\bCLUSTERED\b'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        nonclustered_keyword
+    description: "NONCLUSTERED keyword (PG does not use it)"
+    pattern:     '\bNONCLUSTERED\b'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        alter_table_default
+    description: "ALTER TABLE ... ADD CONSTRAINT ... DEFAULT ... — SSMS export artifact"
+    pattern:     '\bALTER\s+TABLE[^;]+ADD\s+CONSTRAINT[^;]+DEFAULT[^;]+;?'
+    replacement: ''
+    flags:       [IGNORECASE, DOTALL]
+    phase:       pre_bracket
+
+  - name:        alter_table_constraint
+    description: "ALTER TABLE ... ADD CONSTRAINT ... — other constraint adds (FK, CHECK, etc.)"
+    pattern:     '\bALTER\s+TABLE[^;]+ADD\s+CONSTRAINT[^;]+;?'
+    replacement: ''
+    flags:       [IGNORECASE, DOTALL]
+    phase:       pre_bracket
+
+  - name:        with_nocheck
+    description: "WITH NOCHECK — constraint option, not supported in PG"
+    pattern:     '\s+WITH\s+NOCHECK\b'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        computed_column
+    description: "[col] AS (expression) — computed/virtual column; has no PG equivalent"
+    pattern:     ',?\s*\[[^\]]+\]\s+AS\s*\([^\n]+'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+    note:        'Match to end of line to handle nested parens in expressions'
+
+  - name:        temporal_hidden_generated
+    description: "HIDDEN GENERATED keyword on temporal table columns"
+    pattern:     '\s+HIDDEN\s+GENERATED\b'
+    replacement: ' GENERATED'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        temporal_generated_always_row
+    description: "GENERATED ALWAYS AS ROW START/END — temporal row period columns"
+    pattern:     '\bGENERATED\s+ALWAYS\s+AS\s+ROW\s+(?:START|END)\b'
+    replacement: 'TIMESTAMP'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        alter_table_catch_all
+    description: "Any remaining ALTER TABLE statement — remove entirely"
+    pattern:     '\bALTER\s+TABLE\b.+'
+    replacement: ''
+    flags:       [IGNORECASE, DOTALL]
+    phase:       pre_bracket
+    note:        'Must run AFTER more-specific ALTER TABLE patterns above'
+
+  - name:        graph_node_edge_columns
+    description: "[$node_id_...], [$edge_id_...] — internal graph table columns"
+    pattern:     ',?\s*\[\$[^\]]+\]\s+[^,\n]*(,|$)'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        graph_from_obj_id
+    description: "[from_obj_id_...] — graph from-object-id column"
+    pattern:     ',?\s*\[from_obj_id_[^\]]+\]\s+[^,\n]*(,|$)'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        graph_from_id
+    description: "[from_id_...] — graph from-id column"
+    pattern:     ',?\s*\[from_id_[^\]]+\]\s+[^,\n]*(,|$)'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        graph_to_obj_id
+    description: "[to_obj_id_...] — graph to-object-id column"
+    pattern:     ',?\s*\[to_obj_id_[^\]]+\]\s+[^,\n]*(,|$)'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        graph_to_id
+    description: "[to_id_...] — graph to-id column"
+    pattern:     ',?\s*\[to_id_[^\]]+\]\s+[^,\n]*(,|$)'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        graph_graph_id
+    description: "[graph_id_...] — internal graph partition id column"
+    pattern:     ',?\s*\[graph_id_[^\]]+\]\s+[^,\n]*(,|$)'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        for_node_edge
+    description: "FOR NODE / FOR EDGE — graph table type declaration"
+    pattern:     '\bFOR\s+(?:NODE|EDGE)\b'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        system_versioning
+    description: "WITH (SYSTEM_VERSIONING=ON...) — temporal table versioning option"
+    pattern:     'WITH\s*\(SYSTEM_VERSIONING\s*=\s*ON[^)]*\)'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  - name:        period_for_system_time
+    description: "PERIOD FOR SYSTEM_TIME (...) — temporal table period definition"
+    pattern:     ',?\s*PERIOD\s+FOR\s+SYSTEM_TIME\s*\([^)]+\)'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
+  # ── Phase: post_bracket (run after [x] → "x" stripping) ──
+
+  - name:        asc_desc_in_pk
+    description: 'ASC/DESC in PRIMARY KEY column list after bracket stripping'
+    pattern:     '"(\w+)"\s+(?:ASC|DESC)\b'
+    replacement: '"\1"'
+    flags:       [IGNORECASE]
+    phase:       post_bracket
+
+  - name:        asc_desc_unquoted
+    description: 'Unquoted col_name ASC/DESC → col_name'
+    pattern:     '\b(\w+)\s+(?:ASC|DESC)\b'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+    phase:       post_bracket
+
+  - name:        trailing_comma_before_paren
+    description: 'Trailing comma before closing paren: ,(  ) → (  )'
+    pattern:     ',(\s*\))'
+    replacement: '\1'
+    flags:       []
+    phase:       post_bracket
+
+  - name:        leading_comma_after_paren
+    description: 'Leading comma after opening paren: (, → ('
+    pattern:     '\(\s*,'
+    replacement: '('
+    flags:       []
+    phase:       post_bracket
+
+  - name:        empty_column_name
+    description: 'Empty column name "" typename → (from [] in SSMS export)'
+    pattern:     ',?\s*""\s+[^,\n)]+'
+    replacement: ''
+    flags:       []
+    phase:       post_bracket
+
+  - name:        create_index
+    description: 'Multi-line CREATE [UNIQUE] [NON]CLUSTERED INDEX statements'
+    pattern:     '\bCREATE\s+(?:(?:UNIQUE|NONCLUSTERED|CLUSTERED)\s+)*INDEX\b.*?(?=\bCREATE\b|\Z)'
+    replacement: ''
+    flags:       [IGNORECASE, DOTALL]
+    phase:       post_bracket
+
+  - name:        create_trigger
+    description: 'CREATE TRIGGER statements (handled in wave_4 separately)'
+    pattern:     '\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\b.*?(?=\bCREATE\b|\Z)'
+    replacement: ''
+    flags:       [IGNORECASE, DOTALL]
+    phase:       post_bracket
+
+  - name:        alter_table_enable_trigger
+    description: 'ALTER TABLE ... ENABLE/DISABLE TRIGGER'
+    pattern:     '\bALTER\s+TABLE\b[^;]+(?:ENABLE|DISABLE)\s+TRIGGER\b[^;]*;?'
+    replacement: ''
+    flags:       [IGNORECASE, DOTALL]
+    phase:       post_bracket
+
+  - name:        set_statements
+    description: 'SET QUOTED_IDENTIFIER ON / SET ANSI_NULLS ON (SSMS export header)'
+    pattern:     '^\s*SET\s+\w[^\n]*$'
+    replacement: ''
+    flags:       [IGNORECASE, MULTILINE]
+    phase:       post_bracket
+
+  - name:        go_separator
+    description: 'GO batch separator (SSMS / sqlcmd export artifact)'
+    pattern:     '^\s*GO\s*$'
+    replacement: ''
+    flags:       [IGNORECASE, MULTILINE]
+    phase:       post_bracket
+
+  - name:        next_value_for
+    description: 'NEXT VALUE FOR schema.sequence → NEXTVAL(''schema.sequence'')'
+    pattern:     'NEXT\s+VALUE\s+FOR\s+"([^"]+)"\s*\.\s*"([^"]+)"'
+    replacement: "NEXTVAL('\"\\1\".\"\\2\"')"
+    flags:       [IGNORECASE]
+    phase:       post_bracket
+
+  - name:        create_table_if_not_exists
+    description: 'CREATE TABLE → CREATE TABLE IF NOT EXISTS'
+    pattern:     '\bCREATE\s+TABLE\b'
+    replacement: 'CREATE TABLE IF NOT EXISTS'
+    flags:       [IGNORECASE]
+    phase:       post_bracket

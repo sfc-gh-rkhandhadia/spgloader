@@ -1,0 +1,268 @@
+# deprecated-patterns.yaml
+# ---------------------------------------------------------------------------
+# Catalog of deprecated / legacy technology patterns detectable in source DDL.
+# Used by scripts/analyze_deprecated.py (Phase 3.6) to identify objects that
+# require a user decision before conversion begins.
+#
+# Each pattern describes a technology that is either:
+#   - Deprecated in the source DB (e.g., ASP.NET Membership Provider)
+#   - Has no direct PostgreSQL equivalent (e.g., UDTTs, Linked Servers)
+#   - Blocked by SPG restrictions (CLR assemblies)
+#
+# The analyzer groups matching objects by pattern, presents the user with
+# a description + recommendation, and records the chosen disposition
+# (skip | migrate | modernize) in {work_dir}/deprecated_review.json.
+# Phase 4 (convert_objects.py) skips objects whose FQN is in skip_objects.
+#
+# Fields per pattern:
+#   id              : Short unique key, used as key in deprecated_review.json.
+#   name            : Human-readable technology name shown to the user.
+#   source_db       : List of source databases this applies to:
+#                     [mssql, mysql, oracle, all]
+#   severity        : advisory | warning | critical
+#     advisory  — informational, skip is usually correct
+#     warning   — requires thought; could cause runtime issues if migrated as-is
+#     critical  — will block deployment unless resolved
+#   description     : What this technology is and why it is flagged.
+#   recommendation  : What we recommend doing instead.
+#   detect          : Rules to identify matching objects (any rule is sufficient):
+#     object_name_patterns : Regex patterns matched against object names (case-insensitive).
+#     schema_patterns      : Regex patterns matched against schema names (case-insensitive).
+#     ddl_patterns         : Regex patterns matched against the DDL text (case-insensitive).
+#     object_types         : List of object types to match (table, view, function,
+#                            procedure, trigger, udtt, schema).
+#   options         : List of choices presented to the user.
+#     id     : skip | migrate | modernize  (or any custom verb)
+#     label  : Short label shown in the question.
+#     detail : One-sentence explanation of what happens if this option is chosen.
+# ---------------------------------------------------------------------------
+
+patterns:
+
+  # ── ASP.NET Membership Provider ──────────────────────────────────────────
+  - id:          aspnet_membership
+    name:        "ASP.NET Membership Provider"
+    source_db:   [mssql]
+    severity:    advisory
+    description: >
+      The ASP.NET Membership Provider (aspnet_Membership, aspnet_Users,
+      aspnet_Roles, aspnet_Profile tables + stored procedures) is a
+      Microsoft-provided user authentication framework deprecated in 2013
+      and officially replaced by ASP.NET Core Identity.
+      The stored procedures are a closed-loop system designed exclusively
+      for SQL Server and add no business value when migrating to PostgreSQL.
+    recommendation: >
+      Skip the stored procedures and schema objects.
+      The underlying data tables (aspnet_membership, aspnet_users, etc.)
+      should still be migrated — they hold your actual user data.
+      If the application is being modernized, adopt ASP.NET Core Identity
+      with the Npgsql provider (no stored procedures required).
+      If the application must remain unchanged, migrate the procedures
+      using the existing rule-based pipeline, then test thoroughly.
+    detect:
+      object_name_patterns:
+        - '^aspnet_'
+        - '^vw_aspnet_'
+      schema_patterns:
+        - '^aspnet_'
+    options:
+      - id:     skip
+        label:  "Skip — exclude aspnet_ stored procedures and schemas"
+        detail: >
+          aspnet_* stored procedures and schema objects will be excluded from
+          conversion. The data tables (aspnet_users, aspnet_membership, etc.)
+          are migrated separately as part of the normal table wave.
+      - id:     migrate
+        label:  "Migrate stored procedures as-is"
+        detail: >
+          All aspnet_* stored procedures will be converted to PL/pgSQL using
+          the existing rule-based pipeline. Results require testing with the
+          application.
+
+  # ── SQL Server Agent Jobs ─────────────────────────────────────────────────
+  - id:          sql_server_agent
+    name:        "SQL Server Agent / Scheduler Objects"
+    source_db:   [mssql]
+    severity:    warning
+    description: >
+      SQL Server Agent jobs and related objects (xp_cmdshell, msdb references,
+      sp_add_job, sp_add_jobstep) are SQL Server-specific scheduler constructs.
+      PostgreSQL uses pg_cron or external schedulers (Airflow, dbt, etc.) instead.
+      Migrating these objects directly to PG will not produce working schedulers.
+    recommendation: >
+      Skip the agent objects. Extract the business logic inside each job step
+      and reimplement it as a pg_cron job or an external pipeline task.
+      pg_cron is available in Snowflake Postgres.
+    detect:
+      ddl_patterns:
+        - '\bmsdb\b'
+        - '\bxp_cmdshell\b'
+        - '\bsp_add_job\b'
+        - '\bsp_add_jobstep\b'
+        - '\bSYSJOBS\b'
+        - '\bSQL\s+Server\s+Agent\b'
+    options:
+      - id:     skip
+        label:  "Skip — exclude SQL Agent objects"
+        detail: >
+          Agent job objects excluded from migration. Reschedule the business
+          logic using pg_cron or an external orchestrator.
+      - id:     migrate
+        label:  "Migrate and flag for manual review"
+        detail: >
+          Objects converted with a -- FIX-REQUIRED: SQL_AGENT annotation.
+          Requires manual rewrite of the scheduler integration.
+
+  # ── Linked Servers ────────────────────────────────────────────────────────
+  - id:          linked_servers
+    name:        "Linked Server References (four-part names)"
+    source_db:   [mssql]
+    severity:    warning
+    description: >
+      Objects that reference remote databases via four-part names
+      (server.database.schema.table) use SQL Server Linked Servers,
+      which have no equivalent in standard PostgreSQL.
+      These references will cause deployment errors or silent wrong results
+      after migration if left unmodified.
+    recommendation: >
+      Replace with postgres_fdw (available in SPG) to query remote PostgreSQL
+      databases, or with Snowflake connectors for cross-system access.
+      Alternatively, rewrite to pass the data as parameters.
+    detect:
+      ddl_patterns:
+        - '\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]+\b'
+    options:
+      - id:     skip
+        label:  "Skip — exclude objects with linked server references"
+        detail: >
+          Objects with four-part remote references excluded from migration.
+          Mark them for manual reimplementation using postgres_fdw.
+      - id:     migrate
+        label:  "Migrate and annotate for manual review"
+        detail: >
+          Objects converted with a -- FIX-REQUIRED: LINKED_SERVER annotation
+          on each affected line. The remote reference must be resolved manually.
+
+  # ── CLR Objects ────────────────────────────────────────────────────────────
+  - id:          clr_objects
+    name:        "CLR (Common Language Runtime) Assemblies and Functions"
+    source_db:   [mssql]
+    severity:    critical
+    description: >
+      CLR assemblies and CLR-backed functions execute .NET code inside
+      SQL Server. PostgreSQL has no CLR support, and Snowflake Postgres
+      blocks all non-PL/pgSQL procedural languages (SPG-BLOCK-001).
+      These objects cannot be deployed to SPG without a full rewrite.
+    recommendation: >
+      Rewrite the CLR logic as PL/pgSQL functions, or move it to the
+      application layer where .NET code can run normally.
+      Simple string/math CLR functions can often be reimplemented in
+      a few lines of PL/pgSQL.
+    detect:
+      ddl_patterns:
+        - '\bEXTERNAL\s+NAME\b'
+        - '\bCREATE\s+ASSEMBLY\b'
+        - '\bWITH\s+PERMISSION_SET\b'
+        - '\bCLR\b'
+    options:
+      - id:     skip
+        label:  "Skip — exclude CLR objects entirely"
+        detail: >
+          CLR assemblies and functions removed from migration scope.
+          Functions that depend on them will need manual stubs.
+      - id:     migrate
+        label:  "Attempt PL/pgSQL conversion (best-effort)"
+        detail: >
+          Objects flagged with SPG-BLOCK-001 and converted using existing rules.
+          Will not deploy without manual rewrite of the .NET logic.
+
+  # ── User-Defined Table Types (UDTTs / TVPs) ───────────────────────────────
+  - id:          udtt
+    name:        "User-Defined Table Types (UDTTs / Table-Valued Parameters)"
+    source_db:   [mssql]
+    severity:    advisory
+    description: >
+      SQL Server User-Defined Table Types are named table schemas used as
+      stored procedure parameters (Table-Valued Parameters / TVPs).
+      PostgreSQL has no direct UDTT equivalent. Each must be replaced with
+      an array, JSONB parameter, or a composite type depending on its structure.
+    recommendation: >
+      See references/udtt-migration-guide.md for replacement patterns.
+      Single-column INT/TEXT UDTTs → INTEGER[] or TEXT[] arrays.
+      Multi-column structured UDTTs → CREATE TYPE name AS (col1 TYPE, ...).
+      Key-value UDTTs → JSONB parameter.
+    detect:
+      object_types:
+        - udtt
+      ddl_patterns:
+        - '\bCREATE\s+TYPE\b[^;]+\bAS\s+TABLE\b'
+    options:
+      - id:     skip
+        label:  "Skip — do not create PG types for UDTTs"
+        detail: >
+          UDTTs excluded. Procedures that use them will need their parameter
+          types changed manually to arrays, composite types, or JSONB.
+      - id:     migrate
+        label:  "Create composite types in PostgreSQL"
+        detail: >
+          Each UDTT converted to CREATE TYPE name AS (...) or replaced with
+          an array parameter per the udtt-migration-guide.md decision table.
+
+  # ── Extended Stored Procedures (xp_*) ────────────────────────────────────
+  - id:          extended_procs
+    name:        "SQL Server Extended Stored Procedures (xp_*)"
+    source_db:   [mssql]
+    severity:    warning
+    description: >
+      Extended stored procedures (xp_cmdshell, xp_sendmail, xp_logevent, etc.)
+      execute code outside the SQL Server process — typically OS commands, email,
+      or Windows API calls. None of these exist in PostgreSQL.
+    recommendation: >
+      Move OS/email/notification logic to the application layer or an external
+      service. pg_notify can replace simple event notifications.
+    detect:
+      object_name_patterns:
+        - '^xp_'
+      ddl_patterns:
+        - '\bxp_\w+\s*\('
+    options:
+      - id:     skip
+        label:  "Skip — exclude xp_* extended procedure calls"
+        detail: >
+          Objects using xp_* procedures excluded from migration.
+          Replace with application-layer equivalents.
+      - id:     migrate
+        label:  "Migrate and flag for manual review"
+        detail: >
+          Objects annotated with -- FIX-REQUIRED: EXTENDED_PROC for each xp_ call.
+
+  # ── Temporal / System-Versioned Tables ────────────────────────────────────
+  - id:          temporal_tables
+    name:        "SQL Server Temporal (System-Versioned) Tables"
+    source_db:   [mssql]
+    severity:    advisory
+    description: >
+      Temporal tables (WITH SYSTEM_VERSIONING = ON) automatically track
+      row history. PostgreSQL does not have built-in system versioning;
+      audit history requires a trigger-based or extension-based solution
+      (e.g., temporal_tables extension, pgaudit, or a custom audit trigger).
+    recommendation: >
+      Migrate the current-state table only (drop the history table).
+      If history tracking is required, add an audit trigger in PostgreSQL
+      or evaluate the temporal_tables extension.
+    detect:
+      ddl_patterns:
+        - '\bSYSTEM_VERSIONING\s*=\s*ON\b'
+        - '\bFOR\s+SYSTEM_TIME\b'
+        - '\bPERIOD\s+FOR\s+SYSTEM_TIME\b'
+    options:
+      - id:     skip
+        label:  "Skip system versioning — migrate current-state table only"
+        detail: >
+          SYSTEM_VERSIONING and history tables stripped. Current data migrated.
+          Add a custom audit trigger if history is required.
+      - id:     migrate
+        label:  "Migrate and annotate for manual history solution"
+        detail: >
+          Table migrated with -- FIX-REQUIRED: TEMPORAL_TABLE annotation.
+          Requires manual implementation of an audit/history strategy.

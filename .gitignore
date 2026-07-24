@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments / uv
+.venv/
+venv/
+.uv/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Migration workspace output (never commit customer data or run artifacts)
+.spgloader/
+*_conn.env
+source_conn.env
+target_conn.env
+ddl_objects.json
+dep_graph.json
+ddl_output/
+conversion/
+deployment/
+validation/
+deprecated/
+assessment/
+pasted_ddl.sql
+
+# Credentials and secrets
+*.pgpass
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log

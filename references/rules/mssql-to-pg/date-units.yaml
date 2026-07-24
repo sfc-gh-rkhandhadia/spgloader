@@ -1,0 +1,110 @@
+# date-units.yaml
+# ---------------------------------------------------------------------------
+# T-SQL date/time unit abbreviation maps for use by fix_views.py.
+#
+# SQL Server supports many unit abbreviations in DATEPART, DATEADD, DATEDIFF.
+# These maps translate every valid abbreviation to the PostgreSQL canonical form.
+#
+# Sections:
+#   datepart_units   : T-SQL unit → PG EXTRACT keyword
+#   dateadd_units    : T-SQL unit → PG INTERVAL unit word
+#   datediff_divisors: T-SQL unit → expression to divide epoch seconds to get that unit
+# ---------------------------------------------------------------------------
+
+# EXTRACT(unit FROM expr) — used when converting DATEPART(unit, expr)
+datepart_units:
+  YEAR:       YEAR
+  YY:         YEAR
+  YYYY:       YEAR
+  QUARTER:    QUARTER
+  QQ:         QUARTER
+  Q:          QUARTER
+  MONTH:      MONTH
+  MM:         MONTH
+  M:          MONTH
+  WEEK:       WEEK
+  WK:         WEEK
+  WW:         WEEK
+  ISO_WEEK:   ISOYEAR
+  DAYOFYEAR:  DOY
+  DY:         DOY
+  Y:          DOY
+  DAY:        DAY
+  DD:         DAY
+  D:          DAY
+  WEEKDAY:    DOW
+  DW:         DOW
+  HOUR:       HOUR
+  HH:         HOUR
+  MINUTE:     MINUTE
+  MI:         MINUTE
+  N:          MINUTE
+  SECOND:     SECOND
+  SS:         SECOND
+  S:          SECOND
+  MILLISECOND: MILLISECONDS
+  MS:         MILLISECONDS
+  MICROSECOND: MICROSECONDS
+  MCS:        MICROSECONDS
+  NANOSECOND: NANOSECONDS
+  NS:         NANOSECONDS
+  TZOFFSET:   TIMEZONE_HOUR
+  TZO:        TIMEZONE_HOUR
+
+# INTERVAL '1 unit' — used when converting DATEADD(unit, n, expr)
+dateadd_units:
+  YEAR:       year
+  YY:         year
+  YYYY:       year
+  QUARTER:    quarter
+  QQ:         quarter
+  Q:          quarter
+  MONTH:      month
+  MM:         month
+  M:          month
+  WEEK:       week
+  WK:         week
+  WW:         week
+  DAY:        day
+  DD:         day
+  D:          day
+  HOUR:       hour
+  HH:         hour
+  MINUTE:     minute
+  MI:         minute
+  N:          minute
+  SECOND:     second
+  SS:         second
+  S:          second
+  MILLISECOND: milliseconds
+  MS:         milliseconds
+
+# Divisors to convert epoch seconds to the target unit.
+# Used when converting DATEDIFF(unit, start, end) via EXTRACT(EPOCH FROM (end-start)).
+# An empty string means no division (result already in seconds).
+datediff_divisors:
+  YEAR:       '/ (365.25 * 86400)'
+  YY:         '/ (365.25 * 86400)'
+  YYYY:       '/ (365.25 * 86400)'
+  QUARTER:    '/ (91.3125 * 86400)'
+  QQ:         '/ (91.3125 * 86400)'
+  Q:          '/ (91.3125 * 86400)'
+  MONTH:      '/ (30.4375 * 86400)'
+  MM:         '/ (30.4375 * 86400)'
+  M:          '/ (30.4375 * 86400)'
+  WEEK:       '/ (7 * 86400)'
+  WK:         '/ (7 * 86400)'
+  WW:         '/ (7 * 86400)'
+  DAY:        '/ 86400'
+  DD:         '/ 86400'
+  D:          '/ 86400'
+  HOUR:       '/ 3600'
+  HH:         '/ 3600'
+  MINUTE:     '/ 60'
+  MI:         '/ 60'
+  N:          '/ 60'
+  SECOND:     ''
+  SS:         ''
+  S:          ''
+  MILLISECOND: '* 1000'
+  MS:         '* 1000'

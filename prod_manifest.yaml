@@ -1,0 +1,96 @@
+# prod_manifest.yaml — spgloader skill catalog metadata
+# Used by the CoCo skill catalog for customer-facing publishing.
+# Update version, stage, and certified_sources fields before each release.
+
+name: spgloader
+version: "1.0.0"
+stage: "preview"          # draft | preview | ga
+author: "Snowflake SE"
+description: >
+  Migrate MSSQL, MySQL, or Oracle databases to Snowflake Postgres (SPG).
+  Includes a mandatory SPG Compatibility Assessment guardrail that scans DDL
+  against Snowflake Postgres-specific rules before conversion begins.
+  Handles Docker-based source setup, SPG provisioning, DDL extraction,
+  rule-based object conversion with EWI annotations, deployment, and validation.
+
+# Minimum CoCo version required
+min_coco_version: "1.0.0"
+
+# Source databases validated for production use
+certified_sources:
+  - name: mssql
+    versions: ["2019", "2022"]
+    objects: [tables, views, functions, stored_procedures, triggers]
+    data_migration: pgloader
+  - name: mysql
+    versions: ["8.0"]
+    objects: [tables]
+    data_migration: pgloader
+    note: "Views/functions experimental — review output before deploying to production"
+  - name: oracle
+    versions: ["19c", "21c", "23c"]
+    objects: [views, functions, stored_procedures, triggers]
+    data_migration: llm
+    note: "Experimental — all objects require post-conversion review"
+
+# Required skill dependencies
+dependencies:
+  skills:
+    - name: snowflake-postgres
+      purpose: "SPG instance provisioning and pg_connect.py for password management"
+      required_for: ["target-setup", "source env new"]
+      optional: true      # only needed when provisioning a new SPG instance
+
+# Tools and binaries required at runtime
+runtime_requirements:
+  - name: docker
+    purpose: "Source database container (Docker path only)"
+    optional: true
+  - name: pgloader
+    purpose: "Table + data migration for MSSQL/MySQL"
+    install: "brew install pgloader  # or: sudo apt install pgloader"
+    optional: false
+  - name: psql
+    purpose: "SPG connectivity test and manual DDL execution"
+    install: "brew install libpq  # or: sudo apt install postgresql-client"
+    optional: false
+  - name: uv
+    purpose: "Python dependency management for skill scripts"
+    install: "curl -Ls https://astral.sh/uv/install.sh | sh"
+    optional: false
+
+# Catalog display metadata
+catalog:
+  categories:
+    - "Data Migration"
+    - "Database"
+    - "Snowflake Postgres"
+  tags:
+    - mssql
+    - mysql
+    - oracle
+    - spg
+    - pgloader
+    - migration
+  icon: "🐘"
+  docs_url: "https://docs.snowflake.com/en/user-guide/snowflake-postgres"
+
+# Known limitations
+limitations:
+  - "MSSQL CLR objects cannot be migrated — must be rewritten as PL/pgSQL"
+  - "MSSQL Linked Server references cannot be migrated — remove or replace with Snowflake external functions"
+  - "MSSQL User-Defined Table Types (UDTTs) have no direct SPG equivalent — recommend array or JSONB"
+  - "Oracle pgloader support is not yet available — all Oracle objects use LLM conversion"
+  - "MySQL stored procedures and functions are best-effort — review before production deployment"
+
+# Changelog
+changelog:
+  - version: "1.0.0"
+    date: "2025-07-01"
+    notes:
+      - "Initial release with MSSQL, MySQL, Oracle support"
+      - "Rule-based conversion pipeline (YAML-driven)"
+      - "Phase 3.5 SPG Compatibility Assessment guardrail"
+      - "Phase 3.6 Deprecated Object Review decision gate"
+      - "PIVOT → CTE conversion for T-SQL views"
+      - "PL/pgSQL function body correction (SELECT INTO, END IF/LOOP)"

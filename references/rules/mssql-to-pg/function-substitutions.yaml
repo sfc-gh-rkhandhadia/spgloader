@@ -1,0 +1,185 @@
+# function-substitutions.yaml
+# ---------------------------------------------------------------------------
+# T-SQL built-in function → PostgreSQL equivalent rules.
+#
+# Applied as regex substitutions (IGNORECASE unless override_flags is set).
+# Applied in listed order — put more-specific patterns before more-general ones.
+#
+# Fields:
+#   pattern       : Python regex (single-quoted).
+#   replacement   : Replacement string. May include backreferences.
+#   ewi_code      : EWI code to emit (default: SPG-EWI-0002).
+#   flags         : List of re flags to apply: [IGNORECASE, DOTALL, MULTILINE].
+#                   Default: [IGNORECASE].
+#   context       : 'pre_downcase', 'post_downcase', or 'both' (default: both).
+#   note          : Optional explanation.
+# ---------------------------------------------------------------------------
+
+substitutions:
+
+  # ---- NULL handling ----
+  - pattern:     '\bISNULL\s*\('
+    replacement: 'COALESCE('
+    note:        'ISNULL(a,b) and COALESCE(a,b) are equivalent for two arguments'
+
+  - pattern:     '\bNULLIF\s*\('
+    replacement: 'NULLIF('
+    note:        'NULLIF is identical in T-SQL and PG — no change needed but flag it'
+    ewi_code:    ~          # null = no code emitted
+
+  # ---- Date/time functions ----
+  - pattern:     '\bGETDATE\s*\(\s*\)'
+    replacement: 'NOW()'
+
+  - pattern:     '\bGETUTCDATE\s*\(\s*\)'
+    replacement: "NOW() AT TIME ZONE 'UTC'"
+
+  - pattern:     '\bSYSUTCDATETIME\s*\(\s*\)'
+    replacement: 'NOW()'
+
+  - pattern:     '\bSYSDATETIME\s*\(\s*\)'
+    replacement: 'NOW()'
+
+  - pattern:     '\bCURRENT_TIMESTAMP\b'
+    replacement: 'CURRENT_TIMESTAMP'
+    ewi_code:    ~          # already valid in PG
+
+  # ---- Identity / UUID ----
+  - pattern:     '\bNEWSEQUENTIALID\s*\(\s*\)'
+    replacement: 'gen_random_uuid()'
+    note:        'No sequential UUID in PG without uuid-ossp or pg_uuidv7'
+
+  - pattern:     '\bNEWID\s*\(\s*\)'
+    replacement: 'gen_random_uuid()'
+
+  # ---- String functions ----
+  - pattern:     '\bLEN\s*\('
+    replacement: 'LENGTH('
+    note:        'LEN and LENGTH behave identically for non-binary strings'
+
+  - pattern:     '\bCHARINDEX\s*\(([^,]+),\s*([^)]+)\)'
+    replacement: 'POSITION(\1 IN \2)'
+    note:        '2-arg form only; 3-arg form (start position) needs manual review'
+
+  - pattern:     '\bPATINDEX\s*\('
+    replacement: 'POSITION('
+    note:        'PATINDEX uses LIKE wildcards; POSITION uses substrings — semantics differ'
+
+  - pattern:     '\bSTUFF\s*\(([^,]+),\s*([^,]+),\s*([^,]+),\s*([^)]+)\)'
+    replacement: 'OVERLAY(\1 PLACING \4 FROM \2 FOR \3)'
+
+  - pattern:     '\bSTRING_SPLIT\s*\('
+    replacement: 'STRING_TO_ARRAY('
+    note:        'STRING_TO_ARRAY(str, delim) returns an array; unnest() to get rows'
+
+  - pattern:     '\bCOUNT_BIG\s*\('
+    replacement: 'COUNT('
+    note:        'COUNT_BIG returns BIGINT; PG COUNT already returns BIGINT'
+
+  # ---- Type conversion ----
+  - pattern:     '\bCONVERT\s*\(\s*\w+\s*,\s*([^)]+)\)'
+    replacement: 'CAST(\1 AS TEXT)'
+    note:        'Lossy: drops the target type. Complex CONVERT(type, expr, style) needs manual review'
+
+  - pattern:     '\bCAST\s*\(([^A]+) AS NVARCHAR(?:\([^)]+\))?\)'
+    replacement: 'CAST(\1 AS TEXT)'
+
+  - pattern:     '\bTRY_CAST\s*\('
+    replacement: 'CAST('
+    note:        'TRY_CAST silences errors; PG CAST raises. Consider error handling if needed.'
+
+  - pattern:     '\bTRY_CONVERT\s*\('
+    replacement: 'CAST('
+
+  # ---- Math extraction from date ----
+  - pattern:     '\bYEAR\s*\('
+    replacement: 'EXTRACT(YEAR FROM '
+    note:        'Missing closing paren is intentional — keeps inner expression; outer ) closes EXTRACT'
+
+  - pattern:     '\bMONTH\s*\('
+    replacement: 'EXTRACT(MONTH FROM '
+
+  - pattern:     '\bDAY\s*\('
+    replacement: 'EXTRACT(DAY FROM '
+
+  # ---- Aggregate functions ----
+  - pattern:     '\bAPPROX_PERCENTILE_CONT\b'
+    replacement: 'PERCENTILE_CONT'
+
+  - pattern:     '\bAPPROX_PERCENTILE_DISC\b'
+    replacement: 'PERCENTILE_DISC'
+
+  - pattern:     '\bAPPROX_COUNT_DISTINCT\s*\('
+    replacement: 'COUNT(DISTINCT '
+
+  # ---- Metadata / session functions ----
+  - pattern:     '\bUSER_NAME\s*\(\s*\)'
+    replacement: 'current_user'
+
+  - pattern:     '\bSUSER_SNAME\s*\(\s*\)'
+    replacement: 'CURRENT_USER'
+
+  - pattern:     '\bIS_MEMBER\s*\([^)]+\)'
+    replacement: '1'
+    note:        'IS_MEMBER stub — always returns 1. Review for actual role checking needs.'
+
+  - pattern:     '\bSCOPE_IDENTITY\s*\(\s*\)'
+    replacement: 'lastval()'
+    note:        'lastval() returns the last value from any sequence in this session'
+
+  - pattern:     '\b@@ROWCOUNT\b'
+    replacement: 'GET DIAGNOSTICS _row_count = ROW_COUNT'
+    note:        'Only valid inside PL/pgSQL DECLARE/BEGIN block; manual review required'
+
+  - pattern:     '\b@@IDENTITY\b'
+    replacement: 'lastval()'
+
+  - pattern:     '\b@@SERVERNAME\b'
+    replacement: "current_setting('server_version')"
+
+  # ---- NOLOCK hints ----
+  - pattern:     '\s*\bWITH\s*\(\s*NOLOCK\s*\)'
+    replacement: ''
+    ewi_code:    'SPG-EWI-0011'
+    note:        'NOLOCK has no PG equivalent; removed. PG uses MVCC for isolation.'
+
+  - pattern:     '\s*\(\s*NOLOCK\s*\)'
+    replacement: ''
+    ewi_code:    'SPG-EWI-0011'
+    note:        'Old-style NOLOCK hint without WITH keyword'
+
+  # ---- Date/time named unit functions ----
+  - pattern:     '\bDATENAME\s*\(\s*WEEK\s*,'
+    replacement: 'EXTRACT(WEEK FROM '
+
+  - pattern:     '\bDATEPART\s*\(\s*WEEK\s*,'
+    replacement: 'EXTRACT(WEEK FROM '
+
+  # ---- String concatenation ----
+  - pattern:     '(\w+)\s*\+\s*'''
+    replacement: '\1 || '''
+    note:        "T-SQL + for string concat; only converts expr + 'literal' form"
+
+  - pattern:     '''\s*\+\s*(\w+)'
+    replacement: '''|| \1'
+    note:        "'literal' + expr form"
+
+  - pattern:     '''\s*\+\s*'''
+    replacement: ''' || '''
+    note:        Adjacent string literals
+
+  # ---- Boolean comparisons (named-column heuristic) ----
+  - pattern:     '\b(isactive|enabled|archived|deleted|isdefault|active)\s*=\s*1\b'
+    replacement: '\1 = TRUE'
+    ewi_code:    ~
+    note:        'Conservative: only converts known boolean column names. Extend boolean_columns list as needed.'
+
+  - pattern:     '\b(isactive|enabled|archived|deleted|isdefault|active)\s*=\s*0\b'
+    replacement: '\1 = FALSE'
+    ewi_code:    ~
+
+  # ---- Pagination ----
+  - pattern:     '\bSELECT\s+TOP\s+(\d+)\s+'
+    replacement: 'SELECT '
+    ewi_code:    'SPG-EWI-0006'
+    note:        'TOP N removed from SELECT; LIMIT N must be appended at end of query'
