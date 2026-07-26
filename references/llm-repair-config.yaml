@@ -26,7 +26,7 @@ max_tokens: 4096
 
 # Snowflake connection name from ~/.snowflake/connections.toml.
 # Leave empty to use the default connection.
-snowflake_connection: ""
+snowflake_connection: "sfsenorthamerica-rkhandhadia-aws1-pat"
 
 # Warehouse to use for Cortex calls.
 # Leave empty to use the connection's default warehouse.

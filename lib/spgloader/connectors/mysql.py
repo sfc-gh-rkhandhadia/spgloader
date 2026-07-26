@@ -109,14 +109,18 @@ class MySQLConnector(Connector):
 # ---------------------------------------------------------------------------
 
 def _mysql_tables(cur, db: str) -> list[dict]:
-    """Return TableDef dicts from INFORMATION_SCHEMA.COLUMNS."""
+    """Return TableDef dicts from INFORMATION_SCHEMA.COLUMNS (BASE TABLEs only)."""
     cur.execute("""
-        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE,
-               CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
-               IS_NULLABLE, COLUMN_DEFAULT, EXTRA
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = %s
-        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE,
+               c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE,
+               c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        JOIN INFORMATION_SCHEMA.TABLES t
+          ON t.TABLE_SCHEMA = c.TABLE_SCHEMA
+         AND t.TABLE_NAME   = c.TABLE_NAME
+         AND t.TABLE_TYPE   = 'BASE TABLE'
+        WHERE c.TABLE_SCHEMA = %s
+        ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
     """, (db,))
     rows = cur.fetchall()
 
