@@ -74,7 +74,7 @@ uv run --project ~/sko-coco/spgloader \
   --spg-service <instance_name>
 ```
 
-#### Step 4: Write target connection env
+#### Step 5: Write target connection env
 
 Capture the active Snowflake connection name:
 ```bash
@@ -122,7 +122,47 @@ Do NOT run `--reset` after `--create` — the password is already saved.
 After creation, ask the user to confirm the instance name that was just created
 (it appears in the CREATE output).
 
-#### Step 3: Write target connection env
+#### Step 3: Network policy — REQUIRED before connectivity test
+
+SPG instances block all inbound Postgres connections until a network policy with
+`POSTGRES_INGRESS` mode is attached.  Do NOT skip this step.
+
+Ask the user (via `ask_user_question`):
+
+```
+To allow psql connections, a POSTGRES_INGRESS network policy must be attached.
+
+Do you have an existing Snowflake network policy for Postgres access, or should I create one?
+```
+
+**Path A — existing policy (user provides a name):**
+
+Run exactly:
+```sql
+ALTER POSTGRES INSTANCE <instance_name>
+  SET NETWORK_POLICY = '<existing_policy_name>';
+```
+
+No network rule or `CREATE NETWORK POLICY` needed.  This is the correct and
+simplest path when the user already has a working policy.
+
+**Path B — create a new policy:**
+
+Load `<SNOWFLAKE_POSTGRES_SKILL_DIR>/connect/SKILL.md` and execute the
+**Setup Network Policy** workflow in full.  That workflow generates the correct
+three-statement sequence:
+
+```sql
+CREATE NETWORK RULE ...  TYPE = IPV4  MODE = POSTGRES_INGRESS ...;
+CREATE NETWORK POLICY ... ALLOWED_NETWORK_RULE_LIST = (...);
+ALTER POSTGRES INSTANCE <instance_name> SET NETWORK_POLICY = '<policy_name>';
+```
+
+⚠️ **NEVER generate network policy SQL inline** — always use the connect
+sub-skill.  Inline SQL has historically used the wrong `MODE = INGRESS` instead
+of `MODE = POSTGRES_INGRESS`, which silently creates an unusable policy.
+
+#### Step 4: Write target connection env
 
 Capture the active Snowflake connection name:
 ```bash
@@ -154,6 +194,8 @@ teardown so the right account and role are used to drop the SPG instance.
 | Error | Likely cause | Action |
 |---|---|---|
 | `psql: could not connect to server` | Wrong host or SPG not running | Re-run `DESCRIBE POSTGRES INSTANCE` to get current host |
+| `psql: connection refused` after instance READY | No network policy attached | Run Step 3 (network policy) — do NOT generate SQL inline; use connect/SKILL.md |
+| Network rule creation fails with "invalid mode" | Wrong MODE value | Only `POSTGRES_INGRESS` is valid for SPG; standard `INGRESS` is rejected |
 | `FATAL: password authentication failed` | Wrong password saved | Re-run `pg_connect.py --reset` to update credentials |
 | `CREATE POSTGRES INSTANCE` fails | Quota exceeded or unsupported region | Check Snowflake account limits; try a different region |
 | `~/.pgpass` not picked up by psql | File permissions not 0600 | Run `chmod 0600 ~/.pgpass` |
