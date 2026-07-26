@@ -88,11 +88,22 @@ Store as `CONTAINER_PLATFORM` — docker | spcs | none
 
 ## Shared Workspace
 
-Initialize the workspace before starting phases:
+**Prompt the user for their preferred workspace directory** before initializing.
+Use `ask_user_question` with `type: text` and a sensible default:
+
+```
+header:       "Workspace directory"
+question:     "Where should spgloader store migration workspace files
+               (DDL extracts, converted SQL, logs, reports)?"
+defaultValue: "~/.spgloader/<timestamp>"
+```
+
+If the user accepts the default or provides a path, initialize:
 
 ```bash
-SPGLOADER_WORK_DIR="${SPGLOADER_WORK_DIR:-$HOME/.spgloader/$(date +%Y%m%d_%H%M%S)}"
-mkdir -p "$SPGLOADER_WORK_DIR/.spgloader"
+# Use user-provided path, or generate a timestamped default
+SPGLOADER_WORK_DIR="${USER_WORK_DIR:-$HOME/.spgloader/$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "$SPGLOADER_WORK_DIR"
 echo "Working directory: $SPGLOADER_WORK_DIR"
 ```
 
