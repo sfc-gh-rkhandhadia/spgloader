@@ -1,0 +1,38 @@
+# .pre-commit-config.yaml
+# ---------------------------------------------------------------------------
+# Pre-commit hooks that run automatically on every `git commit`.
+# Install once with:  pre-commit install
+# Run manually:       pre-commit run --all-files
+# ---------------------------------------------------------------------------
+
+repos:
+
+  # ── Credential / sensitive data guardrail (custom) ─────────────────────
+  # Blocks commits that contain hardcoded passwords, tokens, hostnames,
+  # client names, Snowflake account locators, or other sensitive literals.
+  - repo: local
+    hooks:
+      - id: check-secrets
+        name: "Credential & sensitive data scan"
+        entry: python scripts/check_secrets.py
+        language: python
+        types: [text]
+        exclude: '^CONTRIBUTING\.md$|^SECURITY\.md$'
+        pass_filenames: true
+        always_run: false
+        description: >
+          Blocks commits containing hardcoded credentials, server endpoints,
+          client names, Snowflake account locators, or personal information.
+          Use environment variables or config files instead.
+
+  # ── Standard hygiene hooks ─────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace      # Remove trailing spaces
+      - id: end-of-file-fixer        # Ensure files end with a newline
+      - id: check-yaml               # Validate YAML files
+      - id: check-toml               # Validate TOML files
+      - id: check-merge-conflict     # Block unresolved merge conflicts
+      - id: check-added-large-files  # Warn on files > 500KB
+        args: ['--maxkb=500']

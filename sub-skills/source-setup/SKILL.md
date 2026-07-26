@@ -8,7 +8,7 @@ parent_skill: spgloader
 
 ## When to Load
 
-From `spgloader/SKILL.md` Phase 1.  
+From `spgloader/SKILL.md` Phase 1.
 `SOURCE_TYPE`, `SOURCE_VERSION`, `SOURCE_ENV`, and (if applicable) `CONTAINER_PLATFORM` are already set.
 
 ---

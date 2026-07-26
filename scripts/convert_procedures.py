@@ -441,7 +441,7 @@ def _add_missing_semicolons(body: str) -> str:
     result = []
     for i, line in enumerate(lines):
         stripped = line.rstrip()
-        # Check if this line ends a statement (WHERE/FROM clause or value clause) 
+        # Check if this line ends a statement (WHERE/FROM clause or value clause)
         # and the next non-empty line starts a new statement
         if stripped and not stripped.rstrip().endswith(';') and not stripped.rstrip().endswith(','):
             next_non_empty = ''
@@ -451,8 +451,8 @@ def _add_missing_semicolons(body: str) -> str:
                     break
             # Add semicolon if this line ends a logical statement
             stmt_end_words = ('WHERE', 'FROM', 'SET', 'INTO', 'ON', 'ELSE', 'LIMIT')
-            stmt_start_words = ('SELECT ', 'INSERT ', 'UPDATE ', 'DELETE ', 'IF ', 'IF(', 
-                               'ELSIF ', 'ELSE', 'END IF', 'END;', 'RETURN', 'CALL ', 
+            stmt_start_words = ('SELECT ', 'INSERT ', 'UPDATE ', 'DELETE ', 'IF ', 'IF(',
+                               'ELSIF ', 'ELSE', 'END IF', 'END;', 'RETURN', 'CALL ',
                                'RAISE ', 'PERFORM ', '--', '/*', 'CREATE ')
             in_stmt_end = any(re.search(rf'\b{w}\b', stripped, re.IGNORECASE) for w in stmt_end_words)
             next_is_stmt = any(next_non_empty.startswith(w.upper()) for w in stmt_start_words)
