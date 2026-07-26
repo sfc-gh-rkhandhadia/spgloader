@@ -17,7 +17,7 @@ Usage:
     uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \\
         --source-type  mssql \\
         --ddl-file     /path/to/schema.sql \\
-        --database     tipalti_migration \\
+        --database     migration_db \\
         --password-env MSSQL_SA_PASSWORD \\
         --work-dir     $SPGLOADER_WORK_DIR
 """

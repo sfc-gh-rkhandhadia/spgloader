@@ -55,10 +55,10 @@ Use `ask_user_question` to confirm they have logged in before proceeding.
 ### Step 3: Collect credentials for the source container
 
 Ask the user for an admin password. Use `ask_user_question` with `type: text`:
-- MSSQL:   "SA password for SQL Server container" — default `"Migration2024!"`
-- MySQL:   "root password for MySQL container"    — default `"migration2024"`
-- MariaDB: "root password for MariaDB container"  — default `"migration2024"`
-- Oracle:  "ORACLE_PWD for Oracle Free container" — default `"Migration2024!"`
+- MSSQL:   "SA password for SQL Server container"
+- MySQL:   "root password for MySQL container"
+- MariaDB: "root password for MariaDB container"
+- Oracle:  "ORACLE_PWD for Oracle Free container"
 
 Store the password in an environment variable. Never echo it back.
 

@@ -44,7 +44,7 @@ _DEFAULT_LEGACY_RULES = [
         "label": "aspnet",
         "description": (
             "ASP.NET Membership/Role/Profile provider procedures "
-            "(Microsoft legacy framework — not Tipalti business logic)"
+            "(Microsoft legacy framework — typically not required in new deployments)"
         ),
         "patterns": [r"^aspnet_"],
     },

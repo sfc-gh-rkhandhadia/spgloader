@@ -207,17 +207,18 @@ pattern_fixes:
 
 ---
 
-## Migration results (Tipalti MSSQL 2022 → SPG STANDARD_XL)
+## Example migration scale
 
-| Object | Deployed | Source | Notes |
-|---|---|---|---|
-| Tables | 1,493/1,493 | 1,493 | 100%; 205 indexes, 925 IDENTITY columns |
-| Functions | 20/20 | 20 | 100% |
-| Views | 62/74 | 74 | 12 blocked by cross-DB references |
-| Procedures | 97/105 | 105 | 8 require manual rewrite (nested transactions) |
-| **Validation** | **6/6 PASS** | | Table count, columns, PKs, IDENTITY, FKs, indexes |
+spgloader has been tested against schemas with:
+- **1,400+ tables** with complex constraints (IDENTITY, composite PKs, temporal tables)
+- **70+ views** including OUTER APPLY, PIVOT, and TOP N PERCENT patterns
+- **20 scalar functions** with inter-function dependencies
+- **100+ stored procedures** including ASP.NET Membership, CDC, and business logic
 
-**LLM repair loop** fixed 46 stored procedures (including complex aspnet membership/roles/personalization procedures) using Snowflake Cortex `llama3.3-70b`.
+Typical deployment times at 8 workers: ~3 minutes for 1,400 tables.
+LLM repair loop (Cortex `llama3.3-70b`) resolves ~80% of initially-failing procedures.
+
+**Validation checks:** table count, column counts, primary keys, IDENTITY columns, foreign keys, indexes.
 
 ---
 

@@ -152,8 +152,9 @@ def _call_cortex(sf_conn, prompt: str, model: str,
 def _open_snowflake_conn(connection_name: str, warehouse: str):
     """Open a Snowflake connection using connections.toml."""
     import snowflake.connector
-    # Try PAT-based connection first (no MFA prompt)
-    pat_conn_name = "sfsenorthamerica-rkhandhadia-aws1-pat"
+    # Try PAT-based connection first (no MFA prompt), then fall back
+    # Add your PAT connection name from ~/.snowflake/connections.toml if needed
+    pat_conn_name = ""  # set to your PAT connection name, e.g. "my-account-pat"
     for name in [connection_name, pat_conn_name, "default", ""]:
         if name is None:
             continue
