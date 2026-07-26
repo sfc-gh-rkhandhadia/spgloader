@@ -76,10 +76,22 @@ uv run --project ~/sko-coco/spgloader \
 
 #### Step 4: Write target connection env
 
+Capture the active Snowflake connection name:
+```bash
+SF_CONN=$(snow connection list --format json | python3 -c \
+  "import json,sys; conns=json.load(sys.stdin); \
+   print(next((c['name'] for c in conns if c.get('is_default')), 'default'))")
+```
+
 Write `$SPGLOADER_WORK_DIR/target_conn.env`:
 ```
 TARGET_SPG_SERVICE=<instance_name>
+TARGET_SNOWFLAKE_CONNECTION=<sf_conn_name>
+TARGET_SNOWFLAKE_ROLE=ACCOUNTADMIN
 ```
+
+The `TARGET_SNOWFLAKE_CONNECTION` and `TARGET_SNOWFLAKE_ROLE` are required for
+teardown so the right account and role are used to drop the SPG instance.
 
 ---
 
@@ -112,10 +124,22 @@ After creation, ask the user to confirm the instance name that was just created
 
 #### Step 3: Write target connection env
 
+Capture the active Snowflake connection name:
+```bash
+SF_CONN=$(snow connection list --format json | python3 -c \
+  "import json,sys; conns=json.load(sys.stdin); \
+   print(next((c['name'] for c in conns if c.get('is_default')), 'default'))")
+```
+
 Write `$SPGLOADER_WORK_DIR/target_conn.env`:
 ```
 TARGET_SPG_SERVICE=<instance_name>
+TARGET_SNOWFLAKE_CONNECTION=<sf_conn_name>
+TARGET_SNOWFLAKE_ROLE=ACCOUNTADMIN
 ```
+
+The `TARGET_SNOWFLAKE_CONNECTION` and `TARGET_SNOWFLAKE_ROLE` are required for
+teardown so the right account and role are used to drop the SPG instance.
 
 ---
 

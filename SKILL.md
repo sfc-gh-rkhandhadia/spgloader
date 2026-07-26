@@ -253,3 +253,73 @@ Validation:   N tables match / N FKs match / N indexes match
 
 Working dir:  <SPGLOADER_WORK_DIR>
 ```
+
+---
+
+## Teardown
+
+When a user asks to tear down the environment (drop SPG + remove Docker source container):
+
+### Step 1 — Read workspace connection info
+
+```bash
+source "$SPGLOADER_WORK_DIR/target_conn.env"
+# Provides: TARGET_SPG_SERVICE, TARGET_SNOWFLAKE_CONNECTION, TARGET_SNOWFLAKE_ROLE
+source "$SPGLOADER_WORK_DIR/source_conn.env"
+# Provides: SOURCE_CONTAINER (if Docker was used)
+```
+
+### Step 2 — Drop the Docker source container (if applicable)
+
+```bash
+if [ -n "$SOURCE_CONTAINER" ]; then
+  docker rm -f "$SOURCE_CONTAINER"
+fi
+```
+
+### Step 3 — Drop the SPG instance
+
+**CRITICAL: Use the Snowflake account and role stored at provisioning time.**
+The Cortex Code session may be connected to a different account than the one
+that owns the SPG instance.  Always use `snow sql -c $TARGET_SNOWFLAKE_CONNECTION`
+with `USE ROLE $TARGET_SNOWFLAKE_ROLE` — never assume the current session's
+account is correct.
+
+```bash
+snow sql \
+  -c "$TARGET_SNOWFLAKE_CONNECTION" \
+  -q "USE ROLE ${TARGET_SNOWFLAKE_ROLE:-ACCOUNTADMIN};
+      DROP POSTGRES INSTANCE IF EXISTS ${TARGET_SPG_SERVICE};"
+```
+
+Verify it is gone:
+
+```bash
+snow sql \
+  -c "$TARGET_SNOWFLAKE_CONNECTION" \
+  -q "USE ROLE ${TARGET_SNOWFLAKE_ROLE:-ACCOUNTADMIN}; SHOW POSTGRES INSTANCES;"
+```
+
+The instance name must no longer appear in the output.
+
+### Step 4 — Drop the network rule (if one was created)
+
+```bash
+snow sql \
+  -c "$TARGET_SNOWFLAKE_CONNECTION" \
+  -q "USE ROLE SECURITYADMIN;
+      DROP NETWORK RULE IF EXISTS <NETWORK_RULE_NAME>;"
+```
+
+If the network rule name is not known, skip this step — it is not billable.
+
+### Why the account matters
+
+SPG instances are provisioned in a specific Snowflake account.  The Cortex
+Code IDE session runs against whatever account is configured in `connections.toml`
+as default, which may be a **different** account (e.g. a data analytics account
+vs the account that holds the SPG).
+
+`TARGET_SNOWFLAKE_CONNECTION` is written to `target_conn.env` by target-setup
+at provisioning time so teardown always targets the right account, regardless of
+which account the current IDE session uses.
