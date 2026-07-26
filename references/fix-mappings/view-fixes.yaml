@@ -1,81 +1,53 @@
 # view-fixes.yaml
 # ---------------------------------------------------------------------------
-# Mapping document for view conversion corrections.
-# Consumed by scripts/fix_views.py — edit this file to add/remove fixes,
-# not the script itself.  One document can cover any MSSQL migration project
-# that uses the same source schema conventions.
+# Generic mapping document for view conversion corrections.
+# Consumed by scripts/fix_views.py — edit this file to customise fixes
+# for a specific migration project.
+#
+# ALL project-specific names (table names, column aliases, cross-db prefixes)
+# are intentionally absent.  The schema prefix section uses auto-detection
+# so no table name list is required.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # SECTION 1 — Schema prefix
-# Tables listed here are referenced without a schema qualifier in the source
-# views.  fix_views.py adds the dbo. prefix to each in FROM and JOIN clauses.
+# Controls how fix_views.py adds the target schema qualifier to unqualified
+# table references in FROM and JOIN clauses.
+#
+# auto_detect: true  — derive unqualified references automatically from
+#                      ddl_objects.json (the workspace's extracted catalog).
+#                      No table name list is needed; works for any project.
+#
+# extra_tables: []   — optional explicit table names to always prefix, on top
+#                      of auto-detection (e.g. views or synonyms not in the DDL).
+#
+# Note: schema name is NOT set here.  It is derived from ddl_objects.json by
+# deploy_views.py and fix_views.py at runtime.
 # ---------------------------------------------------------------------------
 schema_prefix:
-  schema: dbo
-  tables:
-    - addresses
-    - applicationsettings
-    - aspnet_membership
-    - aspnet_users
-    - clients
-    - clientaddresses
-    - clientbranches
-    - clientproducts
-    - contacts
-    - contacttypes
-    - correctiontypes
-    - externaldocuments
-    - feeadjustmentreasons
-    - lkp_cbsa
-    - milestones
-    - ordercontacts
-    - orderitemanalytics
-    - orderitemcomments
-    - orderitemcorrections
-    - orderitemcorrectionissues
-    - orderitemfeeadjustments
-    - orderitemformdatafields
-    - orderitemmilestones
-    - orderitempayments
-    - orderitems
-    - orders
-    - ownershiptypes
-    - postalcodes
-    - products
-    - producttypes
-    - qualitycontrolsubmissions
-    - reportsubmittals_homevision
-    - servicerepusers
-    - users
-    - vendorclasses
-    - vendorlicenses
-    - vendorfirms
-    - vendors
-    - vendorstatus
-    - zzipcounty
-    # Views referenced by other views without schema prefix
-    - dv_vw_gate
-    - vw_ordervolume
+  auto_detect: true
+  extra_tables: []
 
 # ---------------------------------------------------------------------------
 # SECTION 2 — Cross-database remaps
-# SQL Server allows three-part references (db.schema.table).
+# SQL Server allows three-part db.schema.table references.
 # PostgreSQL does not support cross-database references.
-# Each entry strips the foreign-db prefix and maps to the local schema.
+# Add project-specific entries here to strip a foreign-db prefix and map it
+# to the local schema.
+#
+# Example:
+#   - from_prefix: "external_db.dbo."
+#     to_prefix:   "local_schema."
 # ---------------------------------------------------------------------------
-cross_db_remaps:
-  - from_prefix: "dame.dbo."
-    to_prefix:   "dbo."
+cross_db_remaps: []
 
 # ---------------------------------------------------------------------------
 # SECTION 3 — Pattern-based fixes
-# Applied to every view file before schema-prefix and PIVOT processing.
+# Applied to every view file.  All flags below are source-agnostic and safe
+# to enable for any T-SQL → PostgreSQL migration.
 # ---------------------------------------------------------------------------
 pattern_fixes:
   # T-SQL:   col AS 'Alias'  →  col AS lowercased_alias (plain identifier)
-  # Using lowercase avoids PG case-sensitivity issues when outer queries
-  # reference the alias without quotes (they get lowercased by PG anyway).
   single_quoted_alias: true
 
   # T-SQL:   alias = expression  (column alias on left of =, at line start)
@@ -85,19 +57,17 @@ pattern_fixes:
   # T-SQL alias = expr embedded in the middle of a SELECT line (after comma)
   embedded_column_equals_alias: true
 
-  # Multi-word unquoted column aliases: 'billing system id' → "billing system id"
-  # Uses the explicit list below (known_multi_word_aliases) for safe exact-string replacement.
-  multi_word_alias: true
+  # Multi-word unquoted column aliases — uses known_multi_word_aliases list below.
+  # Leave false unless you add entries to known_multi_word_aliases.
+  multi_word_alias: false
 
-  # T-SQL TOP N was converted to LIMIT but the number was lost → bare LIMIT;
-  # Remove the bare LIMIT keyword so the query is valid (returns all rows).
+  # T-SQL TOP N was converted to LIMIT but the number was lost → bare LIMIT
   bare_limit: true
 
   # T-SQL string concatenation: expr + 'str'  →  expr || 'str'
   tsql_string_concat: true
 
-  # Mangled date-cast from earlier conversion pass:
-  #   CAST(convert(date,NOW( AS TEXT)))  →  CURRENT_DATE
+  # CAST(convert(date,NOW( AS TEXT))) → CURRENT_DATE
   now_date_cast: true
 
   # DatePart(yyyy/year/month/..., expr) → EXTRACT(unit FROM expr)
@@ -107,38 +77,26 @@ pattern_fixes:
   dateadd: true
 
   # CONVERT(VarChar(N), expr) → CAST(expr AS VARCHAR(N))
-  # The basic CONVERT pattern missed types with parentheses like VarChar(50)
   convert_typed: true
 
   # CAST(expr,NNN AS TEXT) → CAST(expr AS DATE)
-  # SQL Server CONVERT(datetime, expr, 101) was converted to CAST(expr,101 AS TEXT)
   cast_format_code: true
 
   # CAST(DATEDIFF(unit, a, b AS TEXT)) → numeric epoch expression
-  # Earlier CONVERT→CAST transformation placed AS TEXT inside the DATEDIFF call
   datediff_in_cast: true
 
-  # ObjectKey = integer_id → ObjectKey = CAST(integer_id AS TEXT)
-  # addresses.objectkey is VARCHAR; OrderID/ItemID are INTEGER
-  objectkey_cast: true
-
-  # ID columns compared to ObjectKey (VARCHAR) — project-specific list
-  objectkey_cast_id_cols:
-    - orderid
-    - orderitemid
-    - clientid
-    - vendorid
-    - vendorfirmid
+  # objectkey_cast: disabled by default; enable and list id_cols only if the
+  # project has a VARCHAR ObjectKey column compared to integer IDs.
+  objectkey_cast: false
+  objectkey_cast_id_cols: []
 
   # NOW() - integer → NOW() - INTERVAL 'N days'
-  # PG does not allow subtracting integers from timestamps directly
   now_minus_int: true
 
   # CURRENT_TIMESTAMP - integer → CURRENT_TIMESTAMP - INTERVAL 'N days'
   current_timestamp_minus_int: true
 
-  # DATEADD(unit, DATEDIFF(unit, 0, expr) [+/- N], 0) → DATE_TRUNC + optional offset
-  # Handles all variants including DATEDIFF offset (e.g. -1, -13)
+  # DATEADD(unit, DATEDIFF(unit, 0, expr) [+/- N], 0) → DATE_TRUNC + offset
   datetrunc_idiom: true
 
   # EOMONTH(expr) → end-of-month date expression
@@ -148,75 +106,39 @@ pattern_fixes:
   cast_interval_to_numeric: true
 
   # DATALENGTH(expr) → OCTET_LENGTH(expr)
-  # SQL Server DATALENGTH counts bytes; PostgreSQL equivalent is OCTET_LENGTH
   datalength: true
 
-  # Replace NOW() with CURRENT_TIMESTAMP so DATEADD regex can handle it
-  # (avoids the inner-paren issue when NOW() is the DATEADD expression argument)
+  # Replace NOW() with CURRENT_TIMESTAMP for DATEADD regex compatibility
   now_to_current_timestamp: true
-
-  # v.ContactFirstName / v.ContactLastName → vf.ContactFirstName / vf.ContactLastName
-  # DISABLED: only safe when the view already aliases VendorFirms as vf.
-  # Enable per-view in view_specific_fixes instead.
-  vendorfirm_contact_cols: false
 
 # ---------------------------------------------------------------------------
 # SECTION 3b — Explicit multi-word column alias list
-# Each alias is replaced with its double-quoted lowercase form.
-# Used when multi_word_alias is true in pattern_fixes.
+# Only needed when multi_word_alias is true.
+# Add project-specific multi-word aliases that appear in your views.
 # ---------------------------------------------------------------------------
-known_multi_word_aliases:
-  - "billing system id"
-  - "client name"
-  - "client branch name"
-  - "contact type"
-  - "first name"
-  - "last name"
-  - "primary phone no"
-  - "secondary phone no"
-  - "primary email address"
-  - "secondary email address"
-  - "address line 1"
-  - "address line 2"
-  - "vendor id"
-  - "firm id"
-  - "contact name"
-  - "vendor firm name"
-  - "vendor manager"
-  - "office phone"
-  - "appraisal firm"
+known_multi_word_aliases: []
 
 # ---------------------------------------------------------------------------
 # SECTION 4 — PIVOT conversion
 # When a view contains the PIVOT keyword, fix_views.py converts it to a
 # PostgreSQL CTE + FILTER aggregate pattern.
 #
-# All views in this project share the same inner-query structure:
-#   SELECT OI.OrderID, OI.OrderItemID, OIFD.FormID, OIFD.Value, OIFD.FieldName
-#   FROM OrderItems OI
-#   LEFT OUTER JOIN OrderItemFormDataFields OIFD ON ...
-#
-# The PIVOT is always:  PIVOT (MAX(Value) FOR FieldName IN (col1, col2, ...))
+# agg_function and value_column / key_column are required.
+# group_by_cols and inner_tables are auto-detected from the inner SELECT —
+# leave them empty unless auto-detection fails for your project.
 # ---------------------------------------------------------------------------
 pivot_rules:
-  # Aggregate function used in the PIVOT clause
+  # Aggregate function used in the PIVOT clause (e.g. MAX, SUM, COUNT)
   agg_function: MAX
 
-  # Column whose values become the pivot output rows  (the "value" in PIVOT)
-  value_column: Value
-
   # Column whose distinct values become output columns (the "key" in PIVOT)
-  key_column: FieldName
+  key_column: ""
 
-  # Grouping columns: every inner-SELECT column that is NOT value_column
-  # and NOT key_column.  Listed here for documentation; fix_views.py
-  # auto-detects them by parsing the inner SELECT list.
-  group_by_cols:
-    - OrderID
-    - OrderItemID
-    - FormID
+  # Column whose values are aggregated (the "value" in PIVOT)
+  value_column: ""
 
-  # Qualified table names for the inner query (after dbo. prefix fix)
-  inner_tables:
-    OrderItems:             dbo.orderitems
-    OrderItemFormDataFields: dbo.orderitemformdatafields
+  # Override grouping columns (empty = auto-detect from inner SELECT)
+  group_by_cols: []
+
+  # Override inner query table names (empty = auto-detect)
+  inner_tables: {}

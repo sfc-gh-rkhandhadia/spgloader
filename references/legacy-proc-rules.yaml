@@ -1,0 +1,73 @@
+# legacy-proc-rules.yaml
+# ---------------------------------------------------------------------------
+# Rules for classifying stored procedures as "legacy" during migration.
+# Consumed by scripts/deploy_procedures.py — edit this file to customise
+# which procedure groups are flagged for user confirmation.
+#
+# Each rule has:
+#   label       : short identifier shown in the deployment prompt
+#   description : human-readable explanation shown to the user
+#   patterns    : list of Python regex patterns matched against the
+#                 unqualified (schema-stripped) procedure name (case-insensitive)
+#
+# When deploy_procedures.py finds procedures matching any rule's patterns,
+# it groups them and asks the user whether to deploy that group.
+# Use --include-legacy to skip prompts and deploy all, or --exclude-legacy
+# to skip all legacy groups.
+# ---------------------------------------------------------------------------
+
+rules:
+
+  # ── ASP.NET Membership / Role / Profile provider ────────────────────────
+  # These are standard Microsoft boilerplate procedures for the ASP.NET
+  # Membership provider framework.  They are typically not used by custom
+  # application logic and may not be needed in the target environment.
+  - label: aspnet
+    description: >
+      ASP.NET Membership/Role/Profile provider procedures
+      (Microsoft legacy framework — typically not required in new deployments)
+    patterns:
+      - '^aspnet_'
+
+  # ── Fivetran CDC / replication procedures ───────────────────────────────
+  # These procedures wrap SQL Server Change Data Capture (CDC) and
+  # replication APIs that are specific to SQL Server and Fivetran's
+  # on-premise connector.  They have no equivalent in PostgreSQL.
+  - label: sp_fivetran
+    description: >
+      Fivetran CDC/replication procedures that call SQL Server-specific CDC
+      APIs (sys.sp_cdc_*, sp_repldone, etc.) — not portable to PostgreSQL
+    patterns:
+      - '^sp_fivetran_'
+
+  # ── SQL Server replication system procedures ────────────────────────────
+  # Standalone SQL Server replication system calls that are meaningless
+  # outside SQL Server.
+  - label: sp_replication
+    description: >
+      SQL Server replication system procedures (sp_repldone, sp_replflush,
+      sp_repltrans) — these are SQL Server internal APIs with no PG equivalent
+    patterns:
+      - '^sp_repldone$'
+      - '^sp_replflush$'
+      - '^sp_repltrans$'
+
+  # ── Index maintenance procedures ────────────────────────────────────────
+  # Procedures that run DBCC / ALTER INDEX operations via dynamic SQL.
+  # In PostgreSQL the equivalent is REINDEX; these procedures would need
+  # to be completely rewritten if needed.
+  - label: index_maintenance
+    description: >
+      Index maintenance procedures (REBUILD/REORGANIZE) using SQL Server
+      dynamic SQL — need manual rewrite for PostgreSQL REINDEX equivalents
+    patterns:
+      - '^rebuildindexes$'
+      - '^reorgindexes$'
+
+  # Add your own project-specific legacy groups below.
+  # Example:
+  # - label: old_etl
+  #   description: Legacy ETL procedures replaced by the new pipeline
+  #   patterns:
+  #     - '^etl_v1_'
+  #     - '^legacy_'

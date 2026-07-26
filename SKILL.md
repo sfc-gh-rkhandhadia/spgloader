@@ -1,21 +1,31 @@
 ---
 name: spgloader
-description: "Migrate MSSQL, MySQL, or Oracle databases to Snowflake Postgres (SPG).
+description: "Migrate MSSQL, MySQL, MariaDB, or Oracle databases to Snowflake Postgres (SPG).
   Includes a mandatory SPG Compatibility Assessment guardrail that scans DDL
   against Snowflake Postgres-specific rules before conversion begins.
-  Handles source environment setup (existing or Docker), SPG provisioning,
-  DDL extraction, SPG compatibility assessment, pgloader-based data migration,
-  LLM-based object conversion with EWI annotations, deployment, and validation.
+  Handles source environment setup (existing, Docker, or SPCS), SPG provisioning,
+  catalog-based schema extraction, SPG compatibility assessment,
+  catalog-driven parallel table deployment, LLM-based object conversion with EWI
+  annotations, deployment, and validation.
   Triggers: migrate to snowflake postgres, spgloader, mssql to spg,
-  mysql to spg, oracle to spg, database migration to postgres,
-  pgloader migration, source ddl to snowflake postgres, convert mssql mysql oracle to postgres."
+  mysql to spg, mariadb to spg, oracle to spg, database migration to postgres,
+  pgloader migration, source ddl to snowflake postgres, convert mssql mysql mariadb oracle to postgres."
 ---
 
 # spgloader — Multi-Source to Snowflake Postgres Migration
 
 ## Overview
 
-spgloader migrates MSSQL, MySQL, or Oracle databases to Snowflake Postgres (SPG).
+spgloader migrates **MSSQL, MySQL, MariaDB, or Oracle** databases to Snowflake Postgres (SPG).
+
+For **tables and schemas** the skill uses a **catalog-based extractor** — reading `sys.*`,
+`INFORMATION_SCHEMA.*`, or `ALL_*` views directly from the live source database.
+This gives accurate type mapping, IDENTITY/AUTO_INCREMENT detection, foreign keys, indexes,
+and sequences without fragile DDL text parsing.
+
+For **views, procedures, functions, and triggers** the skill extracts the raw source SQL and
+applies a rule-based + LLM conversion pipeline.
+
 A **mandatory SPG Compatibility Assessment** (Phase 3.5) blocks migration on hard incompatibilities.
 See `references/migration-overview.md` for conversion paths, source support matrix, and Phase 3.6 detail.
 
@@ -27,16 +37,54 @@ See `references/migration-overview.md` for conversion paths, source support matr
 
 Ask the user with a single `ask_user_question` call (4 questions):
 
-1. **Source DB type** (options): MSSQL | MySQL | Oracle
-2. **Source DB version** (text): default per type: MSSQL → `2022`, MySQL → `8.0`, Oracle → `23c`
-3. **Source environment** (options): "Use existing environment" | "Deploy in Docker"
+1. **Source DB type** (options): MSSQL | MySQL | MariaDB | Oracle
+2. **Source DB version** (text): default per type: MSSQL → `2022`, MySQL → `8.0`, MariaDB → `10.11`, Oracle → `23c`
+3. **Source input** (options): "Connect to live source database" | "Provide DDL file" | "Paste DDL directly"
 4. **Target SPG** (options): "Use existing SPG instance" | "Provision new SPG"
 
 Store answers as:
-- `SOURCE_TYPE` — mssql | mysql | oracle
+- `SOURCE_TYPE` — mssql | mysql | mariadb | oracle
 - `SOURCE_VERSION` — version string
-- `SOURCE_ENV` — existing | docker
+- `SOURCE_INPUT` — live | file | paste
 - `TARGET_SPG` — existing | new
+
+### Phase 0B — Source environment (if SOURCE_INPUT = live)
+
+Ask one more question:
+- **Source environment** (options): "Use existing environment" | "Deploy in Docker"
+
+Store as `SOURCE_ENV` — existing | docker
+
+### Phase 0C — Container platform choice (if SOURCE_INPUT = file or paste)
+
+When the source is a DDL file (not a live connection), we need to load it into a running
+database to enable catalog-based extraction (FK, indexes, IDENTITY columns, etc.).
+
+Ask the user:
+
+```
+A DDL file provides schema structure only. For the most accurate migration
+(foreign keys, indexes, IDENTITY columns), we can load it into a source
+database container and extract directly from the catalog.
+
+Which container platform is available?
+  Docker  — deploy a local container on this machine (recommended)
+  SPCS    — deploy on Snowpark Container Services (Snowflake-hosted)
+  Neither — use Python text-based conversion (known gaps: FKs and indexes
+            will not be migrated; IDENTITY detection via regex only)
+```
+
+Store as `CONTAINER_PLATFORM` — docker | spcs | none
+
+**If CONTAINER_PLATFORM = docker or spcs:**
+- Set `SOURCE_ENV = docker` or `SOURCE_ENV = spcs`
+- Phase 1 will deploy the source DB container and load the DDL file
+- Phase 3 will extract from the live catalog
+
+**If CONTAINER_PLATFORM = none:**
+- Set `SOURCE_ENV = none` (text-based fallback)
+- Phase 3 will use the DDL file directly with regex text conversion
+- Annotate the output with EWI-WARN-NO-CATALOG warnings
 
 ## Shared Workspace
 
@@ -57,14 +105,14 @@ Execute phases in order. Load each sub-skill, execute its full workflow, then co
 
 | Phase | Sub-skill | Description |
 |-------|-----------|-------------|
-| 1 | `sub-skills/source-setup/SKILL.md` | Connect or deploy source DB |
+| 1 | `sub-skills/source-setup/SKILL.md` | Connect or deploy source DB (Docker or SPCS) |
 | 2 | `sub-skills/target-setup/SKILL.md` | Connect or provision SPG |
-| 3 | `sub-skills/ddl-extract/SKILL.md` | Extract DDL + build dep graph |
+| 3 | `sub-skills/ddl-extract/SKILL.md` | Extract schema (catalog or file) + build dep graph |
 | **3.5** | **`sub-skills/assess/SKILL.md`** | **SPG Compatibility Assessment (GUARDRAIL)** |
 | **3.6** | **`scripts/analyze_deprecated.py`** | **Deprecated Object Review (DECISION GATE)** |
-| 4 | `sub-skills/convert/SKILL.md` | Convert DDL (pgloader + LLM, EWI-annotated) |
-| 5 | `sub-skills/deploy/SKILL.md` | Deploy to SPG in dep order |
-| 6 | `sub-skills/validate/SKILL.md` | Row counts + spot checks |
+| 4 | `sub-skills/convert/SKILL.md` | Convert non-table objects (LLM, EWI-annotated) |
+| 5 | `sub-skills/deploy/SKILL.md` | Deploy to SPG (catalog-based parallel for tables; DDL for rest) |
+| 6 | `sub-skills/validate/SKILL.md` | Row counts + schema spot checks |
 
 **Phase 3.5 is mandatory and cannot be skipped.** If it returns BLOCKED, the migration
 halts until the user resolves all BLOCK findings. Phase 4 always checks
@@ -137,8 +185,24 @@ Phase 6: Validate                ← pending / in_progress / completed
 |--------|-----|-------|
 | BLOCK findings in assessment | Migration incompatible with SPG | 3.5 |
 | Docker Oracle image pull | Requires `docker login container-registry.oracle.com` | 1 |
+| SPCS compute pool creation | Billable resource | 1 |
 | SPG CREATE | Billable resource | 2 |
 | Deploy DDL to SPG | Destructive on target | 5 |
+
+## EWI-WARN-NO-CATALOG (text-based fallback)
+
+When `CONTAINER_PLATFORM = none`, the schema is extracted from DDL text using regex
+conversions. The following gaps apply and are annotated in the output:
+
+```
+[EWI-WARN-NO-CATALOG] Schema extracted from DDL text. Catalog unavailable.
+  Known gaps in this migration:
+  - Foreign keys: NOT migrated (cannot be reliably parsed from DDL text)
+  - Secondary indexes: NOT migrated (not present in DDL text exports)
+  - IDENTITY detection: regex-based only (may miss edge cases)
+  Recommendation: load the DDL file into a Docker or SPCS container
+  and re-run to get full structural fidelity.
+```
 
 ## Global Safety Rules
 
@@ -158,19 +222,23 @@ Migration Complete
 =================
 Source:       <SOURCE_TYPE> <SOURCE_VERSION> @ <host>:<port>/<database>
 Target:       SPG instance <name>
+Extraction:   <catalog | text-based (no-catalog)>
 
 SPG Assessment:   PASSED (<N> warnings acknowledged)
 Extension prereqs installed: <list or none>
 
 Objects migrated:
-  Tables:              N  (via pgloader)
-  Views:               N  (via LLM, wave 2)
-  Functions:           N  (via LLM, wave 3)
-  Stored procedures:   N  (via LLM, wave 4)
-  Triggers:            N  (via LLM, wave 4)
+  Schemas:             N
+  Tables:              N  (catalog-based, <M> workers)
+  Foreign keys:        N  (or: NOT migrated — no catalog)
+  Indexes:             N  (or: NOT migrated — no catalog)
+  Views:               N  (LLM/rule conversion, wave 2)
+  Functions:           N  (LLM/rule conversion, wave 3)
+  Stored procedures:   N  (LLM/rule conversion, wave 4)
+  Triggers:            N  (LLM/rule conversion, wave 4)
 
 Deployment:   N succeeded / N failed / N skipped
-Validation:   N tables match / N mismatches
+Validation:   N tables match / N FKs match / N indexes match
 
 Working dir:  <SPGLOADER_WORK_DIR>
 ```

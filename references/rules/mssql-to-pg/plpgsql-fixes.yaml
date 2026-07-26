@@ -67,6 +67,12 @@ body_transforms:
     replacement: 'THEN'
     flags:       [IGNORECASE]
 
+  - name:        dedupe_then_semicolon
+    description: "THEN; THEN / THEN; THEN; → THEN (rule cascade artifact)"
+    pattern:     '\bTHEN\s*;+\s*THEN\b'
+    replacement: 'THEN'
+    flags:       [IGNORECASE]
+
   - name:        while_no_loop
     description: "WHILE condition\\n    action → WHILE condition LOOP\\n    action"
     # Single-statement WHILE body without LOOP keyword.
@@ -201,3 +207,94 @@ body_transforms:
   - name:        schema_prefix
     description: "Unqualified table references in FROM/JOIN → add schema prefix"
     enabled:     false  # handled by fix_functions.py using project view-fixes.yaml
+
+  # ── Procedure-specific rules ──────────────────────────────────────────────
+  # These are not safe to apply to functions (different RETURN semantics) but
+  # are correct for stored procedures.  fix_procedures.py passes procedure=true.
+
+  - name:        sysname_to_text
+    description: "SQL Server 'sysname' type → text  (PG has no sysname)"
+    pattern:     '\bsysname\b'
+    replacement: 'text'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        exec_noargs_to_ewi
+    description: "EXEC procname; (no args) → EWI comment stub"
+    pattern:     '\bEXEC\s+(?:\w+\.)?\s*(\w+)\s*;'
+    replacement: '-- SPG-EWI: EXEC \1(); — manual CALL conversion needed\n    CALL \1();'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        bool_assign_zero
+    description: "transtarted/currentpos_bool := 0 → false (bit vars that become boolean)"
+    # transtarted is always BIT (DECLARE @tranStarted BIT); 0 = not started
+    pattern:     '\b(transtarted|isanonymous)\s*:=\s*0\b'
+    replacement: '\1 := false'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        bool_assign_one
+    description: "transtarted := 1 → true"
+    pattern:     '\b(transtarted|isanonymous)\s*:=\s*1\b'
+    replacement: '\1 := true'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        if_paren_no_space_then
+    description: "IF(cond) THEN — IF without space before paren is valid PL/pgSQL; no fix needed"
+    # This rule is intentionally empty — IF(cond) THEN is valid PL/pgSQL syntax
+    enabled:     false
+    pattern:     ''
+    replacement: ''
+    procedure_only: true
+
+  - name:        nolock_hint
+    description: "(NOLOCK) / (NOLOCK, ...) table hint in FROM/JOIN → remove"
+    pattern:     '\s*\(\s*NOLOCK\s*\)'
+    replacement: ''
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        return_value_in_parens
+    description: "RETURN(expr) → RETURN; — SQL Server allows RETURN(value), PG procedures cannot"
+    pattern:     '\bRETURN\s*\(\s*\w+\s*\)\s*;?'
+    replacement: 'RETURN;'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        double_select_into_semicolon
+    description: "Two consecutive SELECT…INTO lines without ; between → insert semicolon"
+    # Pattern: SELECT ... INTO var (no ;) followed immediately by SELECT
+    pattern:     '(\bSELECT\b[^\n]+\bINTO\b[^\n]+)\n(\s*\bSELECT\b)'
+    replacement: '\1;\n\2'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        at_rowcount_residual
+    description: "Residual @rowcount that was not lowercased → _row_count"
+    pattern:     '@rowcount\b'
+    replacement: '_row_count'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        forceseek_hint
+    description: "WITH (FORCESEEK) / (FORCESCAN) table hints → remove"
+    pattern:     '\s*WITH\s*\(\s*FORCE(?:SEEK|SCAN)\s*\)'
+    replacement: ''
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        cross_apply_to_lateral
+    description: "CROSS APPLY → CROSS JOIN LATERAL (not handled by preprocess in proc bodies)"
+    pattern:     '\bCROSS\s+APPLY\b'
+    replacement: 'CROSS JOIN LATERAL'
+    flags:       [IGNORECASE]
+    procedure_only: true
+
+  - name:        outer_apply_to_lateral
+    description: "OUTER APPLY → LEFT JOIN LATERAL"
+    pattern:     '\bOUTER\s+APPLY\b'
+    replacement: 'LEFT JOIN LATERAL'
+    flags:       [IGNORECASE]
+    procedure_only: true

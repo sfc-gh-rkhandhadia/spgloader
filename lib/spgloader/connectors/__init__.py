@@ -5,7 +5,7 @@ from .mysql import MySQLConnector
 from .oracle import OracleConnector
 
 
-DEFAULT_PORTS = {"mssql": 1433, "mysql": 3306, "oracle": 1521}
+DEFAULT_PORTS = {"mssql": 1433, "mysql": 3306, "mariadb": 3306, "oracle": 1521}
 
 
 def get_connector(
@@ -21,13 +21,19 @@ def get_connector(
     match source_type:
         case "mssql":
             return MSSQLConnector(host, resolved_port, database, user, password)
-        case "mysql":
+        case "mysql" | "mariadb":
+            # MariaDB is protocol-compatible with MySQL connector
             return MySQLConnector(host, resolved_port, database, user, password)
         case "oracle":
             return OracleConnector(host, resolved_port, database, user, password)
         case _:
-            raise ValueError(f"Unsupported source_type: {source_type!r}. Choose: mssql, mysql, oracle")
+            raise ValueError(
+                f"Unsupported source_type: {source_type!r}. "
+                f"Choose: mssql, mysql, mariadb, oracle"
+            )
 
 
-__all__ = ["Connector", "get_connector", "make_object", "parse_ddl_file",
-           "DEFAULT_PORTS", "MSSQLConnector", "MySQLConnector", "OracleConnector"]
+__all__ = [
+    "Connector", "get_connector", "make_object", "parse_ddl_file",
+    "DEFAULT_PORTS", "MSSQLConnector", "MySQLConnector", "OracleConnector",
+]

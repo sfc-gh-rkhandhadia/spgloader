@@ -1,0 +1,42 @@
+# pgloader-compose.yml
+#
+# Docker Compose service for running pgloader via Docker.
+# Always used instead of the host pgloader binary.
+#
+# Required environment variables (set by run_pgloader_docker.py):
+#   LOAD_FILE        — absolute path to the .load config file on the host
+#   PGPASS_FILE      — absolute path to ~/.pgpass on the host
+#   SOURCE_NETWORK   — Docker network name of the source DB container
+#                      (default: docker-templates_default)
+#
+# Usage (via run_pgloader_docker.py — do not call directly):
+#   LOAD_FILE=... PGPASS_FILE=... SOURCE_NETWORK=... \
+#     docker compose -f pgloader-compose.yml run --rm pgloader
+
+services:
+  pgloader:
+    build:
+      context: .
+      dockerfile: pgloader.Dockerfile
+    image: spgloader-pgloader:local
+    platform: linux/amd64
+    volumes:
+      # Mount the .load config file read-only at a fixed path inside the container.
+      - "${LOAD_FILE}:/migration.load:ro"
+      # Mount ~/.pgpass so pgloader can authenticate to SPG without a plaintext password
+      # in the .load file.  Falls back to /dev/null if PGPASS_FILE is not set.
+      - "${PGPASS_FILE:-/dev/null}:/root/.pgpass:ro"
+    # --no-ssl-cert-verification: skip SPG's self-signed cert chain check.
+    # The SPG cert is trusted in the macOS keychain but the Linux container does
+    # not inherit that trust store.
+    command: ["--no-ssl-cert-verification", "/migration.load"]
+    # Join the source DB container's Docker network so pgloader can resolve the
+    # container hostname (spgloader_mssql, spgloader_mysql, etc.).
+    # This network also has internet routing, so the remote SPG host is reachable.
+    networks:
+      - source_network
+
+networks:
+  source_network:
+    external: true
+    name: "${SOURCE_NETWORK:-docker-templates_default}"

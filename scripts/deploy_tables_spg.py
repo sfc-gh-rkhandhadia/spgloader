@@ -3,6 +3,7 @@
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).parent.parent
@@ -85,6 +86,22 @@ def full_convert_table(ddl: str) -> str:
     return ddl.strip()
 
 
+def _deploy_table(task: dict) -> dict:
+    """Deploy one table in its own connection. Called from a worker thread."""
+    spg_service = task["spg_service"]
+    fqn = task["fqn"]
+    ddl = task["ddl"]
+    try:
+        conn = psycopg2.connect(f"service={spg_service}")
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(ddl)
+        conn.close()
+        return {"fqn": fqn, "ok": True}
+    except Exception as e:
+        return {"fqn": fqn, "ok": False, "error": str(e).strip().split("\n")[0]}
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Deploy MSSQL tables to SPG")
@@ -92,6 +109,8 @@ def main():
     parser.add_argument("--ddl-objects", default=None, help="Path to ddl_objects.json (default: <work-dir>/ddl_objects.json)")
     parser.add_argument("--dep-graph", default=None, help="Path to dep_graph.json (default: <work-dir>/dep_graph.json)")
     parser.add_argument("--spg-service", required=True, help="pg_service name from ~/.pg_service.conf (e.g. my_project_spg)")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Number of parallel connections for table deployment (default: 4)")
     args = parser.parse_args()
 
     work = Path(args.work_dir)
@@ -102,9 +121,7 @@ def main():
     dep_graph = json.loads(dep_path.read_text())
     tables = {o["fqn"]: o for o in objs if o["type"] == "table"}
 
-    conn = psycopg2.connect(f"service={args.spg_service}")
-
-    # Create sequences found in DDL
+    # Create sequences found in DDL (sequential — sequences must exist before tables)
     all_seqs = set()
     for o in objs:
         ddl = o.get("ddl", "")
@@ -113,36 +130,45 @@ def main():
             all_seqs.add((schema.lower(), seq.lower()))
 
     print(f"Creating {len(all_seqs)} sequence(s)...")
+    seq_conn = psycopg2.connect(f"service={args.spg_service}")
     for schema, seq in sorted(all_seqs):
         try:
-            with conn:
-                with conn.cursor() as cur:
+            with seq_conn:
+                with seq_conn.cursor() as cur:
                     cur.execute(f'CREATE SEQUENCE IF NOT EXISTS "{schema}"."{seq}" START 1')
             print(f"  SEQ {schema}.{seq}: OK")
         except Exception as e:
             print(f"  SEQ {schema}.{seq}: {e}")
+    seq_conn.close()
 
-    # Deploy tables in dep order
-    print("\nDeploying tables...")
-    results = {"succeeded": [], "failed": []}
+    # Build the deployment task list in dep order
+    tasks = []
     for entry in dep_graph["ordered_objects"]:
         fqn = entry["fqn"]
         if fqn not in tables:
             continue
-        o = tables[fqn]
-        ddl = full_convert_table(o["ddl"])
-        try:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(ddl)
-            results["succeeded"].append(fqn)
-            print(f"  OK    {fqn}")
-        except Exception as e:
-            err = str(e).strip().split("\n")[0]
-            results["failed"].append({"fqn": fqn, "error": err})
-            print(f"  FAIL  {fqn}: {err}")
+        converted = full_convert_table(tables[fqn]["ddl"])
+        tasks.append({"spg_service": args.spg_service, "fqn": fqn, "ddl": converted})
 
-    conn.close()
+    # Deploy tables in parallel using a thread pool.
+    # Each worker gets its own psycopg2 connection (connections are not thread-safe).
+    workers = max(1, args.workers)
+    print(f"\nDeploying {len(tasks)} tables with {workers} parallel worker(s)...")
+    results = {"succeeded": [], "failed": []}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_deploy_table, task): task["fqn"] for task in tasks}
+        done = 0
+        for future in as_completed(futures):
+            result = future.result()
+            done += 1
+            if result["ok"]:
+                results["succeeded"].append(result["fqn"])
+                if done % 100 == 0 or done == len(tasks):
+                    print(f"  [{done}/{len(tasks)}] {result['fqn']}: OK")
+            else:
+                results["failed"].append({"fqn": result["fqn"], "error": result["error"]})
+                print(f"  FAIL  {result['fqn']}: {result['error']}")
     print(f"\nTables: {len(results['succeeded'])} OK, {len(results['failed'])} failed")
     if results["failed"]:
         print("Remaining failures:")

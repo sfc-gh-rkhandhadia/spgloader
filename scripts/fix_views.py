@@ -579,10 +579,94 @@ def convert_pivot_to_cte(sql: str, pivot_rules: dict) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Workspace catalog helpers
 # ---------------------------------------------------------------------------
 
-def fix_file(sql: str, filename: str, mapping: dict) -> tuple[str, list[str], bool]:
+def _detect_source_schema(work_dir: Path) -> str:
+    """Infer the source schema from ddl_objects.json.  Returns 'public' as fallback."""
+    ddl_path = work_dir / "ddl_objects.json"
+    if not ddl_path.exists():
+        return "public"
+    try:
+        data = json.loads(ddl_path.read_text(encoding="utf-8"))
+    except Exception:
+        return "public"
+    skip = {"", "sys", "information_schema", "guest", "public"}
+    for obj in data:
+        schema = obj.get("schema", "").strip("[").rstrip("]").lower()
+        if schema and schema not in skip:
+            return schema
+    return "public"
+
+
+def _auto_detect_unqualified_tables(sql: str, known_tables: set[str]) -> list[str]:
+    """Return table names that appear unqualified in FROM/JOIN but exist in known_tables."""
+    found: set[str] = set()
+    for m in re.finditer(r"\b(?:FROM|JOIN)\s+(\w+)\b", sql, re.IGNORECASE):
+        name = m.group(1).lower()
+        # Skip if the match is already preceded by a dot (schema.table)
+        start = m.start(1)
+        if start > 0 and sql[start - 1] == ".":
+            continue
+        if name in known_tables:
+            found.add(name)
+    return list(found)
+
+
+def _load_known_tables(work_dir: Path) -> set[str]:
+    """Return a set of lowercase table names from ddl_objects.json."""
+    ddl_path = work_dir / "ddl_objects.json"
+    if not ddl_path.exists():
+        return set()
+    try:
+        data = json.loads(ddl_path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    return {
+        obj["name"].strip("[").rstrip("]").lower()
+        for obj in data
+        if obj.get("type") in ("table", "view")
+    }
+
+
+def _resolve_schema_prefix_tables(
+    sp_cfg: dict, sql: str, known_tables: set[str]
+) -> list[str]:
+    """Return the list of tables to prefix, combining static config and auto-detection.
+
+    When sp_cfg['auto_detect'] is true (or no static 'tables' list is given),
+    unqualified table references in *sql* that exist in *known_tables* are
+    detected automatically.  Project-specific 'extra_tables' are appended.
+    """
+    static = sp_cfg.get("tables", [])
+    if static:
+        # Legacy: explicit list provided — use it as-is (backwards compatible)
+        return static
+
+    if not sp_cfg.get("auto_detect", True):
+        return []
+
+    # Auto-detect: find unqualified FROM/JOIN references that are known tables
+    found: set[str] = set()
+    for m in re.finditer(r"\b(?:FROM|JOIN)\s+(\w+)\b", sql, re.IGNORECASE):
+        name = m.group(1).lower()
+        start = m.start(1)
+        if start > 0 and sql[start - 1] == ".":
+            continue  # already qualified
+        if name in known_tables:
+            found.add(name)
+
+    extra = [t.lower() for t in sp_cfg.get("extra_tables", [])]
+    return sorted(found | set(extra))
+
+
+def fix_file(
+    sql: str,
+    filename: str,
+    mapping: dict,
+    schema: str = "",
+    known_tables: set[str] | None = None,
+) -> tuple[str, list[str], bool]:
     """Apply all fixes to a single view file.
 
     Returns (fixed_sql, list_of_fix_descriptions, was_pivot_converted).
@@ -608,10 +692,11 @@ def fix_file(sql: str, filename: str, mapping: dict) -> tuple[str, list[str], bo
         # (PIVOT views have no multi-word aliases; converting them risks garbling CTE structure).
         # Still apply schema prefix and cross-db remaps for any non-CTE parts.
         sp = mapping.get("schema_prefix", {})
-        schema = sp.get("schema", "dbo")
-        tables = sp.get("tables", [])
+        # Resolve schema: prefer runtime-detected schema over mapping value
+        eff_schema = schema or sp.get("schema", "public")
+        tables = _resolve_schema_prefix_tables(sp, sql, known_tables or set())
         if tables:
-            sql, f = fix_schema_prefix(sql, schema, tables)
+            sql, f = fix_schema_prefix(sql, eff_schema, tables)
             fixes.extend(f)
         remaps = mapping.get("cross_db_remaps", [])
         if remaps:
@@ -631,10 +716,10 @@ def fix_file(sql: str, filename: str, mapping: dict) -> tuple[str, list[str], bo
 
     # Pass 2 — schema prefix
     sp = mapping.get("schema_prefix", {})
-    schema = sp.get("schema", "dbo")
-    tables = sp.get("tables", [])
+    eff_schema = schema or sp.get("schema", "public")
+    tables = _resolve_schema_prefix_tables(sp, sql, known_tables or set())
     if tables:
-        sql, f = fix_schema_prefix(sql, schema, tables)
+        sql, f = fix_schema_prefix(sql, eff_schema, tables)
         fixes.extend(f)
 
     # Pass 3 — cross-db remaps
@@ -671,6 +756,14 @@ def main():
     import yaml  # pyyaml is a project dependency
     mapping = yaml.safe_load(mapping_path.read_text())
 
+    # Detect source schema and known table names from the workspace.
+    # These are passed into fix_file so schema_prefix.auto_detect works
+    # without any project-specific names in view-fixes.yaml.
+    schema = _detect_source_schema(work_dir)
+    known_tables = _load_known_tables(work_dir)
+    print(f"Source schema   : {schema}")
+    print(f"Known tables    : {len(known_tables)} loaded from workspace")
+
     input_dir = work_dir / "conversion" / "postgres" / "wave_2_views"
     output_dir = work_dir / "conversion" / "postgres" / "wave_2_views_fixed"
 
@@ -690,7 +783,9 @@ def main():
     for f in view_files:
         sql = f.read_text(encoding="utf-8", errors="ignore")
         try:
-            fixed_sql, fixes, was_pivot = fix_file(sql, f.name, mapping)
+            fixed_sql, fixes, was_pivot = fix_file(
+                sql, f.name, mapping, schema=schema, known_tables=known_tables
+            )
             out_path = output_dir / f.name
             out_path.write_text(fixed_sql, encoding="utf-8")
             report["fix_details"][f.name] = {"fixes": fixes, "pivot": was_pivot}

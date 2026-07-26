@@ -1,0 +1,40 @@
+# llm-repair-config.yaml
+# ---------------------------------------------------------------------------
+# Configuration for the LLM procedure repair loop in repair_procedures.py.
+# Edit this file to tune model, iterations, and Snowflake connection without
+# touching the Python code.
+# ---------------------------------------------------------------------------
+
+# Snowflake Cortex model to use for code repair.
+# Available models (subject to Cortex availability in your region):
+#   llama3.3-70b      — fast, cost-effective, good for structured code tasks
+#   mistral-large2    — strong reasoning, larger context window
+#   claude-3-5-sonnet — best code generation quality, higher cost
+model: llama3.3-70b
+
+# Maximum number of LLM repair iterations per failed procedure.
+# After max_iterations the last LLM output is written to
+# wave_4_procedures_llm_review/ for manual inspection.
+max_iterations: 3
+
+# LLM temperature (0.0 = deterministic, 1.0 = creative).
+# Keep low for code generation to get consistent, compilable output.
+temperature: 0.1
+
+# Maximum tokens the LLM may return per procedure.
+max_tokens: 4096
+
+# Snowflake connection name from ~/.snowflake/connections.toml.
+# Leave empty to use the default connection.
+snowflake_connection: ""
+
+# Warehouse to use for Cortex calls.
+# Leave empty to use the connection's default warehouse.
+warehouse: "COMPUTE_WH"
+
+# Prompt template file relative to the skill's references/prompts/ directory.
+prompt_template: "procedure-repair-prompt.md"
+
+# When true, write each LLM attempt to the workspace for debugging even if
+# the procedure eventually succeeds.
+debug_llm_output: false

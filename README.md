@@ -1,220 +1,252 @@
 # spgloader
 
-Migrate MSSQL, MySQL, or Oracle databases to Snowflake Postgres (SPG).
+**Multi-source database migration skill for Snowflake Postgres (SPG)**
 
-spgloader is a Cortex Code skill that handles the full migration lifecycle:
-source environment setup, DDL extraction, **SPG compatibility assessment**,
-pgloader-based data migration, LLM-based DDL conversion with EWI annotations,
-deployment, and validation.
+`spgloader` is a Cortex Code skill that migrates schemas from Microsoft SQL Server, MySQL, MariaDB, and Oracle into Snowflake Postgres. It extracts the full schema from the source database catalog, converts all objects to PostgreSQL DDL, deploys them in parallel, and validates the result. A two-phase LLM repair loop (rule-based + Snowflake Cortex AI) automatically fixes stored procedures that fail to compile.
 
 ---
 
-## SPG Compatibility Assessment Guardrail
+## What it does
 
-Before any conversion begins, spgloader runs a mandatory **SPG Compatibility
-Assessment** that scans every extracted DDL object against Snowflake Postgres-
-specific rules. Migration halts on BLOCK-level findings (e.g., non-PL/pgSQL
-procedural languages, filesystem access, ALTER SYSTEM). WARN-level findings
-require explicit user acknowledgment. This ensures objects deployed to SPG
-will work as expected.
+```
+Source Database          spgloader              Snowflake Postgres
+───────────────    ─────────────────────────    ─────────────────
+MSSQL / MySQL   ─► Catalog extraction       ─►  Tables + Indexes
+MariaDB         ─► DDL conversion           ─►  Views
+Oracle          ─► Parallel deploy (8×)     ─►  Functions
+(DDL file)      ─► Rule-based repair        ─►  Stored Procedures
+                ─► LLM repair (Cortex AI)   ─►  Sequences
+                ─► Validation (6 checks)    ─►  [PASS / FAIL report]
+```
 
-See `references/spg-compatibility.md` for the complete rule set and
-`references/ewi-codes.md` for the full EWI code catalog.
+### Key capabilities
+
+| Capability | Description |
+|---|---|
+| **Catalog-based extraction** | Reads `sys.columns`, `sys.indexes`, `sys.identity_columns` directly — no DDL file parsing |
+| **Parallel deployment** | 8-worker parallel table/index/FK creation; 1,493 tables in ~3 minutes |
+| **T-SQL → PL/pgSQL converter** | Converts stored procedures: IF/BEGIN/END structure, variable declarations, type mapping |
+| **LLM repair loop** | Phase 1: rule-based fixes (plpgsql-fixes.yaml). Phase 2: Snowflake Cortex `llama3.3-70b` with original T-SQL + error message, up to 3 iterations |
+| **Legacy group detection** | Identifies `aspnet_*`, `sp_fivetran_*` and other legacy procedure groups, prompts user before deploying |
+| **Auto schema prefix** | `search_path` set automatically from workspace; unqualified table refs in views auto-retried with schema prefix |
+| **6-check validation** | Table count, column counts, primary keys, IDENTITY columns, foreign keys, indexes |
+| **Generic rules** | No project-specific names hardcoded; all fixes driven by YAML rule files |
 
 ---
 
-## Prerequisites
-
-| Requirement | Install |
-|-------------|---------|
-| Python 3.11+ | https://python.org |
-| uv | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| pgloader | `brew install pgloader` (macOS) or `apt install pgloader` (Linux) |
-| Docker | https://docs.docker.com/get-docker/ (needed for Docker source option) |
-| Snowflake account | AWS or Azure only (SPG not available on GCP) |
-| Cortex Code | https://docs.snowflake.com/en/user-guide/cortex-code |
-
----
-
-## Quick Start
-
-### 1. Set up the skill
-
-```bash
-git clone <repo-url> ~/sko-coco/spgloader
-cd ~/sko-coco/spgloader
-bash setup.sh
-```
-
-### 2. Install into Cortex Code
-
-```bash
-# Option A: symlink (changes auto-reflect)
-ln -s ~/sko-coco/spgloader ~/.snowflake/cortex/skills/spgloader
-
-# Option B: copy
-cp -r ~/sko-coco/spgloader ~/.snowflake/cortex/skills/spgloader
-```
-
-### 3. Start a migration in Cortex Code
-
-Type any of:
-```
-migrate mssql to snowflake postgres
-migrate mysql to snowflake postgres
-migrate oracle to snowflake postgres
-spgloader
-```
-
-The skill will walk you through all phases interactively.
-
----
-
-## Supported Sources
-
-| Source | Tables + Data | Views | Procedures | Functions | Triggers |
-|--------|--------------|-------|------------|-----------|---------|
-| MSSQL (SQL Server 2017+) | pgloader | LLM | LLM | LLM | LLM |
-| MySQL 8.0+ | pgloader | LLM | LLM | LLM | LLM |
-| Oracle (12c+, 19c, 21c, 23c) | LLM | LLM | LLM | LLM | LLM |
-
-pgloader handles tables and data automatically. LLM converts all other objects
-using type-mapping references as grounding.
-
----
-
-## Migration Phases
-
-```
-Phase 0:   Gather environment info (source type, version, env, target SPG)
-Phase 1:   Source setup (connect to existing DB or deploy in Docker)
-Phase 2:   Target setup (connect to or provision Snowflake Postgres)
-Phase 3:   DDL extraction (live DB query or file/paste)
-Phase 3.5: SPG Compatibility Assessment ← GUARDRAIL
-Phase 4:   Conversion (pgloader tables + LLM views/procs/funcs/triggers)
-Phase 5:   Deploy to SPG in dependency order
-Phase 6:   Validate (row counts + spot checks)
-```
-
----
-
-## Output Structure
-
-Each migration run creates a timestamped working directory:
-
-```
-~/.spgloader/20250115_103000/
-├── .spgloader/
-│   ├── config.yaml              # connection details
-│   └── manifest.json            # phase completion tracking
-├── assessment/
-│   ├── assessment_summary.json  # SPG compatibility findings
-│   ├── assessment_report.md     # human-readable report
-│   └── pre_deploy_extensions.sql
-├── conversion/
-│   ├── pgloader/migration.load
-│   └── postgres/
-│       ├── wave_2_views/        # EWI-annotated converted SQL
-│       ├── wave_3_functions/
-│       └── wave_4_procedures_triggers/
-├── deployment/
-│   └── deployment_summary.json
-└── validation/
-    └── validation_report.json
-```
-
----
-
-## Project Structure
+## Architecture
 
 ```
 spgloader/
-├── SKILL.md                      ← Main orchestrator
-├── setup.sh                      ← One-command setup
-├── pyproject.toml                ← Dependencies (uv)
-├── lib/spgloader/                ← Importable Python library
-│   ├── connectors/               ← MSSQL, MySQL, Oracle extractors
-│   ├── conversion/               ← dep_graph, ewi, pgloader_config
-│   ├── deployment/               ← SPG deployment via psycopg2
-│   ├── reporting/                ← SPG compatibility assessment
-│   └── workspace.py              ← Per-project workspace contract
-├── scripts/                      ← CLI entry points (thin wrappers)
-│   ├── assess.py                 ← SPG compatibility assessment
-│   ├── extract_ddl.py
-│   ├── build_dep_graph.py
-│   ├── gen_pgloader_config.py
-│   └── deploy_to_spg.py
-├── sub-skills/                   ← Phase sub-skills
-│   ├── source-setup/
-│   ├── target-setup/
-│   ├── ddl-extract/
-│   ├── assess/                   ← Phase 3.5 SPG guardrail
-│   ├── convert/pgloader/
-│   ├── deploy/
-│   └── validate/
-└── references/
-    ├── spg-compatibility.md      ← SPG rule source of truth
-    ├── ewi-codes.md              ← EWI code catalog
-    ├── pgloader-support-matrix.md
-    ├── type-mappings/            ← mssql, mysql, oracle → PG
-    └── docker-templates/         ← mssql, mysql, oracle compose files
+├── SKILL.md                          # Skill entry point (Cortex Code)
+├── scripts/
+│   ├── parallel_deploy.py            # Phase 3: tables + indexes + FKs (8 workers)
+│   ├── deploy_views.py               # Views with auto search_path + retry
+│   ├── deploy_functions.py           # Functions in dependency order
+│   ├── deploy_procedures.py          # Procedures with legacy-group detection
+│   ├── convert_procedures.py         # T-SQL → PL/pgSQL converter
+│   ├── fix_procedures.py             # Rule-based procedure fixer
+│   ├── repair_procedures.py          # Two-phase LLM repair loop
+│   ├── fix_views.py                  # View syntax corrections (YAML-driven)
+│   ├── patch_views.py                # Generic T-SQL→PG view patches
+│   ├── validate_migration.py         # 6-check validation harness
+│   └── load_source_ddl.py            # DDL file → Docker SQL Server loader
+├── lib/spgloader/
+│   ├── connectors/                   # MSSQL / MySQL / MariaDB / Oracle connectors
+│   └── conversion/
+│       └── pg_generator.py           # Source-agnostic PostgreSQL DDL generator
+├── references/
+│   ├── rules/mssql-to-pg/
+│   │   ├── plpgsql-fixes.yaml        # PL/pgSQL body transformation rules
+│   │   ├── ddl-cleanup.yaml          # T-SQL DDL artifact removal rules
+│   │   ├── type-mappings.yaml        # Source type → PG type maps
+│   │   └── function-substitutions.yaml  # T-SQL function → PG function maps
+│   ├── fix-mappings/
+│   │   └── view-fixes.yaml           # Generic view conversion config (auto_detect: true)
+│   ├── prompts/
+│   │   └── procedure-repair-prompt.md  # LLM repair prompt template
+│   ├── legacy-proc-rules.yaml        # Legacy procedure group definitions
+│   └── llm-repair-config.yaml        # Cortex model + iteration config
+└── sub-skills/
+    ├── source-setup/SKILL.md         # Docker / SPCS source DB setup
+    ├── ddl-extract/SKILL.md
+    ├── assess/SKILL.md
+    ├── convert/SKILL.md
+    ├── deploy/SKILL.md
+    └── validate/SKILL.md
 ```
 
 ---
 
-## Using the Python Library Directly
+## Example prompts
 
-The `lib/spgloader/` package is designed to be imported by other tools:
+### Start a migration
 
-```python
-import sys
-sys.path.insert(0, "/path/to/spgloader/lib")
+```
+/spgloader
+```
 
-# Extract DDL from a SQL Server database
-from spgloader.connectors import get_connector
-connector = get_connector("mssql", host="localhost", port=1433,
-                          database="mydb", user="sa", password="...")
-objects = connector.extract()
+The skill walks through an interactive setup:
+- Source type (MSSQL / MySQL / MariaDB / Oracle)
+- Source version
+- Container platform (Docker / SPCS / DDL file only)
+- Target SPG instance (new or existing)
 
-# Run SPG compatibility assessment
-from spgloader.reporting.assessment import SPGCompatibilityAssessment
-result = SPGCompatibilityAssessment().scan(objects, "mssql")
-print(f"Blocked: {result.is_blocked}")
-print(f"Extension prereqs: {result.extension_prereqs}")
+---
 
-# Build dependency graph
-from spgloader.conversion.dep_graph import build_dep_graph_result
-graph = build_dep_graph_result(objects)
+### Migrate a specific SQL Server database
+
+```
+I have a SQL Server 2022 database and want to migrate it to Snowflake Postgres.
+The DDL file is at ~/Documents/MyDB/schema.sql
+```
+
+```
+Migrate our MSSQL 2019 database to SPG. Source host is db.internal:1433,
+database name is ProductionDB. Deploy a new STANDARD_XL SPG instance.
 ```
 
 ---
 
-## Frequently Asked Questions
+### Migrate views and stored procedures
 
-**Q: My Snowflake account is on GCP. Can I use this?**
-A: No. Snowflake Postgres is only available on AWS and Azure. The assessment will
-block migration if GCP is detected as the target region.
+```
+migrate views and functions, stored procedures and rest of the objects also check constraints
+```
 
-**Q: Does spgloader support PostgreSQL-to-SPG migrations?**
-A: Not currently. The supported sources are MSSQL, MySQL, and Oracle.
-For Postgres-to-Snowflake (Standard) migrations, see the snowbound-migration plugin.
+```
+deploy aspnet and sp_fivetran legacy procedures
+```
 
-**Q: Why is my migration BLOCKED?**
-A: The SPG assessment found features that cannot work in Snowflake Postgres.
-Check `assessment/assessment_report.md` for the list of BLOCK findings and
-resolution steps. See `references/spg-compatibility.md` for the full rule set.
+---
 
-**Q: Can I run the assessment without running the full migration?**
-A: Yes. Use the CLI directly:
+### Run the LLM repair loop on failed procedures
+
+```
+run repair_procedure
+```
+
+```
+run repair_procedures with model mistral-large2 and 5 iterations
+```
+
+---
+
+### Fresh migration (drop and rebuild)
+
+```
+drop all the objects in SPG and run a fresh migration
+```
+
+```
+drop all the objects in spg and run the conversion including legacy code asp and fivetran
+```
+
+---
+
+### Check what's deployed
+
+```
+what objects are currently deployed in SPG?
+```
+
+```
+run the validation
+```
+
+---
+
+### Fix specific failure patterns
+
+```
+for procedures add a rule if you find objects that are legacy prompt user if they would like to deploy them
+```
+
+```
+we should have rules to address complex procedures, add llm-iteration repair loop
+```
+
+---
+
+## Configuration files
+
+### `references/llm-repair-config.yaml`
+```yaml
+model: llama3.3-70b       # Cortex model for procedure repair
+max_iterations: 3          # Repair attempts per failed procedure
+temperature: 0.1           # Low temp for deterministic code
+warehouse: COMPUTE_WH
+```
+
+### `references/legacy-proc-rules.yaml`
+```yaml
+rules:
+  - label: aspnet
+    description: ASP.NET Membership provider procedures
+    patterns: ['^aspnet_']
+  - label: sp_fivetran
+    description: Fivetran CDC/replication procedures
+    patterns: ['^sp_fivetran_']
+  - label: index_maintenance
+    description: Index rebuild/reorganize procedures
+    patterns: ['^rebuildindexes$', '^reorgindexes$']
+```
+
+### `references/fix-mappings/view-fixes.yaml`
+```yaml
+schema_prefix:
+  auto_detect: true   # Auto-detects unqualified table refs from ddl_objects.json
+  extra_tables: []    # Optional per-project overrides
+
+pattern_fixes:
+  tsql_string_concat: true    # + → ||
+  dateadd: true               # DATEADD → interval arithmetic
+  outer_apply: true           # handled by patch_views.py
+  ...
+```
+
+---
+
+## Migration results (Tipalti MSSQL 2022 → SPG STANDARD_XL)
+
+| Object | Deployed | Source | Notes |
+|---|---|---|---|
+| Tables | 1,493/1,493 | 1,493 | 100%; 205 indexes, 925 IDENTITY columns |
+| Functions | 20/20 | 20 | 100% |
+| Views | 62/74 | 74 | 12 blocked by cross-DB references |
+| Procedures | 97/105 | 105 | 8 require manual rewrite (nested transactions) |
+| **Validation** | **6/6 PASS** | | Table count, columns, PKs, IDENTITY, FKs, indexes |
+
+**LLM repair loop** fixed 46 stored procedures (including complex aspnet membership/roles/personalization procedures) using Snowflake Cortex `llama3.3-70b`.
+
+---
+
+## Requirements
+
+- Python 3.10+
+- `uv` (Python package manager)
+- Docker (for source database container) or SPCS
+- Snowflake Postgres instance with `POSTGRES_INGRESS` network policy
+- For LLM repair: Snowflake account with Cortex enabled
+
+---
+
+## Quick start (DDL file workflow)
+
 ```bash
-cd ~/sko-coco/spgloader
-uv run python scripts/assess.py \
-  --source-type mssql \
-  --ddl-file /path/to/schema.sql \
-  --output ./assessment/
-```
+# 1. Start migration skill
+/spgloader
 
-**Q: What about Oracle packages?**
-A: Oracle packages have no direct PostgreSQL equivalent. spgloader recommends
-the `orafce` extension for Oracle function emulation (NVL, DECODE, etc.) and
-converts packages to individual PL/pgSQL functions/procedures.
+# 2. Answer: MSSQL → Deploy in Docker → Provision new SPG → Provide DDL as file
+
+# 3. After migration, run repair on failed procedures
+python scripts/repair_procedures.py \
+  --work-dir ~/.spgloader/<timestamp> \
+  --spg-service <your-spg-service>
+
+# 4. Validate
+python scripts/validate_migration.py \
+  --source-type mssql --source-host localhost --source-db mydb \
+  --source-user sa --password-env SAPASSWORD \
+  --spg-service <your-spg-service> --source-schema dbo --catalog
+```

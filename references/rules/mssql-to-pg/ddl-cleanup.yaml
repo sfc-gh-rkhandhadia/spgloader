@@ -47,6 +47,13 @@ patterns:
     flags:       [IGNORECASE, DOTALL]
     phase:       pre_bracket
 
+  - name:        not_for_replication
+    description: "NOT FOR REPLICATION — MSSQL replication hint on IDENTITY/FK columns; no PG equivalent"
+    pattern:     '\s+NOT\s+FOR\s+REPLICATION\b'
+    replacement: ''
+    flags:       [IGNORECASE]
+    phase:       pre_bracket
+
   - name:        identity_column
     description: "IDENTITY(seed,increment) → GENERATED ALWAYS AS IDENTITY"
     pattern:     '\bIDENTITY\s*\(\s*\d+\s*,\s*\d+\s*\)'
@@ -105,11 +112,12 @@ patterns:
     phase:       pre_bracket
 
   - name:        temporal_generated_always_row
-    description: "GENERATED ALWAYS AS ROW START/END — temporal row period columns"
-    pattern:     '\bGENERATED\s+ALWAYS\s+AS\s+ROW\s+(?:START|END)\b'
-    replacement: 'TIMESTAMP'
+    description: "GENERATED ALWAYS AS ROW START/END [HIDDEN] → DEFAULT now() (MSSQL temporal table period columns)"
+    pattern:     '\bGENERATED\s+ALWAYS\s+AS\s+ROW\s+(?:START|END)(?:\s+HIDDEN)?\b'
+    replacement: 'DEFAULT now()'
     flags:       [IGNORECASE]
     phase:       pre_bracket
+    note:        'MSSQL temporal tables use datetime2 columns with this clause. Consuming HIDDEN here prevents it being left as a stray keyword. The datetime2 type is converted to TIMESTAMPTZ by type-mappings, yielding: col TIMESTAMPTZ DEFAULT now() NOT NULL'
 
   - name:        alter_table_catch_all
     description: "Any remaining ALTER TABLE statement — remove entirely"

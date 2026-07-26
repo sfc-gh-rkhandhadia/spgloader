@@ -5,6 +5,12 @@ deploy_views.py — Deploy fixed view SQL files to SPG in dependency order.
 Reads fixed view files from wave_2_views_fixed/, auto-detects view-to-view
 dependencies, deploys in topological order, and writes a deploy report.
 
+Generic behaviour (no project-specific hardcoding):
+  - Target schema is auto-detected from ddl_objects.json in the workspace.
+  - search_path is set automatically in SPG so unqualified table refs resolve.
+  - When a view fails with "relation X does not exist", the script adds the
+    schema prefix to X and retries automatically.
+
 Usage:
   python deploy_views.py --work-dir ~/.spgloader/20260101_120000 \\
                          --spg-service <pg_service_name>
@@ -16,23 +22,58 @@ import sys
 from pathlib import Path
 
 
+# ---------------------------------------------------------------------------
+# Workspace helpers
+# ---------------------------------------------------------------------------
+
+def _detect_source_schema(work_dir: Path) -> str:
+    """Infer the source schema name from ddl_objects.json.
+
+    Reads the first non-system schema encountered in the workspace's extracted
+    object list.  Returns 'public' if the file is absent or no schema is found.
+    """
+    ddl_path = work_dir / "ddl_objects.json"
+    if not ddl_path.exists():
+        return "public"
+    try:
+        data = json.loads(ddl_path.read_text(encoding="utf-8"))
+    except Exception:
+        return "public"
+    skip = {"", "sys", "information_schema", "guest", "public"}
+    for obj in data:
+        raw = obj.get("schema", "")
+        schema = raw.strip("[").rstrip("]").lower()
+        if schema and schema not in skip:
+            return schema
+    return "public"
+
+
+def _get_spg_tables(conn, schema: str) -> set[str]:
+    """Return the set of table and view names in *schema* from SPG."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = %s",
+            (schema,),
+        )
+        return {row[0].lower() for row in cur.fetchall()}
+
+
+# ---------------------------------------------------------------------------
+# View SQL helpers
+# ---------------------------------------------------------------------------
+
 def _extract_view_name(sql: str) -> str | None:
-    """Extract the fully-qualified view name from a CREATE OR REPLACE VIEW statement."""
+    """Extract the fully-qualified view name from a CREATE OR REPLACE VIEW."""
     m = re.search(r"CREATE\s+OR\s+REPLACE\s+VIEW\s+(\S+)", sql, re.IGNORECASE)
     if not m:
         return None
-    name = m.group(1).lower().rstrip("(").strip('"')
-    # Normalise: dbo.view_name → dbo.view_name
-    return name
+    return m.group(1).lower().rstrip("(").strip('"')
 
 
 def _extract_view_refs(sql: str, all_names: set[str]) -> set[str]:
-    """Find references to other views in this view's SQL body.
-
-    Scans FROM and JOIN clauses for names that match known view names.
-    """
+    """Find references to other views in this view's SQL body."""
     refs = set()
-    # Match schema.name patterns in FROM / JOIN
     for m in re.finditer(r"\b(?:FROM|JOIN)\s+((?:\w+\.)\w+)", sql, re.IGNORECASE):
         candidate = m.group(1).lower()
         if candidate in all_names:
@@ -40,36 +81,54 @@ def _extract_view_refs(sql: str, all_names: set[str]) -> set[str]:
     return refs
 
 
+def _add_schema_prefix(sql: str, table: str, schema: str) -> str:
+    """Add schema. prefix to every unqualified FROM/JOIN reference to *table*."""
+    pattern = rf"(?<!\.)(\b(?:FROM|JOIN)\s+)(?i:{re.escape(table)})\b"
+    def _repl(m: re.Match) -> str:
+        kw = m.group(1)
+        return f"{kw}{schema}.{table}"
+    return re.sub(pattern, _repl, sql, flags=re.IGNORECASE)
+
+
+def _try_schema_prefix_fix(sql: str, err_msg: str, schema: str,
+                            spg_tables: set[str]) -> str | None:
+    """If error is 'relation X does not exist' and X is in SPG, return sql with prefix added."""
+    m = re.search(r'relation "?(\w+)"? does not exist', err_msg, re.IGNORECASE)
+    if not m:
+        return None
+    tbl = m.group(1).lower()
+    if tbl not in spg_tables:
+        return None
+    fixed = _add_schema_prefix(sql, tbl, schema)
+    return fixed if fixed != sql else None
+
+
+# ---------------------------------------------------------------------------
+# Topological sort
+# ---------------------------------------------------------------------------
+
 def topological_sort(nodes: list[str], edges: dict[str, set[str]]) -> list[str]:
     """Kahn's algorithm — returns nodes in deployment order (dependencies first)."""
-    in_degree = {n: 0 for n in nodes}
-    for n in nodes:
-        for dep in edges.get(n, set()):
-            in_degree[n] = in_degree.get(n, 0) + 1
-
-    # Rebuild: in_degree[node] = number of dependencies it has
     in_degree = {n: len(edges.get(n, set())) for n in nodes}
     queue = sorted([n for n in nodes if in_degree[n] == 0])
     result = []
-
     while queue:
         node = queue.pop(0)
         result.append(node)
-        # Find nodes that depended on this one
         for other in nodes:
             if node in edges.get(other, set()):
                 in_degree[other] -= 1
                 if in_degree[other] == 0:
                     queue.append(other)
                     queue.sort()
-
     if len(result) < len(nodes):
-        # Cycle detected — append remaining nodes (will fail gracefully at deploy time)
-        remaining = [n for n in nodes if n not in result]
-        result.extend(remaining)
-
+        result.extend(n for n in nodes if n not in result)
     return result
 
+
+# ---------------------------------------------------------------------------
+# Main deploy
+# ---------------------------------------------------------------------------
 
 def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dict:
     """Deploy views from wave_2_views_fixed/ in dependency order."""
@@ -85,8 +144,12 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
         print("No view files found.")
         return {}
 
+    # Detect source schema from workspace (generic — works for any source DB)
+    schema = _detect_source_schema(work_dir)
+    print(f"Source schema   : {schema}")
+
     # ── 1. Parse view names and SQL ────────────────────────────────────────
-    views: dict[str, dict] = {}  # view_name → {sql, file}
+    views: dict[str, dict] = {}
     skip_files = []
 
     for f in view_files:
@@ -103,18 +166,15 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
 
     print(f"Views to deploy : {len(views)}")
     if skip_files:
-        print(f"Skipped (needs manual fix): {len(skip_files)}")
-        for s in skip_files:
-            print(f"  SKIP  {s}")
+        print(f"Skipped         : {len(skip_files)}")
     print()
 
     # ── 2. Build dependency graph ──────────────────────────────────────────
     all_names = set(views.keys())
-    # deps[view_name] = set of view names it depends on
     deps: dict[str, set[str]] = {}
     for name, info in views.items():
         refs = _extract_view_refs(info["sql"], all_names)
-        refs.discard(name)  # no self-references
+        refs.discard(name)
         deps[name] = refs
 
     # ── 3. Topological sort ────────────────────────────────────────────────
@@ -137,41 +197,67 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
     conn = psycopg2.connect(f"service={spg_service}")
     conn.autocommit = False
 
-    results = {"succeeded": [], "failed": [], "skipped": skip_files}
+    # Set search_path so unqualified table references in views resolve to the
+    # source schema.  This is generic — schema comes from the workspace, not
+    # any hardcoded value.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT set_config('search_path', %s, false)",
+            (f"{schema}, public",),
+        )
+    conn.commit()
+    print(f"search_path set : {schema}, public\n")
+
+    # Fetch the full list of tables/views in the target schema for auto-prefix retry
+    spg_tables = _get_spg_tables(conn, schema)
+
+    results = {"succeeded": [], "failed": [], "skipped": skip_files,
+               "auto_fixed": []}
 
     for name in ordered:
         info = views[name]
         sql = info["sql"]
-        try:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql)
-            results["succeeded"].append(name)
-            print(f"  OK    {name}")
-        except Exception as e:
-            conn.rollback()
-            err = str(e).replace("\n", " ").strip()
-            results["failed"].append({"view": name, "file": info["file"], "error": err})
-            print(f"  FAIL  {name}: {err}")
+
+        for attempt in range(2):
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql)
+                results["succeeded"].append(name)
+                if attempt > 0:
+                    results["auto_fixed"].append(name)
+                    print(f"  OK    {name}  [auto-prefixed]")
+                else:
+                    print(f"  OK    {name}")
+                break
+            except Exception as e:
+                conn.rollback()
+                err = str(e).replace("\n", " ").strip()
+                if attempt == 0:
+                    # Try auto-fixing by adding schema prefix to the missing relation
+                    fixed = _try_schema_prefix_fix(sql, err, schema, spg_tables)
+                    if fixed:
+                        sql = fixed
+                        continue  # retry with prefixed SQL
+                results["failed"].append({
+                    "view": name, "file": info["file"], "error": err
+                })
+                print(f"  FAIL  {name}: {err}")
 
     conn.close()
     return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Deploy fixed views to SPG in dependency order")
-    parser.add_argument(
-        "--work-dir", required=True,
-        help="spgloader workspace directory (e.g. ~/.spgloader/20260101_120000)",
+    parser = argparse.ArgumentParser(
+        description="Deploy fixed views to SPG in dependency order"
     )
-    parser.add_argument(
-        "--spg-service", required=True,
-        help="pg_service name from ~/.pg_service.conf",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Parse and order views but do not execute any SQL",
-    )
+    parser.add_argument("--work-dir", required=True,
+                        help="spgloader workspace directory")
+    parser.add_argument("--spg-service", required=True,
+                        help="pg_service name from ~/.pg_service.conf")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Parse and order views but do not execute any SQL")
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir).expanduser()
@@ -180,12 +266,13 @@ def main():
     if args.dry_run:
         return
 
-    # Write deploy report
     report_path = work_dir / "conversion" / "deploy_report.json"
     report_path.write_text(json.dumps(results, indent=2))
 
     print(f"\n{'='*60}")
     print(f"Deployed OK     : {len(results.get('succeeded', []))}")
+    if results.get("auto_fixed"):
+        print(f"  (auto-prefixed): {len(results['auto_fixed'])}")
     print(f"Failed          : {len(results.get('failed', []))}")
     print(f"Skipped         : {len(results.get('skipped', []))}")
     print(f"Deploy report   : {report_path}")
