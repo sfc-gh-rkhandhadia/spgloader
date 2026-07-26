@@ -32,6 +32,8 @@ validation/
 deprecated/
 assessment/
 pasted_ddl.sql
+migration_report.html
+migration_report.pdf
 
 # Credentials and secrets
 *.pgpass
