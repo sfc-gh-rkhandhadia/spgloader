@@ -68,8 +68,16 @@ def strip_brackets(ddl: str) -> str:
 
 
 def downcase_identifiers(ddl: str) -> str:
-    """Downcase all quoted "Identifier" to unquoted identifier."""
-    return re.sub(r'"([^"]+)"', lambda m: m.group(1).lower(), ddl)
+    """Downcase quoted identifiers.  Identifiers with spaces must stay double-quoted
+    because PostgreSQL rejects bare multi-word tokens as column aliases."""
+    def _lower(m: re.Match) -> str:
+        ident = m.group(1).lower()
+        # Keep double-quotes when the lowered name still contains spaces —
+        # e.g. [vendor id] → "vendor id" (valid PG alias)
+        if " " in ident:
+            return f'"{ident}"'
+        return ident
+    return re.sub(r'"([^"]+)"', _lower, ddl)
 
 
 def fix_view_alias_syntax(ddl: str) -> str:

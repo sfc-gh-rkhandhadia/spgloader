@@ -244,6 +244,31 @@ def deploy_procedures(
         except Exception as e:
             conn.rollback()
             err = str(e).replace("\n", " ").strip()
+
+            # Auto-retry: if a trigger "already exists", DROP it and retry once.
+            # This happens when deploy_procedures.py is re-run after a partial deploy —
+            # PostgreSQL has no CREATE OR REPLACE TRIGGER syntax.
+            if "already exists" in err and "trigger" in err.lower():
+                m = re.search(
+                    r'trigger "(\w+)" for relation "(\w+)"', err, re.IGNORECASE
+                )
+                if m:
+                    trig_name, tbl_name = m.group(1), m.group(2)
+                    try:
+                        with conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    f'DROP TRIGGER IF EXISTS {trig_name} '
+                                    f'ON dbo.{tbl_name} CASCADE'
+                                )
+                                cur.execute(p["sql"])
+                        results["succeeded"].append(p["name"])
+                        print(f"  OK    {p['name']}  (dropped + recreated trigger)")
+                        continue
+                    except Exception as e2:
+                        conn.rollback()
+                        err = str(e2).replace("\n", " ").strip()
+
             results["failed"].append({
                 "procedure": p["name"], "file": p["file"].name, "error": err
             })

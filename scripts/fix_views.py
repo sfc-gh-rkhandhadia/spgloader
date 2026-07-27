@@ -721,15 +721,17 @@ def _fix_additional(sql: str, bit_columns: dict[str, list[str]] | None = None) -
 
     # OUTER APPLY (subquery) alias → LEFT JOIN LATERAL (subquery) alias ON true
     sql = re.sub(r"\bOUTER\s+APPLY\s*\(", "LEFT JOIN LATERAL (", sql, flags=re.IGNORECASE)
-    # Add ON true after ) alias when followed by another JOIN, WHERE, ORDER BY, or ;
-    # Case 1: ) alias\n  (alias then newline)
-    sql = re.sub(
-        r'\)\s+(\w+)\s*\n(\s*(?:LEFT JOIN LATERAL|INNER JOIN|LEFT JOIN|RIGHT JOIN|WHERE|ORDER BY|GROUP BY|HAVING|\Z))',
-        lambda m: f') {m.group(1)} ON true\n{m.group(2)}',
-        sql, flags=re.IGNORECASE
-    )
-    # Case 2: ) alias; (alias then semicolon — end of statement, only in LATERAL views)
+    # Add ON true after ) alias — only when the view actually has a LATERAL join.
+    # Without this guard, the regex fires on ordinary derived-table aliases in FROM clauses
+    # (e.g. "FROM (SELECT ...) a\nINNER JOIN ...") and inserts a spurious ON true.
     if "LEFT JOIN LATERAL" in sql.upper():
+        # Case 1: ) alias\n  followed by another JOIN, WHERE, ORDER BY, etc.
+        sql = re.sub(
+            r'\)\s+(\w+)\s*\n(\s*(?:LEFT JOIN LATERAL|INNER JOIN|LEFT JOIN|RIGHT JOIN|WHERE|ORDER BY|GROUP BY|HAVING|\Z))',
+            lambda m: f') {m.group(1)} ON true\n{m.group(2)}',
+            sql, flags=re.IGNORECASE
+        )
+        # Case 2: ) alias; (alias then semicolon — end of statement)
         sql = re.sub(r'\)\s+(\w+)\s*;', lambda m: f') {m.group(1)} ON true;', sql)
 
     # CAST(expr AS NVARCHAR) → CAST(expr AS TEXT)
