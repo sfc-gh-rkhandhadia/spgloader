@@ -1,6 +1,6 @@
 ---
 name: spgloader-deploy
-description: "Deploy converted DDL objects to Snowflake Postgres in topological dependency order."
+description: "Deploy converted DDL objects to Snowflake Postgres: tables via parallel_deploy.py, views/functions/procedures via dedicated deploy scripts, then LLM repair for any failures."
 parent_skill: spgloader
 ---
 
@@ -8,44 +8,32 @@ parent_skill: spgloader
 
 ## When to Load
 
-From `spgloader/SKILL.md` Phase 5. `dep_graph.json`, `converted_objects/`, and
+From `spgloader/SKILL.md` Phase 5. `dep_graph.json`, converted SQL files, and
 `conversion_manifest.json` are in `$SPGLOADER_WORK_DIR`.
+
+---
 
 ## Workflow
 
-### Step 1: Build deployment plan
+### Step 1: Display deployment plan
 
-Read `dep_graph.json` to get ordered objects. Cross-reference with
-`conversion_manifest.json` to identify what to deploy:
-
-- Tables migrated by pgloader: already in SPG — mark as "pgloader (data already loaded)"
-- LLM-converted objects: deploy from `converted_objects/*.sql` in dep order
-
-Show the deployment plan to the user:
+Show the user what will be deployed:
 
 ```
 Deployment Plan
 ===============
-Order  Type        FQN                       Source
------  ----------  ------------------------  ----------------------
-1      table       dbo.customers             pgloader (data loaded)
-2      table       dbo.orders                pgloader (data loaded)
-3      view        dbo.customer_orders       converted_objects/
-4      procedure   dbo.get_customer_orders   converted_objects/
-5      trigger     dbo.orders_audit_trig     converted_objects/
-
-Total: 5 objects (2 via pgloader, 3 DDL deploy)
+Tables (via parallel_deploy.py):   1494  → schemas, sequences, tables, indexes, FKs
+Views (deploy_views.py):              55  → wave_2_views_fixed/
+Functions (deploy_functions.py):      20  → wave_3_functions_fixed/
+Procedures (deploy_procedures.py):    45  → wave_4_procedures_triggers/
 ```
 
 ### Step 2: MANDATORY STOPPING POINT
 
-Display:
 ```
-I will deploy the DDL objects above to SPG instance '<TARGET_SPG_SERVICE>'.
-
-This operation:
-- Creates/replaces views, functions, procedures, and triggers in the target DB
-- pgloader-migrated tables are NOT re-deployed (data already loaded)
+I will deploy all objects to SPG instance '<TARGET_SPG_SERVICE>'.
+- Tables/indexes/FKs are created via catalog (parallel_deploy.py)
+- Views, functions, procedures are deployed from converted SQL files
 - Any existing objects with the same name will be replaced
 
 Proceed? (yes/no)
@@ -53,20 +41,31 @@ Proceed? (yes/no)
 
 Wait for explicit "yes" before continuing.
 
-### Step 3: Run deployment
+### Step 3: Deploy tables (parallel_deploy.py)
 
-Load `target_conn.env` to get `TARGET_SPG_SERVICE`.
+Tables are always deployed first since views/functions/procedures depend on them.
 
-The deploy scripts are selected based on what was converted:
-
-**Tables** (rule-based DDL conversion):
 ```bash
-uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_tables_spg.py \
-  --work-dir "$SPGLOADER_WORK_DIR" \
-  --spg-service "$TARGET_SPG_SERVICE"
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parallel_deploy.py \
+  --source-type "$SOURCE_TYPE" \
+  --source-host "$SOURCE_HOST" --source-port "$SOURCE_PORT" \
+  --source-db   "$SOURCE_DATABASE" --source-user "$SOURCE_USER" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --workers 8 \
+  --output "$SPGLOADER_WORK_DIR/deployment/deployment_summary.json"
 ```
 
-**Views** (fix + deploy with rule-based corrections):
+Expected output: `→ tables: N OK, 0 failed`
+
+If there are failures, check `deployment_summary.json` for the error per table.
+Most common causes are fixed DDL generator bugs — ensure `pg_generator.py` is
+current (commit 8160bc4+).
+
+---
+
+### Step 4: Deploy views
+
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/fix_views.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
@@ -77,7 +76,14 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_views.py \
   --spg-service "$TARGET_SPG_SERVICE"
 ```
 
-**Functions / Procedures** (fix + deploy with PL/pgSQL corrections):
+`fix_views.py` applies 6 passes including Pass 5 which loads `view_only` rules
+from `plpgsql-fixes.yaml` (generalizable SQL fixes: string concat `+`→`||`,
+`boolean = 1`→`= true`, timestamp `<> ''`→`IS NOT NULL`, LATERAL join `ON true`).
+
+---
+
+### Step 5: Deploy functions
+
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/fix_functions.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
@@ -88,47 +94,126 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_functions.py \
   --spg-service "$TARGET_SPG_SERVICE"
 ```
 
-**Legacy (combined deploy)** — use when only `deploy_to_spg.py` output is available:
+---
+
+### Step 6: Deploy procedures
+
+Use `--include-legacy` to run non-interactively (skips the legacy group confirmation prompts).
+
 ```bash
-uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_to_spg.py \
-  --dep-graph "$SPGLOADER_WORK_DIR/dep_graph.json" \
-  --converted-dir "$SPGLOADER_WORK_DIR/converted_objects" \
-  --conversion-manifest "$SPGLOADER_WORK_DIR/conversion_manifest.json" \
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_procedures.py \
+  --work-dir "$SPGLOADER_WORK_DIR" \
   --spg-service "$TARGET_SPG_SERVICE" \
-  --output "$SPGLOADER_WORK_DIR/deployment_summary.json"
+  --include-legacy
 ```
 
-### Step 4: Display results
+Other useful flags:
+- `--exclude-legacy` — skip all legacy groups (aspnet_, dba_, etc.) silently
+- `--no-interactive` — same as `--exclude-legacy` (non-interactive mode)
 
-Parse `deployment_summary.json` and show a summary table:
+---
+
+### Step 7: LLM repair for any failures
+
+If any views, functions, or procedures failed to deploy, run the repair pipeline.
+Uses `claude-sonnet-4-5` with 6 parallel workers for fast repair (~3-5 minutes
+for 60+ objects).
+
+**Repair functions:**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/repair_procedures.py \
+  --work-dir    "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --report-file "$SPGLOADER_WORK_DIR/conversion/functions_deploy_report.json" \
+  --wave-dir    "$SPGLOADER_WORK_DIR/conversion/postgres/wave_3_functions_fixed" \
+  --workers 6
+```
+
+**Repair procedures:**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/repair_procedures.py \
+  --work-dir    "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --workers 6
+```
+
+**Repair views:**
+```bash
+# 1. Build a deduplicated report from the views deploy report
+python3 - << 'EOF'
+import json
+r = json.load(open(f"{WORK_DIR}/conversion/deploy_report.json"))
+seen, unique = set(), []
+for f in r.get("failed", []):
+    name = f.get("view", f.get("procedure", ""))
+    if name not in seen:
+        seen.add(name)
+        unique.append({"procedure": name, "file": f["file"], "error": f["error"]})
+json.dump({"failed": unique}, open("/tmp/views_repair_report.json", "w"), indent=2)
+EOF
+
+# 2. Run LLM repair
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/repair_procedures.py \
+  --work-dir    "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --report-file "/tmp/views_repair_report.json" \
+  --wave-dir    "$SPGLOADER_WORK_DIR/conversion/postgres/wave_2_views_fixed" \
+  --workers 6
+```
+
+**Key options for repair_procedures.py:**
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--workers N` | 1 | Parallel LLM repair workers (use 4-8) |
+| `--model MODEL` | from config | Override Cortex model |
+| `--max-iterations N` | from config (2) | Max LLM attempts per object |
+| `--report-file PATH` | procedures_deploy_report.json | Point at functions or views report |
+| `--wave-dir PATH` | wave_4_procedures_triggers | Source SQL directory |
+| `--rules-only` | false | Rule-based fixes only, skip LLM |
+
+The config file `references/llm-repair-config.yaml` sets:
+- `model: claude-sonnet-4-5`
+- `max_iterations: 2`
+
+The repair pipeline prints a 1-minute status update: `[Status 1:00] Fixed: N  Failed so far: N  Remaining: N/total`
+
+---
+
+### Step 8: Display results
 
 ```
 Deployment Results
 ==================
-Status     Count
----------  -----
-SUCCESS    N
-FAILED     N
-SKIPPED    N
-
-Failures:
-  - dbo.some_procedure: ERROR: syntax error at or near "BEGIN"
+Tables:     N deployed / 0 failed
+Views:      N deployed / M failed (M need manual SQL fixes)
+Functions:  N deployed / M fixed by LLM / P still failing
+Procedures: N deployed / M fixed by LLM / P still failing (UDTT dependency)
 ```
 
-If any failures occurred, list the object name and the PostgreSQL error message.
-Offer to attempt re-conversion for failed objects.
+If any objects are still failing after LLM repair, list them and their errors.
+Objects that use custom UDTT array types (`RecordType[]`, etc.) cannot be
+auto-repaired — they need manual type substitution.
 
-**Common errors and remedies:**
-
-| Error pattern | Likely cause | Action |
-|---|---|---|
-| `syntax error at or near ...` | Incomplete T-SQL→PL/pgSQL conversion | Re-run `fix_functions.py`; check EWI annotations |
-| `relation "X" does not exist` | Missing table or schema prefix | Add the table to `schema_prefix.tables` in `view-fixes.yaml`, re-run `fix_views.py` |
-| `type "X" does not exist` | UDTT or custom type not deployed | Create the type manually or use a substitute (array, JSONB) |
-| `function X() does not exist` | UDF not deployed yet | Deploy dependencies first; check topological order |
-| `column "X" does not exist` | Column name case mismatch or missing column | Check source table schema; add to schema fix rules |
+---
 
 ## Output
 
-- `$SPGLOADER_WORK_DIR/deployment_summary.json`
+- `$SPGLOADER_WORK_DIR/deployment/deployment_summary.json` — table deploy results
+- `$SPGLOADER_WORK_DIR/conversion/deploy_report.json` — view deploy results
+- `$SPGLOADER_WORK_DIR/conversion/functions_deploy_report.json` — function deploy results
+- `$SPGLOADER_WORK_DIR/conversion/procedures_deploy_report.json` — procedure deploy results
+- `$SPGLOADER_WORK_DIR/conversion/repair_report.json` — LLM repair results
 - Proceed to Phase 6 (validate)
+
+## Error Handling
+
+| Error pattern | Likely cause | Action |
+|---|---|---|
+| `column X default expression is of type boolean` | BIT default in DDL | Ensure pg_generator.py has MSSQL default fixes (commit 8160bc4+) |
+| `syntax error at or near "["` | Bracket identifiers in defaults | Same — pg_generator.py bracket-stripping fix |
+| `syntax error at or near ...` | Incomplete T-SQL→PL/pgSQL conversion | Re-run `fix_functions.py`; then LLM repair |
+| `relation "X" does not exist` | Missing table or schema prefix | Deploy tables first; add to `schema_prefix.tables` in `view-fixes.yaml` |
+| `type "X[]" does not exist` | UDTT array type (deprecated) | Mark as out-of-scope — cannot auto-repair |
+| `function X() does not exist` | UDF not deployed yet | Deploy functions first; check wave order |
+| `column "X" does not exist` | Computed column (doesn't exist in PG) | Remove the column from the SELECT list |
