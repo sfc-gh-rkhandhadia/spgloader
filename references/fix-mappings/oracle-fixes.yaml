@@ -1,0 +1,99 @@
+# oracle-fixes.yaml
+# ---------------------------------------------------------------------------
+# Oracle-specific function substitutions consumed by fix_views.py (and any
+# other scripts that load fix-mappings).
+#
+# These augment or replace the standard view-fixes.yaml when working with
+# an Oracle source.  Reference this file with:
+#
+#   uv run python scripts/fix_views.py \
+#     --work-dir "$WORK_DIR" \
+#     --mapping <SKILL_DIR>/references/fix-mappings/oracle-fixes.yaml
+#
+# ---------------------------------------------------------------------------
+
+schema_prefix:
+  auto_detect: true
+  extra_tables: []
+
+cross_db_remaps: []
+
+pattern_fixes:
+  single_quoted_alias: false   # Oracle views use standard SQL quoting
+  column_equals_alias: false   # Oracle does not use alias = expr syntax
+  nolock_hints: false
+  top_clause: false
+
+# ---------------------------------------------------------------------------
+# Oracle function substitutions
+# Applied as sequential regex search-and-replace on every view file.
+# Patterns use Python re.sub semantics; capture groups use \1 notation.
+# ---------------------------------------------------------------------------
+function_substitutions:
+
+  # Remove optimizer hints  /*+ ... */
+  - pattern: '/\*\+.*?\*/'
+    replacement: ''
+    flags: [DOTALL]
+    ewi_code: '~'                 # suppress EWI for pure whitespace cleanup
+
+  # SYSDATE → NOW()
+  - pattern: '\bSYSDATE\b'
+    replacement: 'NOW()'
+    ewi_code: 'SPG-EWI-0002'
+
+  # SYSTIMESTAMP → NOW()
+  - pattern: '\bSYSTIMESTAMP\b'
+    replacement: 'NOW()'
+    ewi_code: 'SPG-EWI-0002'
+
+  # SYS_GUID() → gen_random_uuid()
+  - pattern: '\bSYS_GUID\s*\(\s*\)'
+    replacement: 'gen_random_uuid()'
+    ewi_code: 'SPG-EWI-0002'
+
+  # FROM DUAL / FROM SYS.DUAL — remove
+  - pattern: '\s+FROM\s+(?:SYS\.)?DUAL\b'
+    replacement: ''
+    ewi_code: 'SPG-EWI-0012'
+
+  # NVL(a, b) → COALESCE(a, b)  (2-arg, same signature)
+  - pattern: '\bNVL\s*\('
+    replacement: 'COALESCE('
+    ewi_code: 'SPG-EWI-0002'
+
+  # seq.NEXTVAL → NEXTVAL('seq')
+  - pattern: '\b(\w+)\.NEXTVAL\b'
+    replacement: "NEXTVAL('\\1')"
+    ewi_code: 'SPG-EWI-0002'
+
+  # seq.CURRVAL → CURRVAL('seq')
+  - pattern: '\b(\w+)\.CURRVAL\b'
+    replacement: "CURRVAL('\\1')"
+    ewi_code: 'SPG-EWI-0002'
+
+  # WITH READ ONLY (Oracle view constraint) → remove
+  - pattern: '\bWITH\s+READ\s+ONLY\b'
+    replacement: ''
+    flags: [IGNORECASE]
+    ewi_code: '~'
+
+  # NOVALIDATE (constraint option) → remove
+  - pattern: '\bNOVALIDATE\b'
+    replacement: ''
+    flags: [IGNORECASE]
+    ewi_code: '~'
+
+  # NOLOGGING → remove
+  - pattern: '\s+NOLOGGING\b'
+    replacement: ''
+    flags: [IGNORECASE]
+    ewi_code: '~'
+
+# ---------------------------------------------------------------------------
+# Type mappings (pre-downcase context)
+# Applied before identifier downcasing, mainly for DDL type clauses.
+# ---------------------------------------------------------------------------
+type_mappings:
+  pre_downcase: []   # Oracle type subs are handled by pg_generator.py catalog path
+  declare: []

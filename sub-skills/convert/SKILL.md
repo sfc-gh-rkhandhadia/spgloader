@@ -1,6 +1,6 @@
 ---
 name: spgloader-convert
-description: "Phase 4: Classify extracted DDL objects and route to pgloader (tables+data) or LLM-based conversion with SPG EWI annotations and wave-ordered output."
+description: "Phase 4: Classify extracted DDL objects and route to pgloader (MSSQL/MySQL tables+data), catalog deploy (Oracle tables), or rule-based conversion with SPG EWI annotations and wave-ordered output."
 parent_skill: spgloader
 ---
 
@@ -26,37 +26,63 @@ If `is_blocked = true`: refuse to continue. Tell the user to resolve BLOCK findi
 
 ## Object Classification
 
-Read `ddl_objects.json`. Classify each object:
+Read `ddl_objects.json`. Classify each object by source type:
 
-```
-pgloader_eligible:   tables from MSSQL or MySQL source
-llm_required:        all other objects (views, procedures, functions, triggers)
-                     + all Oracle objects regardless of type
-```
+| Source | Tables | Views / Procs / Functions / Triggers |
+|--------|--------|--------------------------------------|
+| MSSQL / MySQL | pgloader (Phase 4A) | Rule-based convert_objects.py (Phase 4B) |
+| Oracle | parallel_deploy.py catalog path + copy_oracle_data.py (Phase 4A-Oracle) | Rule-based convert_objects.py --source-type oracle (Phase 4B) |
 
-For reference, the `assessment_summary.json` already has `pgloader_eligible` and `llm_required` lists.
+For reference, the `assessment_summary.json` has `pgloader_eligible` and `llm_required` lists.
 
 Show classification summary before proceeding.
 
-## Phase 4A — pgloader (MSSQL/MySQL tables + data)
+---
 
-If `pgloader_eligible` is not empty, load `sub-skills/convert/pgloader/SKILL.md` and execute it.
+## Phase 4A — MSSQL/MySQL: pgloader (tables + data)
+
+If `pgloader_eligible` is not empty AND source is MSSQL or MySQL:
+load `sub-skills/convert/pgloader/SKILL.md` and execute it.
 
 pgloader handles: table schema, data loading, indexes, foreign keys, type casting.
 Output: data loaded directly into SPG. No SQL files generated for tables.
 
-## Phase 4B — LLM Conversion (views, procedures, functions, triggers + all Oracle)
+## Phase 4A-Oracle — Oracle: catalog table deploy + data copy
 
-### Script-based conversion (MSSQL/MySQL)
+For Oracle sources, pgloader is NOT supported. Tables use the catalog-based path:
 
-The conversion pipeline uses rule-based scripts rather than raw LLM conversion
-for MSSQL/MySQL sources. Run in this order:
+**Step 1: Deploy table DDL (schema only) via catalog path:**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parallel_deploy.py \
+  --source-type oracle \
+  --host "$SOURCE_HOST" --port "$SOURCE_PORT" \
+  --database "$SOURCE_DATABASE" --user "$SOURCE_USER" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --work-dir "$SPGLOADER_WORK_DIR"
+```
+This deploys: tables (with column types mapped), sequences, indexes, foreign keys.
+
+**Step 2: Copy data from Oracle to SPG:**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/copy_oracle_data.py \
+  --work-dir "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE"
+```
+Optional flags: `--truncate-first` (idempotent re-run), `--batch-size 2000` (tune for memory).
+Output: `$SPGLOADER_WORK_DIR/copy_data_report.json`
+
+---
+
+## Phase 4B — DDL Object Conversion (views, procedures, functions, triggers)
+
+### MSSQL / MySQL — rule-based conversion
 
 **1. Convert all non-table objects:**
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/convert_objects.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
-  --ddl-objects "$SPGLOADER_WORK_DIR/ddl_objects.json"
+  --source-type mssql   # or mysql / mariadb
 ```
 Output: `conversion/postgres/wave_2_views/`, `wave_3_functions/`, `wave_4_procedures_triggers/`
 
@@ -76,79 +102,89 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/fix_functions.py \
 ```
 Output: `conversion/postgres/wave_3_functions_fixed/`
 
-### LLM conversion (Oracle, or complex objects needing manual guidance)
+### Oracle — rule-based conversion
 
-For Oracle sources or objects that the rule-based scripts cannot handle, load the relevant type-mapping reference:
-- `references/type-mappings/mssql-to-pg.md` for MSSQL
-- `references/type-mappings/mysql-to-pg.md` for MySQL
-- `references/type-mappings/oracle-to-pg.md` for Oracle
+Oracle views, procedures, functions, and triggers are converted by the same `convert_objects.py`
+script with `--source-type oracle`. No separate `fix_views.py` pass is needed.
 
-Load `references/ewi-codes.md` for EWI annotation codes.
+**Convert all Oracle non-table objects (views, procedures, functions, triggers):**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/convert_objects.py \
+  --work-dir "$SPGLOADER_WORK_DIR" \
+  --source-type oracle
+```
+Output: `conversion/postgres/wave_2_views/`, `wave_3_functions/`, `wave_4_procedures_triggers/`
+
+The Oracle converter applies these transformations automatically:
+- Parameter mode normalisation (`IN type` → `type`, `OUT type` → `OUT type`, `IN OUT` → `INOUT`)
+- IS/AS separator → `AS $$ DECLARE ... BEGIN ... END; $$`
+- Type substitutions: `NUMBER→NUMERIC`, `VARCHAR2→TEXT`, `DATE→TIMESTAMPTZ`, etc.
+- Function substitutions: `NVL→COALESCE`, `SYSDATE→NOW()`, `SYS_GUID()→gen_random_uuid()`, `FROM DUAL` removed, `seq.NEXTVAL→NEXTVAL('seq')`, etc.
+- `:NEW.col`/`:OLD.col` → `NEW.col`/`OLD.col` in triggers
+- EWI annotations for patterns needing LLM review (CONNECT BY, ROWNUM, BULK COLLECT, %TYPE)
+
+For objects flagged `SPG-EWI-0004`, `SPG-EWI-0007`, `SPG-EWI-0008` run the LLM repair loop:
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/repair_procedures.py \
+  --work-dir "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --source-type oracle
+```
+The repair loop auto-selects `references/prompts/procedure-repair-oracle-prompt.md`
+(PL/SQL→PL/pgSQL rules) when `--source-type oracle` is specified.
+
+For manual guidance, load:
+- `references/type-mappings/oracle-to-pg.md` — Oracle type and function mapping reference
+- `references/ewi-codes.md` — EWI annotation code catalog
 
 ### Output Directory (wave-ordered)
 
 Write converted files to wave-ordered directories under `conversion/postgres/`:
 
 | Wave | Directory | Object types |
-|------|-----------|--------------|
-| 1 | `wave_1_tables/` | Tables (Oracle only — MSSQL/MySQL use pgloader) |
+|------|-----------|-------------|
 | 2 | `wave_2_views/` | Views |
 | 3 | `wave_3_functions/` | Functions |
 | 4 | `wave_4_procedures_triggers/` | Stored procedures + triggers |
 
-### Conversion process (per object, in dependency order from dep_graph.json)
-
-For each object in `llm_required`, in topological order:
-
-1. Read the object's DDL from `ddl_objects.json`
-2. Identify any EWI codes from `assessment_summary.json` for this object
-3. Convert the DDL to PostgreSQL using the type-mapping reference
-4. Annotate the output with EWI comments:
-
-```sql
--- ** SPG-EWI-0004 WARN: Procedure converted to PL/pgSQL — verify business logic **
--- ** SPG-EWI-0002 INFO: ISNULL → COALESCE **
-CREATE OR REPLACE FUNCTION ...
-```
-
-5. Write to the appropriate wave directory:
-   `$SPGLOADER_WORK_DIR/conversion/postgres/wave_N_<type>/<schema>__<name>.sql`
+Note: Oracle tables and sequences are deployed by `parallel_deploy.py` — no wave_1_tables directory.
 
 ### EWI annotation rules
 
-When converting, add EWI inline comments for each transformation:
+convert_objects.py automatically annotates output with inline EWI comments:
 
-| Transformation | EWI to add |
-|----------------|-----------|
-| Procedure/function body | SPG-EWI-0004 |
+| Transformation | EWI code |
+|----------------|----------|
+| Procedure/function body converted | SPG-EWI-0004 |
 | Trigger restructured as trigger function | SPG-EWI-0005 |
-| ROWNUM/TOP → LIMIT | SPG-EWI-0006 |
-| CONNECT BY → recursive CTE | SPG-EWI-0007 |
-| Cursor → set-based | SPG-EWI-0008 |
-| Type with no direct equivalent → TEXT | SPG-EWI-0009 |
-| Dialect hint removed (NOLOCK, etc.) | SPG-EWI-0011 |
-| DUAL removed | SPG-EWI-0012 |
+| ROWNUM/TOP → LIMIT (needs review) | SPG-EWI-0006 |
+| CONNECT BY / hierarchical query (needs review) | SPG-EWI-0007 |
+| BULK COLLECT / FORALL → cursor loop | SPG-EWI-0008 |
+| %TYPE / %ROWTYPE (type needs expanding) | SPG-EWI-0009 |
 | Oracle function replaced with PG equiv | SPG-EWI-0002 |
 
 ### Conversion manifest
 
-After all LLM conversions complete, write:
-`$SPGLOADER_WORK_DIR/conversion/_conversion_report.json`
+convert_objects.py writes `$SPGLOADER_WORK_DIR/conversion/_conversion_report.json`:
 
 ```json
 {
-  "pgloader_tables": ["dbo.customers", "dbo.orders"],
+  "source_type": "oracle",
+  "pgloader_tables": [],
+  "oracle_catalog_tables": ["HR.EMPLOYEES", "HR.DEPARTMENTS"],
   "converted_objects": [
     {
-      "fqn": "dbo.get_orders",
+      "fqn": "HR.GET_EMP",
       "type": "procedure",
-      "output_file": "conversion/postgres/wave_4_procedures_triggers/dbo__get_orders.sql",
+      "output_file": "conversion/postgres/wave_4_procedures_triggers/hr__get_emp.sql",
       "ewi_codes": ["SPG-EWI-0004"]
     }
   ],
   "failed": []
 }
 ```
+
+For MSSQL/MySQL, `oracle_catalog_tables` is empty and `pgloader_tables` is populated.
 
 ## Output
 
@@ -166,3 +202,6 @@ After all LLM conversions complete, write:
 | `fix_views.py` — `PIVOT` not converted | Missing `pivot_rules` in `view-fixes.yaml` | Add a pivot rule entry for that view's PIVOT syntax |
 | `fix_functions.py` — `END IF` missing | Complex nested IF structure | Check the function body; add a manual `END IF` at the correct position |
 | pgloader data load fails | Type mismatch or constraint violation | Check pgloader log; add a `CAST` or `USING` clause in the pgloader config |
+| `copy_oracle_data.py` — `env var not set` | Password not exported | Run `export ORACLE_PWD='...'` then retry |
+| `copy_oracle_data.py` — row type mismatch | Oracle type not mapped cleanly | Add `--truncate-first`; check column types in SPG match Oracle source |
+| Oracle procedure — `END name;` in output | `_apply_oracle_func_subs` missed it | Check that the pattern `END \w+;` matches; add to `_ORACLE_FUNC_SUBS` if not |

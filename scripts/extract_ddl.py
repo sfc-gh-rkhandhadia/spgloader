@@ -57,6 +57,15 @@ def main():
                                   args.database, args.user, password)
         objects = connector.extract()
 
+        # Write bit_columns.json alongside ddl_objects.json for fix_views.py
+        bit_cols = connector.extract_bit_columns()
+        if bit_cols:
+            bit_path = Path(args.output).parent / "bit_columns.json"
+            bit_path.write_text(json.dumps(bit_cols, indent=2))
+            total_bit = sum(len(v) for v in bit_cols.values())
+            print(f"  bit_columns      {total_bit} BIT columns in {len(bit_cols)} tables "
+                  f"→ {bit_path.name}")
+
     Path(args.output).write_text(json.dumps(objects, indent=2))
     counts = Counter(o["type"] for o in objects)
     print(f"Extracted {len(objects)} objects to {args.output}")

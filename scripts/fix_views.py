@@ -582,6 +582,60 @@ def convert_pivot_to_cte(sql: str, pivot_rules: dict) -> tuple[str, bool]:
 # Workspace catalog helpers
 # ---------------------------------------------------------------------------
 
+def _load_bit_columns(work_dir: Path) -> dict[str, list[str]]:
+    """Load {schema.table: [col, ...]} from bit_columns.json if it exists.
+
+    Written by extract_ddl.py during Phase 3 when a live source connection is
+    available.  Returns empty dict if the file is absent (DDL-file migrations).
+    """
+    path = work_dir / "bit_columns.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _build_alias_map(sql: str) -> dict[str, str]:
+    """Parse FROM/JOIN clauses and return {alias → schema.table} (lowercase).
+
+    Handles:
+      FROM api.Foo f              → {'f': 'api.foo'}
+      JOIN dbo.Bar AS b           → {'b': 'dbo.bar'}
+      FROM SomeTable              → {'sometable': 'sometable'}
+      FROM api.Definition AS def  → {'def': 'api.definition'}
+    """
+    _SQL_KEYWORDS = {
+        'on', 'where', 'inner', 'left', 'right', 'outer', 'cross',
+        'join', 'set', 'and', 'or', 'not', 'in', 'is', 'null',
+        'select', 'from', 'as', 'with', 'group', 'order', 'by',
+        'having', 'union', 'all', 'distinct', 'case', 'when', 'then',
+        'else', 'end', 'into', 'values', 'insert', 'update', 'delete',
+    }
+    alias_map: dict[str, str] = {}
+    # Match: FROM/JOIN [schema.]table [AS] alias  (not followed by '(' which is a subquery)
+    pattern = re.compile(
+        r'\b(?:FROM|JOIN)\s+'
+        r'(?:(\w+)\.)?(\w+)'           # optional schema.table
+        r'(?:\s+AS\s+|\s+)(\w+)'       # optional AS + alias
+        r'(?!\s*\()',                    # not a subquery
+        re.IGNORECASE,
+    )
+    for m in pattern.finditer(sql):
+        schema = (m.group(1) or '').lower()
+        table  = m.group(2).lower()
+        alias  = m.group(3).lower()
+        if alias in _SQL_KEYWORDS:
+            continue
+        fqn = f"{schema}.{table}" if schema else table
+        alias_map[alias] = fqn
+    # Also register the bare table name as an alias for itself (unqualified usage)
+    for alias, fqn in list(alias_map.items()):
+        alias_map.setdefault(fqn.split('.')[-1], fqn)
+    return alias_map
+
+
 def _detect_source_schema(work_dir: Path) -> str:
     """Infer the source schema from ddl_objects.json.  Returns 'public' as fallback."""
     ddl_path = work_dir / "ddl_objects.json"
@@ -660,12 +714,239 @@ def _resolve_schema_prefix_tables(
     return sorted(found | set(extra))
 
 
+def _fix_additional(sql: str, bit_columns: dict[str, list[str]] | None = None) -> tuple[str, list[str]]:
+    """Apply extra T-SQL→PG fixes not covered by the YAML-driven passes."""
+    fixes = []
+    original = sql
+
+    # OUTER APPLY (subquery) alias → LEFT JOIN LATERAL (subquery) alias ON true
+    sql = re.sub(r"\bOUTER\s+APPLY\s*\(", "LEFT JOIN LATERAL (", sql, flags=re.IGNORECASE)
+    # Add ON true after ) alias when followed by another JOIN, WHERE, ORDER BY, or ;
+    # Case 1: ) alias\n  (alias then newline)
+    sql = re.sub(
+        r'\)\s+(\w+)\s*\n(\s*(?:LEFT JOIN LATERAL|INNER JOIN|LEFT JOIN|RIGHT JOIN|WHERE|ORDER BY|GROUP BY|HAVING|\Z))',
+        lambda m: f') {m.group(1)} ON true\n{m.group(2)}',
+        sql, flags=re.IGNORECASE
+    )
+    # Case 2: ) alias; (alias then semicolon — end of statement, only in LATERAL views)
+    if "LEFT JOIN LATERAL" in sql.upper():
+        sql = re.sub(r'\)\s+(\w+)\s*;', lambda m: f') {m.group(1)} ON true;', sql)
+
+    # CAST(expr AS NVARCHAR) → CAST(expr AS TEXT)
+    sql = re.sub(r"\bCAST\s*\(([^)]+)\s+AS\s+NVARCHAR\s*\)",
+                 r"CAST(\1 AS TEXT)", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bCAST\s*\(([^)]+)\s+AS\s+NVARCHAR\s*\((\d+)\)\s*\)",
+                 r"CAST(\1 AS VARCHAR(\2))", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bNVARCHAR\b", "TEXT", sql, flags=re.IGNORECASE)
+
+    # FOR JSON PATH → EWI comment then attempt json_agg rewrite
+    # Step 1: For subqueries of form: (SELECT col1, col2 FROM ... WHERE ... FOR JSON PATH) AS alias
+    # Convert to: (SELECT json_agg(json_build_object('col1', col1, 'col2', col2)) FROM ... WHERE ...) AS alias
+    def _rewrite_for_json_path(m: re.Match) -> str:
+        subq = m.group(1)
+        # Extract SELECT column list (before FROM)
+        select_m = re.match(r'\s*SELECT\s+(.*?)\s+FROM\s+', subq, re.IGNORECASE | re.DOTALL)
+        if not select_m:
+            return f"(SELECT json_agg(row_to_json(t))::text FROM ({subq}) t)"
+        cols_raw = select_m.group(1)
+        # Parse individual columns (simple comma split, ignore nested parens)
+        cols = []
+        depth = 0
+        cur = []
+        for ch in cols_raw:
+            if ch == '(': depth += 1
+            elif ch == ')': depth -= 1
+            elif ch == ',' and depth == 0:
+                cols.append(''.join(cur).strip())
+                cur = []
+                continue
+            cur.append(ch)
+        if cur:
+            cols.append(''.join(cur).strip())
+        # Build json_build_object pairs: 'ColName', col_expr
+        pairs = []
+        for col in cols:
+            # Handle col AS alias or just col
+            alias_m = re.match(r'(.+?)\s+AS\s+(\w+)\s*$', col.strip(), re.IGNORECASE)
+            if alias_m:
+                key = alias_m.group(2)
+                expr = alias_m.group(1).strip()
+            else:
+                key = col.strip().split('.')[-1]  # use last part of dotted name
+                expr = col.strip()
+            pairs.append(f"'{key}', {expr}")
+        rest = re.sub(r'^\s*SELECT\s+.*?\s+FROM\s+', 'FROM ', subq, flags=re.IGNORECASE | re.DOTALL)
+        rest = re.sub(r'\s*FOR\s+JSON\s+PATH.*$', '', rest, flags=re.IGNORECASE | re.DOTALL).strip()
+        return f"(SELECT json_agg(json_build_object({', '.join(pairs)}))::text {rest})"
+
+    sql = re.sub(
+        r'\(\s*(SELECT\s+(?:(?!\bSELECT\b).)+?)\s*FOR\s+JSON\s+PATH\s*\)',
+        _rewrite_for_json_path, sql, flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # Remaining FOR JSON PATH (not in subquery) → EWI comment
+    sql = re.sub(r"\s*FOR\s+JSON\s+PATH(?:\s*,\s*ROOT\s*\('[^']*'\))?\s*",
+                 "\n    -- EWI: FOR JSON PATH not supported — manual rewrite needed",
+                 sql, flags=re.IGNORECASE)
+
+    # SELECT TOP (100) PERCENT — T-SQL "select all rows in order" → just remove it
+    sql = re.sub(r"\bTOP\s*\(\s*100\s*\)\s*PERCENT\s+", "", sql, flags=re.IGNORECASE)
+
+    # STRING_AGG(expr, sep)\n  WITHIN GROUP (ORDER BY ...) → string_agg(expr, sep ORDER BY ...)
+    # T-SQL style: STRING_AGG(expr, sep) WITHIN GROUP (ORDER BY cols) AS alias
+    def _fix_string_agg(m: re.Match) -> str:
+        inner = m.group(1)      # everything inside STRING_AGG(...)
+        order_by = m.group(2)   # everything inside WITHIN GROUP (ORDER BY ...)
+        # Find the last comma to split expr from sep
+        depth = 0
+        last_comma = -1
+        for i, ch in enumerate(inner):
+            if ch == '(': depth += 1
+            elif ch == ')': depth -= 1
+            elif ch == ',' and depth == 0: last_comma = i
+        if last_comma == -1:
+            return m.group(0)  # can't parse — leave as-is
+        expr = inner[:last_comma].strip()
+        sep = inner[last_comma+1:].strip()
+        return f"string_agg({expr}, {sep} ORDER BY {order_by})"
+
+    sql = re.sub(
+        r"\bSTRING_AGG\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^)]+)\)",
+        _fix_string_agg, sql, flags=re.IGNORECASE
+    )
+
+    # IIF(condition, true_val, false_val) → CASE WHEN condition THEN true_val ELSE false_val END
+    # Uses balanced-paren extraction to handle CAST(), nested functions etc.
+    def _iif_to_case(m: re.Match) -> str:
+        # Find the balanced content of IIF(...)
+        start_pos = m.start()
+        iif_open = sql.find('(', start_pos + len('IIF'))
+        if iif_open == -1:
+            return m.group(0)
+        content = _extract_balanced(sql, iif_open)
+        # Split into 3 args respecting paren depth
+        args = []
+        depth = 0
+        cur = []
+        for ch in content:
+            if ch == '(':
+                depth += 1; cur.append(ch)
+            elif ch == ')':
+                depth -= 1; cur.append(ch)
+            elif ch == ',' and depth == 0:
+                args.append(''.join(cur).strip())
+                cur = []
+            else:
+                cur.append(ch)
+        if cur:
+            args.append(''.join(cur).strip())
+        if len(args) != 3:
+            return m.group(0)
+        return f"CASE WHEN {args[0]} THEN {args[1]} ELSE {args[2]} END"
+
+    # Replace IIF( ... ) using a non-greedy approach with balanced parens via string scan
+    result_parts = []
+    i = 0
+    while i < len(sql):
+        m = re.search(r'\bIIF\s*\(', sql[i:], re.IGNORECASE)
+        if not m:
+            result_parts.append(sql[i:])
+            break
+        abs_start = i + m.start()
+        abs_open = i + m.end() - 1  # position of the opening '('
+        result_parts.append(sql[i:abs_start])
+        # Extract balanced content
+        content = _extract_balanced(sql, abs_open)
+        abs_end = abs_open + len(content) + 2  # +2 for the parens
+        # Parse args
+        args = []
+        depth = 0
+        cur = []
+        for ch in content:
+            if ch == '(':
+                depth += 1; cur.append(ch)
+            elif ch == ')':
+                depth -= 1; cur.append(ch)
+            elif ch == ',' and depth == 0:
+                args.append(''.join(cur).strip())
+                cur = []
+            else:
+                cur.append(ch)
+        if cur:
+            args.append(''.join(cur).strip())
+        if len(args) == 3:
+            result_parts.append(f"CASE WHEN {args[0]} THEN {args[1]} ELSE {args[2]} END")
+        else:
+            result_parts.append(sql[abs_start:abs_end])
+        i = abs_end
+    sql = ''.join(result_parts)
+
+    # Boolean column comparisons: schema-aware using bit_columns.json from Phase 3.
+    # When bit_columns is provided, we resolve `alias.col` to (schema.table, col) and
+    # check the source catalog — fixing only columns that were genuinely BIT.
+    # Falls back to a static list when bit_columns.json was not available (DDL-file mode).
+    _FALLBACK_BOOL_COLS = {
+        "issubmissionfailed", "isprocessing", "ispublished",
+        "iscpgatrevenuecenter", "isslb", "isactive", "isvalid",
+        "isanonymous", "isonmenu", "isdefault", "isenabled",
+        "isstartschedule", "iscartbulkscheduler", "isvisible", "isdeleted",
+    }
+
+    _alias_map = _build_alias_map(sql) if bit_columns else {}
+
+    def _fix_bool_comparison(m: re.Match) -> str:
+        prefix = m.group(1)         # table alias or bare table name
+        col    = m.group(2).lower()
+        op     = m.group(3)         # =, !=, or <>
+        val    = m.group(4).strip() # "0" or "1"
+
+        is_bool = False
+        if bit_columns:
+            # Schema-aware path: resolve alias → fully-qualified table name
+            fqn = _alias_map.get(prefix.lower(), prefix.lower())
+            table_cols = bit_columns.get(fqn, [])
+            # If fqn is unqualified, try matching just the table part
+            if not table_cols:
+                for key, cols in bit_columns.items():
+                    if key.split('.')[-1] == fqn and col in cols:
+                        table_cols = cols
+                        break
+            is_bool = col in table_cols
+        else:
+            # Fallback: match by column name only
+            is_bool = col in _FALLBACK_BOOL_COLS
+
+        if is_bool:
+            bool_val = "false" if val == "0" else "true"
+            return f"{prefix}.{col} {op} {bool_val}"
+        return m.group(0)
+
+    sql = re.sub(
+        r'(\w+)\.(\w+)\s*(=|!=|<>)\s*(0|1)\b',
+        _fix_bool_comparison,
+        sql, flags=re.IGNORECASE
+    )
+
+    # Epoch-based timestamp arithmetic: '1970-01-01' + x * INTERVAL
+    # PG requires an explicit ::timestamp cast on the date literal
+    sql = re.sub(
+        r"'1970-01-01'\s*\+",
+        "'1970-01-01'::timestamp +",
+        sql, flags=re.IGNORECASE
+    )
+
+    if sql != original:
+        fixes.append("additional_fixes: OUTER APPLY/NVARCHAR/FOR JSON PATH/boolean comparisons/epoch-timestamp")
+    return sql, fixes
+
+
 def fix_file(
     sql: str,
     filename: str,
     mapping: dict,
     schema: str = "",
     known_tables: set[str] | None = None,
+    bit_columns: dict[str, list[str]] | None = None,
 ) -> tuple[str, list[str], bool]:
     """Apply all fixes to a single view file.
 
@@ -728,6 +1009,10 @@ def fix_file(
         sql, f = fix_cross_db(sql, remaps)
         fixes.extend(f)
 
+    # Pass 4 — additional T-SQL→PG fixes not covered by the above
+    sql, f = _fix_additional(sql, bit_columns=bit_columns)
+    fixes.extend(f)
+
     return sql, fixes, was_pivot
 
 
@@ -761,8 +1046,14 @@ def main():
     # without any project-specific names in view-fixes.yaml.
     schema = _detect_source_schema(work_dir)
     known_tables = _load_known_tables(work_dir)
+    bit_columns = _load_bit_columns(work_dir)
     print(f"Source schema   : {schema}")
     print(f"Known tables    : {len(known_tables)} loaded from workspace")
+    if bit_columns:
+        total_bc = sum(len(v) for v in bit_columns.values())
+        print(f"BIT columns     : {total_bc} from {len(bit_columns)} tables (bit_columns.json)")
+    else:
+        print("BIT columns     : bit_columns.json not found — using fallback list")
 
     input_dir = work_dir / "conversion" / "postgres" / "wave_2_views"
     output_dir = work_dir / "conversion" / "postgres" / "wave_2_views_fixed"
@@ -784,7 +1075,8 @@ def main():
         sql = f.read_text(encoding="utf-8", errors="ignore")
         try:
             fixed_sql, fixes, was_pivot = fix_file(
-                sql, f.name, mapping, schema=schema, known_tables=known_tables
+                sql, f.name, mapping, schema=schema, known_tables=known_tables,
+                bit_columns=bit_columns,
             )
             out_path = output_dir / f.name
             out_path.write_text(fixed_sql, encoding="utf-8")

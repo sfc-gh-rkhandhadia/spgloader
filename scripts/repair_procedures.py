@@ -48,6 +48,7 @@ _DEFAULT_CONFIG = {
     "snowflake_connection": "",
     "warehouse": "COMPUTE_WH",
     "prompt_template": "procedure-repair-prompt.md",
+    "oracle_prompt_template": "procedure-repair-oracle-prompt.md",
     "debug_llm_output": False,
 }
 
@@ -87,14 +88,15 @@ def _extract_proc_name(sql: str) -> str | None:
 
 
 def _extract_plpgsql_from_response(response: str) -> str | None:
-    """Extract the CREATE OR REPLACE PROCEDURE block from an LLM response."""
+    """Extract the CREATE OR REPLACE PROCEDURE/FUNCTION block from an LLM response."""
     # Try to find code fenced SQL
-    fence_m = re.search(r'```(?:sql|plpgsql)?\s*(CREATE\s+OR\s+REPLACE\s+PROCEDURE.*?)```',
-                        response, re.IGNORECASE | re.DOTALL)
+    fence_m = re.search(
+        r'```(?:sql|plpgsql)?\s*(CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION).*?)```',
+        response, re.IGNORECASE | re.DOTALL)
     if fence_m:
         return fence_m.group(1).strip()
-    # Try bare CREATE OR REPLACE PROCEDURE
-    bare_m = re.search(r'(CREATE\s+OR\s+REPLACE\s+PROCEDURE\b.*)',
+    # Try bare CREATE OR REPLACE PROCEDURE/FUNCTION
+    bare_m = re.search(r'(CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION)\b.*)',
                        response, re.IGNORECASE | re.DOTALL)
     if bare_m:
         return bare_m.group(1).strip()
@@ -223,11 +225,13 @@ def _phase2_llm(
     prompt_template: str,
     config: dict,
     debug: bool = False,
+    source_type: str = "mssql",
 ) -> dict:
     """LLM repair loop.
 
     failed_items: list of {procedure, file, error} from deploy report
     original_tsql: {proc_name_lower: ddl_string}
+    source_type: 'mssql' | 'oracle' — selects placeholder key in prompt
     Returns {fixed: [...], still_failed: [...]}
     """
     max_iter = config["max_iterations"]
@@ -264,9 +268,10 @@ def _phase2_llm(
         for iteration in range(1, max_iter + 1):
             print(f"    Iteration {iteration}/{max_iter} ...", end=" ", flush=True)
 
-            # Build prompt
+            # Build prompt (oracle uses {original_plsql}; mssql uses {original_tsql})
+            source_key = "original_plsql" if source_type == "oracle" else "original_tsql"
             prompt = (prompt_template
-                      .replace("{original_tsql}", tsql)
+                      .replace(f"{{{source_key}}}", tsql)
                       .replace("{current_plpgsql}", current_sql)
                       .replace("{pg_error}", current_error)
                       .replace("{iteration}", str(iteration)))
@@ -332,6 +337,7 @@ def repair_procedures(
     max_iterations_override: int | None = None,
     debug: bool = False,
     skill_dir: Path | None = None,
+    source_type: str = "mssql",
 ) -> dict:
     """Run the two-phase repair pipeline.  Returns the repair report dict."""
     import psycopg2
@@ -359,16 +365,17 @@ def repair_procedures(
 
     print(f"\nProcedures to repair: {len(failed_items)}")
 
-    # Load original T-SQL from ddl_objects.json
+    # Load original source DDL from ddl_objects.json (T-SQL or PL/SQL depending on source)
     ddl_path = work_dir / "ddl_objects.json"
     original_tsql: dict[str, str] = {}
     if ddl_path.exists():
         data = json.loads(ddl_path.read_text())
         for obj in data:
             if obj.get("type") == "procedure":
-                name = obj["name"].strip("[").rstrip("]").lower()
+                name = obj["name"].strip('["').rstrip(']"]').lower()
                 original_tsql[name] = obj.get("ddl", "")
-    print(f"Original T-SQL loaded: {len(original_tsql)} procedures")
+    source_label = "PL/SQL" if source_type == "oracle" else "T-SQL"
+    print(f"Original {source_label} loaded: {len(original_tsql)} procedures")
 
     # ── Phase 1: Rule-based repair ─────────────────────────────────────────
     print("\n" + "="*60)
@@ -419,7 +426,13 @@ def repair_procedures(
     print(f"PHASE 2: LLM repair ({config['model']}, up to {config['max_iterations']} iterations)")
     print("="*60)
 
-    prompt_template = _load_prompt_template(skill_dir, config["prompt_template"])
+    # Select prompt template based on source type
+    if source_type == "oracle":
+        tpl_name = config.get("oracle_prompt_template", "procedure-repair-oracle-prompt.md")
+    else:
+        tpl_name = config["prompt_template"]
+    prompt_template = _load_prompt_template(skill_dir, tpl_name)
+    print(f"  Prompt template : {tpl_name}")
 
     try:
         sf_conn = _open_snowflake_conn(
@@ -448,6 +461,7 @@ def repair_procedures(
         prompt_template=prompt_template,
         config=config,
         debug=debug or config.get("debug_llm_output", False),
+        source_type=source_type,
     )
 
     sf_conn.close()
@@ -489,9 +503,24 @@ def main() -> None:
                         help="Override max LLM iterations per procedure")
     parser.add_argument("--debug-llm", action="store_true",
                         help="Save every LLM attempt to llm_review/")
+    parser.add_argument("--source-type", default=None,
+                        choices=["mssql", "mysql", "mariadb", "oracle"],
+                        help="Source DB type (default: read from source_conn.env)")
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir).expanduser()
+
+    # Resolve source type: CLI flag > source_conn.env > default mssql
+    source_type = args.source_type
+    if not source_type:
+        env_file = work_dir / "source_conn.env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith("SOURCE_TYPE="):
+                    source_type = line.split("=", 1)[1].strip().lower()
+                    break
+    source_type = source_type or "mssql"
+
     result = repair_procedures(
         work_dir=work_dir,
         spg_service=args.spg_service,
@@ -499,6 +528,7 @@ def main() -> None:
         model_override=args.model,
         max_iterations_override=args.max_iterations,
         debug=args.debug_llm,
+        source_type=source_type,
     )
 
     total_fixed = len(result.get("fixed_rules", [])) + len(result.get("fixed_llm", []))

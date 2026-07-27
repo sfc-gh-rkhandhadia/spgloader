@@ -153,10 +153,34 @@ class MSSQLConnector(Connector):
         conn.close()
         return objects
 
+    def extract_bit_columns(self) -> dict[str, list[str]]:
+        """Return {schema.table: [col_name, ...]} for all BIT-type columns.
 
-# ---------------------------------------------------------------------------
-# Catalog query helpers
-# ---------------------------------------------------------------------------
+        Queries sys.columns with tp.name = 'bit' to get the definitive source
+        of truth for which columns will become boolean in PostgreSQL.
+        Used by fix_views.py to convert `alias.col = 0/1` correctly.
+        """
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                s.name  AS schema_name,
+                t.name  AS table_name,
+                c.name  AS col_name
+            FROM sys.columns c
+            JOIN sys.types   tp ON tp.user_type_id = c.user_type_id
+            JOIN sys.tables  t  ON t.object_id = c.object_id
+            JOIN sys.schemas s  ON s.schema_id = t.schema_id
+            WHERE tp.name = 'bit'
+              AND t.is_ms_shipped = 0
+            ORDER BY s.name, t.name, c.name
+        """)
+        result: dict[str, list[str]] = {}
+        for schema, table, col in cur.fetchall():
+            key = f"{schema.lower()}.{table.lower()}"
+            result.setdefault(key, []).append(col.lower())
+        conn.close()
+        return result
 
 def _mssql_schemas(cur) -> list[str]:
     cur.execute("""

@@ -46,10 +46,12 @@ def full_convert_table(ddl: str) -> str:
 
     # ── Phase 5: Function / default substitutions (post-downcase) ────────────
     func_rules = [
+        (r"sysdatetime\s*\(\s*\)", "NOW()"),
         (r"sysutcdatetime\s*\(\s*\)", "NOW()"),
         (r"getdate\s*\(\s*\)", "NOW()"),
         (r"getutcdate\s*\(\s*\)", "NOW()"),
         (r"suser_sname\s*\(\s*\)", "CURRENT_USER"),
+        (r"suser_name\s*\(\s*\)", "CURRENT_USER"),
         (r"newsequentialid\s*\(\s*\)", "gen_random_uuid()"),
         (r"newid\s*\(\s*\)", "gen_random_uuid()"),
     ]
@@ -59,8 +61,9 @@ def full_convert_table(ddl: str) -> str:
     # ── Phase 6: BOOLEAN defaults ─────────────────────────────────────────────
     ddl = re.sub(r"(boolean[^,\n]*default\s+)\(\(1\)\)", r"\1TRUE",  ddl, flags=re.IGNORECASE)
     ddl = re.sub(r"(boolean[^,\n]*default\s+)\(\(0\)\)", r"\1FALSE", ddl, flags=re.IGNORECASE)
-    ddl = re.sub(r"\bdefault\s+\(\(1\)\)", "DEFAULT TRUE",  ddl, flags=re.IGNORECASE)
-    ddl = re.sub(r"\bdefault\s+\(\(0\)\)", "DEFAULT FALSE", ddl, flags=re.IGNORECASE)
+    # Non-boolean columns: ((0)) → 0, ((1)) → 1  (boolean columns handled above)
+    ddl = re.sub(r"\bdefault\s+\(\(1\)\)", "DEFAULT 1",  ddl, flags=re.IGNORECASE)
+    ddl = re.sub(r"\bdefault\s+\(\(0\)\)", "DEFAULT 0", ddl, flags=re.IGNORECASE)
 
     # ── Phase 7: Post-bracket DDL cleanup ─────────────────────────────────────
     for rule in _rules.ddl_cleanup("post_bracket"):

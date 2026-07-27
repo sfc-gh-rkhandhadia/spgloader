@@ -44,6 +44,14 @@ class Connector(ABC):
         """Return True if a test query succeeds, False otherwise."""
         ...
 
+    def extract_bit_columns(self) -> dict[str, list[str]]:
+        """Return {schema.table: [col_name, ...]} for boolean-equivalent columns.
+
+        Subclasses should override this to query the source catalog.
+        Returns empty dict if not implemented (DDL-file mode falls back to this).
+        """
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # DDL file parsing (source-type-aware, no live connection required)

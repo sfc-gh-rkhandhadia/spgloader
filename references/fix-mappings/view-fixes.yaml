@@ -39,7 +39,13 @@ schema_prefix:
 #   - from_prefix: "external_db.dbo."
 #     to_prefix:   "local_schema."
 # ---------------------------------------------------------------------------
-cross_db_remaps: []
+cross_db_remaps:
+  - from_prefix: "menu_management.api."
+    to_prefix: "api."
+  - from_prefix: "menu_management.dbo."
+    to_prefix: "dbo."
+  - from_prefix: "menu_management.stg."
+    to_prefix: "stg."
 
 # ---------------------------------------------------------------------------
 # SECTION 3 — Pattern-based fixes

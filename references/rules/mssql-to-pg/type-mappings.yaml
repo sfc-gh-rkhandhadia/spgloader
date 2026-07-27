@@ -92,7 +92,7 @@ substitutions:
     context:     pre_downcase
     note:        'Must appear before DATETIME\b to avoid partial match'
 
-  - pattern:     'DATETIME\b'
+  - pattern:     '\bDATETIME\b'
     replacement: 'TIMESTAMP'
     context:     pre_downcase
 
@@ -109,7 +109,7 @@ substitutions:
     context:     post_downcase
     note:        'Must appear BEFORE datetime\b to avoid partial match'
 
-  - pattern:     'datetime\b'
+  - pattern:     '\bdatetime\b'
     replacement: 'timestamp'
     context:     post_downcase
 
@@ -192,10 +192,11 @@ substitutions:
     context:     pre_downcase
     note:        'No direct PG equivalent; TEXT is the safest fallback'
 
-  - pattern:     'HIERARCHYID\b'
-    replacement: 'TEXT'
-    context:     pre_downcase
-    note:        'No direct PG equivalent'
+  # HIERARCHYID spatial type: disabled by default — too many false positives with
+  # columns named "HierarchyId" (bigint FK). Uncomment if you have actual spatial HIERARCHYID columns.
+  # - pattern:     '(?<!\w)HIERARCHYID(?!\w)'
+  #   replacement: 'TEXT'
+  #   context:     pre_downcase
 
   # ---- Declare-section types (used inside stored procedure DECLARE blocks) ----
   # These are simple lowercase forms used after bracket-stripping in procedure bodies.
