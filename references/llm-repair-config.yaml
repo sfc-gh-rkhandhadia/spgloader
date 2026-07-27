@@ -10,12 +10,12 @@
 #   llama3.3-70b      — fast, cost-effective, good for structured code tasks
 #   mistral-large2    — strong reasoning, larger context window
 #   claude-3-5-sonnet — best code generation quality, higher cost
-model: llama3.3-70b
+model: claude-sonnet-4-5
 
 # Maximum number of LLM repair iterations per failed procedure.
 # After max_iterations the last LLM output is written to
 # wave_4_procedures_llm_review/ for manual inspection.
-max_iterations: 3
+max_iterations: 2
 
 # LLM temperature (0.0 = deterministic, 1.0 = creative).
 # Keep low for code generation to get consistent, compilable output.
@@ -26,7 +26,7 @@ max_tokens: 4096
 
 # Snowflake connection name from ~/.snowflake/connections.toml.
 # Leave empty to use the default connection.
-snowflake_connection: ""
+snowflake_connection: "sfsenorthamerica-rkhandhadia-aws1-pat"
 
 # Warehouse to use for Cortex calls.
 warehouse: "COMPUTE_WH"

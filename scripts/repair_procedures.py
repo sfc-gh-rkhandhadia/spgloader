@@ -29,7 +29,9 @@ import argparse
 import json
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).parent.parent
@@ -37,6 +39,53 @@ sys.path.insert(0, str(SKILL_DIR / "lib"))
 
 
 # ---------------------------------------------------------------------------
+# 1-minute status reporter
+# ---------------------------------------------------------------------------
+
+class _StatusReporter:
+    """Background thread that prints repair progress every 60 seconds."""
+
+    def __init__(self, total: int, interval: int = 60):
+        self.total = total
+        self.interval = interval
+        self._fixed = 0
+        self._failed = 0
+        self._lock = threading.Lock()
+        self._start = time.time()
+        self._stop_evt = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+        self._thread.join()
+
+    def record_fixed(self) -> None:
+        with self._lock:
+            self._fixed += 1
+
+    def record_failed(self) -> None:
+        with self._lock:
+            self._failed += 1
+
+    def _run(self) -> None:
+        while not self._stop_evt.wait(self.interval):
+            elapsed = int(time.time() - self._start)
+            m, s = divmod(elapsed, 60)
+            with self._lock:
+                done = self._fixed + self._failed
+                queued = self.total - done
+            print(
+                f"\n[Status {m}:{s:02d}]  Fixed: {self._fixed}  "
+                f"Failed so far: {self._failed}  "
+                f"Remaining: {queued}/{self.total}",
+                flush=True,
+            )
+
+
+
 # Config loading
 # ---------------------------------------------------------------------------
 
@@ -177,7 +226,7 @@ def _open_snowflake_conn(connection_name: str, warehouse: str):
 # Phase 1: Rule-based repair
 # ---------------------------------------------------------------------------
 
-def _phase1_rules(work_dir: Path, failed_names: set[str]) -> dict[str, str]:
+def _phase1_rules(work_dir: Path, failed_names: set[str], wave_dir: Path | None = None) -> dict[str, str]:
     """Apply rule-based fixes to failed procedures.
 
     Returns {proc_name: error_after_fix} for procedures still failing, or
@@ -198,7 +247,7 @@ def _phase1_rules(work_dir: Path, failed_names: set[str]) -> dict[str, str]:
     spec.loader.exec_module(fp)
 
     rules = fp._load_plpgsql_rules(SKILL_DIR)
-    proc_dir = work_dir / "conversion" / "postgres" / "wave_4_procedures_triggers"
+    proc_dir = wave_dir or (work_dir / "conversion" / "postgres" / "wave_4_procedures_triggers")
 
     changed = 0
     for f in sorted(proc_dir.glob("*.sql")):
@@ -226,12 +275,15 @@ def _phase2_llm(
     config: dict,
     debug: bool = False,
     source_type: str = "mssql",
+    workers: int = 1,
+    wave_dir: Path | None = None,
 ) -> dict:
     """LLM repair loop.
 
     failed_items: list of {procedure, file, error} from deploy report
     original_tsql: {proc_name_lower: ddl_string}
     source_type: 'mssql' | 'oracle' — selects placeholder key in prompt
+    workers: number of parallel repair threads (each opens its own connections)
     Returns {fixed: [...], still_failed: [...]}
     """
     max_iter = config["max_iterations"]
@@ -239,15 +291,18 @@ def _phase2_llm(
     temperature = config["temperature"]
     max_tokens = config["max_tokens"]
 
-    review_dir = work_dir / "conversion" / "postgres" / "wave_4_procedures_llm_review"
+    _wd = wave_dir or (work_dir / "conversion" / "postgres" / "wave_4_procedures_triggers")
+    review_dir = _wd.parent / (_wd.name + "_llm_review")
     review_dir.mkdir(parents=True, exist_ok=True)
 
-    proc_dir = work_dir / "conversion" / "postgres" / "wave_4_procedures_triggers"
+    proc_dir = _wd
 
     fixed = []
     still_failed = []
 
-    for item in failed_items:
+    def _repair_one(item: dict) -> dict:
+        """Repair a single procedure. Opens its own DB connections (thread-safe)."""
+        import psycopg2
         proc_name = item["procedure"]
         file_name = item["file"]
         current_error = item["error"]
@@ -256,71 +311,105 @@ def _phase2_llm(
         proc_file = proc_dir / file_name
         if not proc_file.exists():
             print(f"  SKIP  {proc_name} — file not found")
-            still_failed.append({**item, "reason": "file_not_found"})
-            continue
+            return {"status": "skip", "item": {**item, "reason": "file_not_found"}}
 
         current_sql = proc_file.read_text(encoding="utf-8", errors="replace")
         tsql = original_tsql.get(short_name, original_tsql.get(proc_name, "-- T-SQL not found"))
 
         print(f"\n  LLM repair: {proc_name}")
-        success = False
 
-        for iteration in range(1, max_iter + 1):
-            print(f"    Iteration {iteration}/{max_iter} ...", end=" ", flush=True)
+        # Each worker opens its own connections
+        _spg = psycopg2.connect(f"service={spg_service}")
+        _spg.autocommit = False
+        _sf = _open_snowflake_conn(
+            config.get("snowflake_connection", ""),
+            config.get("warehouse", ""),
+        )
 
-            # Build prompt (oracle uses {original_plsql}; mssql uses {original_tsql})
-            source_key = "original_plsql" if source_type == "oracle" else "original_tsql"
-            prompt = (prompt_template
-                      .replace(f"{{{source_key}}}", tsql)
-                      .replace("{current_plpgsql}", current_sql)
-                      .replace("{pg_error}", current_error)
-                      .replace("{iteration}", str(iteration)))
+        try:
+            for iteration in range(1, max_iter + 1):
+                print(f"    [{proc_name}] Iteration {iteration}/{max_iter} ...", end=" ", flush=True)
 
-            try:
-                response = _call_cortex(sf_conn, prompt, model, temperature, max_tokens)
-            except Exception as e:
-                print(f"Cortex error: {e}")
-                break
+                source_key = "original_plsql" if source_type == "oracle" else "original_tsql"
+                prompt = (prompt_template
+                          .replace(f"{{{source_key}}}", tsql)
+                          .replace("{current_plpgsql}", current_sql)
+                          .replace("{pg_error}", current_error)
+                          .replace("{iteration}", str(iteration)))
 
-            repaired_sql = _extract_plpgsql_from_response(response)
-            if not repaired_sql:
-                print(f"could not extract PL/pgSQL from response")
+                try:
+                    response = _call_cortex(_sf, prompt, model, temperature, max_tokens)
+                except Exception as e:
+                    print(f"Cortex error: {e}")
+                    break
+
+                repaired_sql = _extract_plpgsql_from_response(response)
+                if not repaired_sql:
+                    print(f"could not extract PL/pgSQL from response")
+                    if debug:
+                        (review_dir / f"{file_name}.iter{iteration}.llm_raw.txt").write_text(
+                            response, encoding="utf-8")
+                    continue
+
                 if debug:
-                    (review_dir / f"{file_name}.iter{iteration}.llm_raw.txt").write_text(
-                        response, encoding="utf-8")
-                continue
+                    (review_dir / f"{file_name}.iter{iteration}.sql").write_text(
+                        repaired_sql, encoding="utf-8")
 
-            if debug:
-                (review_dir / f"{file_name}.iter{iteration}.sql").write_text(
-                    repaired_sql, encoding="utf-8")
+                deploy_err = _try_deploy(_spg, repaired_sql, proc_name)
+                if deploy_err is None:
+                    proc_file.write_text(repaired_sql, encoding="utf-8")
+                    print(f"FIXED on iteration {iteration}")
+                    return {"status": "fixed", "item": {"procedure": proc_name, "iteration": iteration}}
+                else:
+                    print(f"still fails: {deploy_err[:80]}")
+                    current_sql = repaired_sql
+                    current_error = deploy_err
+                    time.sleep(0.2)
 
-            # Try to deploy
-            deploy_err = _try_deploy(spg_conn, repaired_sql, proc_name)
-            if deploy_err is None:
-                # Success!
-                proc_file.write_text(repaired_sql, encoding="utf-8")
-                print(f"FIXED on iteration {iteration}")
-                fixed.append({"procedure": proc_name, "iteration": iteration})
-                success = True
-                time.sleep(0.1)  # brief pause between Cortex calls
-                break
-            else:
-                print(f"still fails: {deploy_err[:80]}")
-                current_sql = repaired_sql
-                current_error = deploy_err
-                time.sleep(0.2)
-
-        if not success:
-            # Write last LLM attempt to review directory
-            proc_file_content = proc_file.read_text(encoding="utf-8", errors="replace")
-            (review_dir / file_name).write_text(proc_file_content, encoding="utf-8")
-            print(f"    → written to llm_review/ for manual inspection")
-            still_failed.append({
+            # All iterations exhausted
+            (review_dir / file_name).write_text(current_sql, encoding="utf-8")
+            print(f"    [{proc_name}] → written to llm_review/ for manual inspection")
+            return {"status": "failed", "item": {
                 "procedure": proc_name,
                 "file": file_name,
                 "error": current_error,
                 "iterations_tried": max_iter,
-            })
+            }}
+        finally:
+            _spg.close()
+            _sf.close()
+
+    # Capture spg_service for use in _repair_one closures
+    spg_service = config.get("_spg_service", "")
+
+    # Start 1-minute status reporter
+    reporter = _StatusReporter(total=len(failed_items))
+    reporter.start()
+
+    try:
+        if workers <= 1:
+            for item in failed_items:
+                result = _repair_one(item)
+                if result["status"] == "fixed":
+                    fixed.append(result["item"])
+                    reporter.record_fixed()
+                else:
+                    still_failed.append(result["item"])
+                    reporter.record_failed()
+        else:
+            print(f"\n  Running {workers} parallel repair workers (status every 60s)...")
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_repair_one, item): item for item in failed_items}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result["status"] == "fixed":
+                        fixed.append(result["item"])
+                        reporter.record_fixed()
+                    else:
+                        still_failed.append(result["item"])
+                        reporter.record_failed()
+    finally:
+        reporter.stop()
 
     return {"fixed": fixed, "still_failed": still_failed}
 
@@ -338,6 +427,9 @@ def repair_procedures(
     debug: bool = False,
     skill_dir: Path | None = None,
     source_type: str = "mssql",
+    workers: int = 1,
+    report_file: str | None = None,
+    wave_dir: str | None = None,
 ) -> dict:
     """Run the two-phase repair pipeline.  Returns the repair report dict."""
     import psycopg2
@@ -350,20 +442,33 @@ def repair_procedures(
     if max_iterations_override:
         config["max_iterations"] = max_iterations_override
 
-    # Load deploy report
-    report_path = work_dir / "conversion" / "procedures_deploy_report.json"
+    # Resolve the source directory for converted SQL files
+    _wave_dir = Path(wave_dir).expanduser() if wave_dir else (
+        work_dir / "conversion" / "postgres" / "wave_4_procedures_triggers"
+    )
+
+    # Load deploy report — supports both procedures and functions reports
+    if report_file:
+        report_path = Path(report_file).expanduser()
+    else:
+        report_path = work_dir / "conversion" / "procedures_deploy_report.json"
     if not report_path.exists():
-        print("ERROR: procedures_deploy_report.json not found — run deploy_procedures.py first",
+        print(f"ERROR: deploy report not found: {report_path}",
               file=sys.stderr)
         return {}
 
     deploy_report = json.loads(report_path.read_text())
-    failed_items = deploy_report.get("failed", [])
+    raw_failed = deploy_report.get("failed", [])
+    # Normalise: functions report uses 'function' key; procedures use 'procedure'
+    failed_items = [
+        {**item, "procedure": item.get("procedure") or item.get("function", "unknown")}
+        for item in raw_failed
+    ]
     if not failed_items:
-        print("No failed procedures in deploy report — nothing to repair.")
+        print("No failed items in deploy report — nothing to repair.")
         return {"fixed_rules": [], "fixed_llm": [], "still_failed": []}
 
-    print(f"\nProcedures to repair: {len(failed_items)}")
+    print(f"\nObjects to repair: {len(failed_items)}")
 
     # Load original source DDL from ddl_objects.json (T-SQL or PL/SQL depending on source)
     ddl_path = work_dir / "ddl_objects.json"
@@ -383,13 +488,13 @@ def repair_procedures(
     print("="*60)
 
     failed_names = {item["procedure"] for item in failed_items}
-    _phase1_rules(work_dir, failed_names)
+    _phase1_rules(work_dir, failed_names, wave_dir=_wave_dir)
 
     # Re-run deployment to see which ones rule-fixes resolved
     spg_conn = psycopg2.connect(f"service={spg_service}")
     spg_conn.autocommit = False
 
-    proc_dir = work_dir / "conversion" / "postgres" / "wave_4_procedures_triggers"
+    proc_dir = _wave_dir
     fixed_rules = []
     still_failed_after_rules = []
 
@@ -459,9 +564,11 @@ def repair_procedures(
         failed_items=still_failed_after_rules,
         original_tsql=original_tsql,
         prompt_template=prompt_template,
-        config=config,
+        config={**config, "_spg_service": spg_service},
         debug=debug or config.get("debug_llm_output", False),
         source_type=source_type,
+        workers=workers,
+        wave_dir=_wave_dir,
     )
 
     sf_conn.close()
@@ -501,11 +608,20 @@ def main() -> None:
                         help="Override Cortex model (e.g. mistral-large2)")
     parser.add_argument("--max-iterations", type=int, default=None,
                         help="Override max LLM iterations per procedure")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel repair workers (default: 1; use 4-8 to speed up LLM phase)")
     parser.add_argument("--debug-llm", action="store_true",
                         help="Save every LLM attempt to llm_review/")
     parser.add_argument("--source-type", default=None,
                         choices=["mssql", "mysql", "mariadb", "oracle"],
                         help="Source DB type (default: read from source_conn.env)")
+    parser.add_argument("--report-file", default=None,
+                        help="Path to a deploy report JSON (default: procedures_deploy_report.json). "
+                             "Use to repair functions: --report-file .../functions_deploy_report.json")
+    parser.add_argument("--wave-dir", default=None,
+                        help="Directory containing converted SQL files "
+                             "(default: wave_4_procedures_triggers). "
+                             "Use for functions: --wave-dir .../wave_3_functions_fixed")
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir).expanduser()
@@ -529,6 +645,9 @@ def main() -> None:
         max_iterations_override=args.max_iterations,
         debug=args.debug_llm,
         source_type=source_type,
+        workers=args.workers,
+        report_file=args.report_file,
+        wave_dir=args.wave_dir,
     )
 
     total_fixed = len(result.get("fixed_rules", [])) + len(result.get("fixed_llm", []))
@@ -538,7 +657,10 @@ def main() -> None:
     print(f"Total fixed     : {total_fixed}")
     print(f"Still failing   : {len(result.get('still_failed', []))}")
     if result.get("still_failed"):
-        review_dir = work_dir / "conversion" / "postgres" / "wave_4_procedures_llm_review"
+        _wd = Path(args.wave_dir).expanduser() if args.wave_dir else (
+            work_dir / "conversion" / "postgres" / "wave_4_procedures_triggers"
+        )
+        review_dir = _wd.parent / (_wd.name + "_llm_review")
         print(f"Review dir      : {review_dir}")
 
 

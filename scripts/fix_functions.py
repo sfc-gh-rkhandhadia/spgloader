@@ -33,8 +33,32 @@ _rules = _get_rules(SKILL_DIR)
 
 
 # ---------------------------------------------------------------------------
-# Pass 1 — Pattern substitutions from plpgsql-fixes.yaml
+# Pass 0 — Pre-processing fixes (before rule application)
 # ---------------------------------------------------------------------------
+
+def fix_split_decimal_params(sql: str) -> tuple[str, list[str]]:
+    """Fix split numeric parameter declarations introduced by the MSSQL converter.
+
+    The converter sometimes splits DECIMAL(19, 4) across two lines as:
+        DECIMAL(19,
+            IN 4)
+    This is invalid PL/pgSQL. Rejoin the parameter on one line.
+    """
+    fixes = []
+    # Match: (DECIMAL|NUMERIC)(\d+,\n   IN \d+)
+    new, n = re.subn(
+        r'\b(DECIMAL|NUMERIC)\s*\(\s*(\d+)\s*,\s*\n\s*IN\s+(\d+)\s*\)',
+        r'\1(\2, \3)',
+        sql,
+        flags=re.IGNORECASE,
+    )
+    if n:
+        sql = new
+        fixes.append(f"split_decimal_param: {n}")
+    return sql, fixes
+
+
+
 
 def apply_plpgsql_rules(sql: str, plpgsql_rules: list[dict]) -> tuple[str, list[str]]:
     """Apply plpgsql-fixes.yaml body_transform rules to the full function SQL."""
@@ -363,6 +387,10 @@ def fix_schema_prefix_in_body(sql: str, schema: str, tables: list[str]) -> tuple
 def fix_file(sql: str, plpgsql_rules: list[dict], mapping: dict) -> tuple[str, list[str]]:
     """Apply all fix passes to a single function SQL file."""
     fixes: list[str] = []
+
+    # Pass 0 — split decimal parameter pre-fix
+    sql, f = fix_split_decimal_params(sql)
+    fixes.extend(f)
 
     # Pass 1 — plpgsql rule substitutions
     sql, f = apply_plpgsql_rules(sql, plpgsql_rules)

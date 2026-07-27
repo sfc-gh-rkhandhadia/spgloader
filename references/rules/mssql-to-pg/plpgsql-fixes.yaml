@@ -298,3 +298,186 @@ body_transforms:
     replacement: 'LEFT JOIN LATERAL'
     flags:       [IGNORECASE]
     procedure_only: true
+
+  # ── Type fixes ────────────────────────────────────────────────────────────
+
+  - name:        text_with_size
+    description: "TEXT(n) → TEXT  (PostgreSQL TEXT has no length modifier)"
+    pattern:     '\bTEXT\s*\(\s*\d+\s*\)'
+    replacement: 'TEXT'
+    flags:       [IGNORECASE]
+
+  - name:        varchar_with_max
+    description: "VARCHAR(MAX) → TEXT"
+    pattern:     '\bVARCHAR\s*\(\s*MAX\s*\)'
+    replacement: 'TEXT'
+    flags:       [IGNORECASE]
+
+  - name:        nvarchar_with_max
+    description: "NVARCHAR(MAX) → TEXT"
+    pattern:     '\bNVARCHAR\s*\(\s*MAX\s*\)'
+    replacement: 'TEXT'
+    flags:       [IGNORECASE]
+
+  - name:        convert_to_cast
+    description: "CONVERT(type, expr) → CAST(expr AS type)"
+    # Handles CONVERT(VARCHAR(100), expr) and CONVERT(INT, expr)
+    pattern:     '\bCONVERT\s*\(\s*([\w\s()]+?)\s*,\s*([^)]+?)\s*\)'
+    replacement: 'CAST(\2 AS \1)'
+    flags:       [IGNORECASE]
+
+  # ── String concatenation ──────────────────────────────────────────────────
+
+  - name:        plus_concat_after_pipe
+    description: "expr || 'x' + 'y' → expr || 'x' || 'y'  (mixed + and || concat)"
+    # After || there should be no + for string concat
+    pattern:     '(\|\|[^+\n]*)\x27([^\x27]*)\x27\s*\+'
+    replacement: '\1''\2'' ||'
+    flags:       [IGNORECASE]
+
+  # ── DML fixes ─────────────────────────────────────────────────────────────
+
+  - name:        insert_missing_into
+    description: "INSERT table → INSERT INTO table  (INTO is required in PL/pgSQL)"
+    pattern:     '\bINSERT\s+(?!INTO\b)(\w)'
+    replacement: 'INSERT INTO \1'
+    flags:       [IGNORECASE]
+
+  - name:        update_missing_set
+    description: "UPDATE tbl\\ncol := val → UPDATE tbl SET col = val"
+    # Catches UPDATE immediately followed by a column assignment on next line
+    pattern:     '(\bUPDATE\b[^\n]+)\n(\s+)(\w+)\s*:='
+    replacement: '\1\n\2SET \3 ='
+    flags:       [IGNORECASE]
+
+  # ── Locking hints ─────────────────────────────────────────────────────────
+
+  - name:        mssql_locking_hints
+    description: "WITH (ROWLOCK/UPDLOCK/HOLDLOCK/XLOCK/TABLOCK) → remove"
+    pattern:     '\s*WITH\s*\(\s*(?:ROW|UPD|HOLD|X|PAGE|TAB)LOCK[^)]*\)'
+    replacement: ''
+    flags:       [IGNORECASE]
+
+  # ── DDL fixes in procedure bodies ─────────────────────────────────────────
+
+  - name:        nonclustered_index
+    description: "CREATE NONCLUSTERED INDEX → CREATE INDEX"
+    pattern:     '\bCREATE\s+NONCLUSTERED\s+INDEX\b'
+    replacement: 'CREATE INDEX'
+    flags:       [IGNORECASE]
+
+  - name:        clustered_index
+    description: "CREATE CLUSTERED INDEX → CREATE INDEX"
+    pattern:     '\bCREATE\s+CLUSTERED\s+INDEX\b'
+    replacement: 'CREATE INDEX'
+    flags:       [IGNORECASE]
+
+  - name:        trailing_comma_before_close_paren
+    description: "trailing comma before ) in CREATE TABLE → remove"
+    pattern:     ',(\s*\n\s*\))'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+
+  - name:        three_part_object_name
+    description: "database.schema.table → schema.table (cross-db refs not supported)"
+    pattern:     '\b(\w+)\.(dbo|schema)\.'
+    replacement: '\2.'
+    flags:       [IGNORECASE]
+
+  - name:        option_maxrecursion
+    description: "OPTION (MaxRecursion N); → remove (SQL Server query hint)"
+    pattern:     '\n[^\n]*OPTION\s*\(\s*MaxRecursion\s+\d+\s*\)\s*;?'
+    replacement: ''
+    flags:       [IGNORECASE]
+
+  - name:        semicolon_inside_case
+    description: "THEN value; inside CASE...END → remove the semicolon"
+    # Semicolons inside CASE expressions break PL/pgSQL parsing
+    pattern:     '(\bTHEN\b\s+\w+)\s*;(\s*(?:WHEN|ELSE|END)\b)'
+    replacement: '\1\2'
+    flags:       [IGNORECASE]
+
+  - name:        standalone_transaction_keyword
+    description: "Bare TRANSACTION line (leftover from BEGIN TRANSACTION) → remove"
+    pattern:     '\n[ \t]*TRANSACTION[ \t]*\n'
+    replacement: '\n'
+    flags:       [IGNORECASE]
+
+  # ── IF BEGIN/END block conversion ─────────────────────────────────────────
+
+  - name:        if_begin_to_then
+    description: "IF (cond) BEGIN → IF cond THEN  (T-SQL block → PL/pgSQL)"
+    # Matches IF (...) BEGIN or IF ... BEGIN (with or without parens)
+    pattern:     '\bIF\s*\(([^)]+)\)\s*\n\s*BEGIN\b'
+    replacement: 'IF \1 THEN'
+    flags:       [IGNORECASE]
+
+  - name:        standalone_begin_to_nothing
+    description: "Standalone BEGIN (not BEGIN...END of func) after IF THEN → remove"
+    # Leftover BEGIN lines after if_begin_to_then fires
+    pattern:     '(\bIF\b[^\n]+THEN\b[^\n]*\n)(\s*)BEGIN\s*\n'
+    replacement: '\1'
+    flags:       [IGNORECASE]
+
+  - name:        standalone_end_to_end_if
+    description: "Standalone END; after an IF body → END IF;"
+    # A bare END; after IF body where there's no matching BEGIN (already removed)
+    pattern:     '\n(\s*)END\s*;\s*\n(\s*)(ELSE|ELSIF|ELSEIF)\b'
+    replacement: '\n\1END IF;\n\2\3'
+    flags:       [IGNORECASE]
+
+  # ── Trailing comma/semicolon in DECLARE ───────────────────────────────────
+
+  - name:        declare_trailing_comma_semicolon
+    description: "var type = val,; → var type := val;  (trailing ,; in DECLARE)"
+    pattern:     ',\s*;'
+    replacement: ';'
+    flags:       [IGNORECASE]
+
+  - name:        incomplete_declare_value
+    description: "var TYPE :=; → var TYPE := 0;  (missing value in declaration)"
+    pattern:     '(:?=\s*;)'
+    replacement: ':= 0;'
+    flags:       [IGNORECASE]
+
+
+  # ── View-specific SQL fixes (view_only: true) ─────────────────────────────
+  # Applied by fix_views.py when processing converted view SQL files.
+
+  - name:        string_plus_to_concat
+    description: "expr + expr → expr || expr  (T-SQL + used as string concat in view SELECT)"
+    # Handles: END + CASE, 'str' + expr, expr + 'str' in SELECT context
+    pattern:     '(\bEND\b)\s*\+\s*(\bCASE\b)'
+    replacement: '\1 || \2'
+    flags:       [IGNORECASE]
+    view_only:   true
+
+  - name:        boolean_eq_one_in_where
+    description: "boolean_col = 1 → boolean_col = true  (BIT column comparison in WHERE)"
+    pattern:     '\b(\w+)\s*=\s*1\b(?!\s*\)?\s*(?:THEN|AND|OR|;|$))'
+    replacement: '\1 = true'
+    flags:       [IGNORECASE]
+    view_only:   true
+
+  - name:        timestamp_neq_empty_string
+    description: "timestamp_col <> '' → timestamp_col IS NOT NULL  (T-SQL temporal null check)"
+    pattern:     "(\\.?\\w+)\\s*<>\\s*''"
+    replacement: '\1 IS NOT NULL'
+    flags:       [IGNORECASE]
+    view_only:   true
+
+  - name:        lateral_join_add_on_true
+    description: "LEFT JOIN LATERAL (...) alias → add ON true (required in PostgreSQL)"
+    # Matches a closing paren + alias without ON clause before FROM or WHERE
+    pattern:     '(\)\s+(?:AS\s+)?\w+)(\s*\n\s*(?:WHERE|LEFT|INNER|CROSS|,|\s*$))'
+    replacement: '\1 ON true\2'
+    flags:       [IGNORECASE]
+    view_only:   true
+
+  - name:        derived_table_spurious_on_true
+    description: "( subquery ) alias ON true → ( subquery ) alias  (plain FROM subquery, not a JOIN)"
+    # Removes ON true from a derived table that is the sole FROM source (not a JOIN)
+    pattern:     '(\)\s+\w+)\s+ON\s+true(\s*\n\s*WHERE)'
+    replacement: '\1\2'
+    flags:       [IGNORECASE]
+    view_only:   true

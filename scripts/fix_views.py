@@ -940,6 +940,45 @@ def _fix_additional(sql: str, bit_columns: dict[str, list[str]] | None = None) -
     return sql, fixes
 
 
+def _apply_view_plpgsql_rules(sql: str) -> tuple[str, list[str]]:
+    """Apply view_only: true rules from plpgsql-fixes.yaml to view SQL.
+
+    These are generalizable SQL-level patterns (not PL/pgSQL) that belong in
+    the shared rule file so they apply to both views and functions/procedures.
+    """
+    import yaml
+    fixes = []
+    rules_path = SKILL_DIR / "references" / "rules" / "mssql-to-pg" / "plpgsql-fixes.yaml"
+    if not rules_path.exists():
+        return sql, fixes
+
+    try:
+        doc = yaml.safe_load(rules_path.read_text())
+    except Exception:
+        return sql, fixes
+
+    for rule in doc.get("body_transforms", []):
+        if not rule.get("view_only"):
+            continue
+        if not rule.get("enabled", True):
+            continue
+        pattern = rule.get("pattern", "")
+        replacement = rule.get("replacement", "")
+        flag_names = rule.get("flags", ["IGNORECASE"])
+        flags = 0
+        for fn in flag_names:
+            flags |= getattr(re, fn, 0)
+        try:
+            new_sql, n = re.subn(pattern, replacement, sql, flags=flags)
+            if n:
+                sql = new_sql
+                fixes.append(f"{rule['name']}: {n}")
+        except re.error:
+            pass
+
+    return sql, fixes
+
+
 def fix_file(
     sql: str,
     filename: str,
@@ -1011,6 +1050,10 @@ def fix_file(
 
     # Pass 4 — additional T-SQL→PG fixes not covered by the above
     sql, f = _fix_additional(sql, bit_columns=bit_columns)
+    fixes.extend(f)
+
+    # Pass 5 — view_only rules from plpgsql-fixes.yaml
+    sql, f = _apply_view_plpgsql_rules(sql)
     fixes.extend(f)
 
     return sql, fixes, was_pivot
