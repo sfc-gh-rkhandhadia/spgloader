@@ -102,9 +102,44 @@ Write `$SPGLOADER_WORK_DIR/validation_report.json`:
 }
 ```
 
+### Step 6: Generate HTML (and optional PDF) migration report
+
+After validation, generate a self-contained HTML report summarising the entire migration.
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/generate_report.py \
+  "$SPGLOADER_WORK_DIR" \
+  --output "$SPGLOADER_WORK_DIR/migration_report.html"
+```
+
+To also produce a PDF (requires Chrome / Chromium on the machine):
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/generate_report.py \
+  "$SPGLOADER_WORK_DIR" \
+  --output "$SPGLOADER_WORK_DIR/migration_report.html" \
+  --pdf
+```
+
+The report reads from workspace artifacts and includes:
+- Migration summary (source, target, object counts, elapsed time)
+- SPG compatibility assessment results (BLOCKs, WARNs, extension prereqs)
+- Deployment results by object type (tables, views, functions, procedures)
+- LLM repair summary (fixed by rules vs LLM, still failing)
+- Row count validation results
+- Snowflake branding + Chart.js charts — fully self-contained, no external CDN
+
+Display the output path to the user so they can open it:
+```
+HTML report: <SPGLOADER_WORK_DIR>/migration_report.html
+PDF report:  <SPGLOADER_WORK_DIR>/migration_report.pdf  (if --pdf was used)
+```
+
 ## Output
 
 - `$SPGLOADER_WORK_DIR/validation_report.json`
+- `$SPGLOADER_WORK_DIR/migration_report.html`
+- `$SPGLOADER_WORK_DIR/migration_report.pdf` (optional)
 - Validation summary displayed in chat
 - Return to main SKILL.md to display final migration summary
 
