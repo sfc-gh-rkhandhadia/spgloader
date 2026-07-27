@@ -1,6 +1,6 @@
 ---
 name: spgloader-convert
-description: "Phase 4: Classify extracted DDL objects and route to catalog deploy (all sources: parallel_deploy.py + copy_mssql_data.py / copy_oracle_data.py), or rule-based conversion with SPG EWI annotations and wave-ordered output."
+description: "Phase 4: Classify extracted DDL objects and route to catalog deploy (all sources: parallel_deploy.py + copy_source_data.py / copy_oracle_data.py), or rule-based conversion with SPG EWI annotations and wave-ordered output."
 parent_skill: spgloader
 ---
 
@@ -30,7 +30,7 @@ Read `ddl_objects.json`. Classify each object by source type:
 
 | Source | Tables (schema + data) | Views / Procs / Functions / Triggers |
 |--------|------------------------|--------------------------------------|
-| MSSQL / MySQL | parallel_deploy.py (schema) + copy_mssql_data.py (data) | Rule-based convert_objects.py (Phase 4B) |
+| MSSQL / MySQL | parallel_deploy.py (schema) + copy_source_data.py (data) | Rule-based convert_objects.py (Phase 4B) |
 | Oracle | parallel_deploy.py (schema) + copy_oracle_data.py (data) | Rule-based convert_objects.py --source-type oracle (Phase 4B) |
 
 For reference, the `assessment_summary.json` has `catalog_eligible` and `llm_required` lists.
@@ -63,7 +63,7 @@ This deploys in 5 parallel phases: schemas → sequences → tables → indexes 
 Skip this step for **schema-only migrations** (DDL file source with no live data).
 
 ```bash
-uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/copy_mssql_data.py \
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/copy_source_data.py \
   --work-dir    "$SPGLOADER_WORK_DIR" \
   --spg-service "$TARGET_SPG_SERVICE" \
   --workers 4
@@ -241,7 +241,7 @@ convert_objects.py writes `$SPGLOADER_WORK_DIR/conversion/_conversion_report.jso
 | `convert_objects.py` fails on a specific object | Unsupported DDL pattern | Check the EWI annotation — manually rewrite that object |
 | `fix_views.py` — `PIVOT` not converted | Missing `pivot_rules` in `view-fixes.yaml` | Add a pivot rule entry for that view's PIVOT syntax |
 | `fix_functions.py` — `END IF` missing | Complex nested IF structure | Check the function body; add a manual `END IF` at the correct position |
-| `copy_mssql_data.py` — `env var not set` | Password not exported | Run `export MSSQL_SA_PASSWORD='...'` then retry |
-| `copy_mssql_data.py` — row type mismatch | MSSQL type not mapped cleanly | Add `--truncate-first`; check column types in SPG match source |
+| `copy_source_data.py` — `env var not set` | Password not exported | Run `export MSSQL_SA_PASSWORD='...'` then retry |
+| `copy_source_data.py` — row type mismatch | MSSQL type not mapped cleanly | Add `--truncate-first`; check column types in SPG match source |
 | `copy_oracle_data.py` — `env var not set` | Password not exported | Run `export ORACLE_PWD='...'` then retry |
 | Oracle procedure — `END name;` in output | `_apply_oracle_func_subs` missed it | Check that the pattern `END \w+;` matches; add to `_ORACLE_FUNC_SUBS` if not |

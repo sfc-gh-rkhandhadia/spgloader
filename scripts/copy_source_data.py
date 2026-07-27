@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-copy_mssql_data.py — Copy table data from an MSSQL/MySQL source to Snowflake Postgres.
+copy_source_data.py — Copy table data from an MSSQL, MySQL, or MariaDB source to Snowflake Postgres.
 
 Replaces pgloader for data migration.  Uses:
   - pymssql (pure Python, no ODBC driver required) for MSSQL source
@@ -11,21 +11,21 @@ Streams data in configurable batches — no heap limits.
 Copies tables in parallel for throughput.
 
 Usage:
-  python copy_mssql_data.py \\
+  python copy_source_data.py \\
       --work-dir ~/.spgloader/20260101_120000 \\
       --spg-service pg_my_instance
 
   # Copy specific tables only
-  python copy_mssql_data.py ... --tables dbo.orders dbo.customers
+  python copy_source_data.py ... --tables dbo.orders dbo.customers
 
   # Truncate target tables before copying (idempotent re-runs)
-  python copy_mssql_data.py ... --truncate-first
+  python copy_source_data.py ... --truncate-first
 
   # Tune batch size (rows per batch, default 5000)
-  python copy_mssql_data.py ... --batch-size 2000
+  python copy_source_data.py ... --batch-size 2000
 
   # Parallel table workers (default 4)
-  python copy_mssql_data.py ... --workers 8
+  python copy_source_data.py ... --workers 8
 """
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def _connect_source(env: dict):
         return _connect_mysql(env), source_type
     else:
         raise ValueError(
-            f"copy_mssql_data.py supports mssql/mysql/mariadb sources, "
+            f"copy_source_data.py supports mssql/mysql/mariadb sources, "
             f"got SOURCE_TYPE={source_type!r}"
         )
 
@@ -256,7 +256,7 @@ def _copy_table(
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
-def copy_mssql_data(
+def copy_source_data(
     work_dir: Path,
     spg_service: str,
     tables: list[str] | None = None,
@@ -393,7 +393,7 @@ def main() -> None:
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir).expanduser().resolve()
-    copy_mssql_data(
+    copy_source_data(
         work_dir=work_dir,
         spg_service=args.spg_service,
         tables=args.tables,
