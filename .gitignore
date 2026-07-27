@@ -27,6 +27,8 @@ ddl_objects.json
 dep_graph.json
 ddl_output/
 conversion/
+!lib/spgloader/conversion/
+!lib/spgloader/conversion/**
 deployment/
 validation/
 deprecated/
