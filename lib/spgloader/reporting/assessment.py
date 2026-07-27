@@ -95,7 +95,7 @@ class AssessmentResult:
     resolve_findings: list[Finding] = field(default_factory=list)
     info_findings: list[Finding] = field(default_factory=list)
     extension_prereqs: list[str] = field(default_factory=list)
-    pgloader_eligible: list[str] = field(default_factory=list)   # fqns
+    catalog_eligible: list[str] = field(default_factory=list)    # fqns (tables for parallel_deploy.py)
     llm_required: list[str] = field(default_factory=list)        # fqns
     conversion_confidence: float = 1.0
 
@@ -121,7 +121,7 @@ class AssessmentResult:
             "warn_findings": [_finding_to_dict(f) for f in self.warn_findings],
             "resolve_findings": [_finding_to_dict(f) for f in self.resolve_findings],
             "extension_prereqs": self.extension_prereqs,
-            "pgloader_eligible": self.pgloader_eligible,
+            "catalog_eligible": self.catalog_eligible,
             "llm_required": self.llm_required,
         }
 
@@ -174,7 +174,7 @@ class SPGCompatibilityAssessment:
 
             # Classify pgloader vs LLM
             if source_type in ("mssql", "mysql") and obj_type == "table":
-                result.pgloader_eligible.append(fqn)
+                result.catalog_eligible.append(fqn)
             else:
                 result.llm_required.append(fqn)
 
@@ -461,12 +461,12 @@ def format_report(result: AssessmentResult, source_desc: str = "") -> str:
         "",
         "OBJECT INVENTORY",
         "=" * 40,
-        f"{'Type':<22} {'Count':>5}  {'pgloader':>10}  {'LLM conversion':>15}",
+        f"{'Type':<22} {'Count':>5}  {'catalog':>10}  {'LLM conversion':>15}",
         "-" * 60,
     ]
     from collections import Counter
     # We don't have full object list here, just summarize from result
-    pgloader_count = len(result.pgloader_eligible)
+    pgloader_count = len(result.catalog_eligible)
     llm_count = len(result.llm_required)
     lines.append(f"  Total            {result.total_objects:>5}  {pgloader_count:>10}  {llm_count:>15}")
     lines += [

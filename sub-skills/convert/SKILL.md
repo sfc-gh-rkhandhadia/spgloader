@@ -1,6 +1,6 @@
 ---
 name: spgloader-convert
-description: "Phase 4: Classify extracted DDL objects and route to pgloader (MSSQL/MySQL tables+data), catalog deploy (Oracle tables), or rule-based conversion with SPG EWI annotations and wave-ordered output."
+description: "Phase 4: Classify extracted DDL objects and route to catalog deploy (all sources: parallel_deploy.py + copy_mssql_data.py / copy_oracle_data.py), or rule-based conversion with SPG EWI annotations and wave-ordered output."
 parent_skill: spgloader
 ---
 
@@ -28,38 +28,78 @@ If `is_blocked = true`: refuse to continue. Tell the user to resolve BLOCK findi
 
 Read `ddl_objects.json`. Classify each object by source type:
 
-| Source | Tables | Views / Procs / Functions / Triggers |
-|--------|--------|--------------------------------------|
-| MSSQL / MySQL | pgloader (Phase 4A) | Rule-based convert_objects.py (Phase 4B) |
-| Oracle | parallel_deploy.py catalog path + copy_oracle_data.py (Phase 4A-Oracle) | Rule-based convert_objects.py --source-type oracle (Phase 4B) |
+| Source | Tables (schema + data) | Views / Procs / Functions / Triggers |
+|--------|------------------------|--------------------------------------|
+| MSSQL / MySQL | parallel_deploy.py (schema) + copy_mssql_data.py (data) | Rule-based convert_objects.py (Phase 4B) |
+| Oracle | parallel_deploy.py (schema) + copy_oracle_data.py (data) | Rule-based convert_objects.py --source-type oracle (Phase 4B) |
 
-For reference, the `assessment_summary.json` has `pgloader_eligible` and `llm_required` lists.
+For reference, the `assessment_summary.json` has `catalog_eligible` and `llm_required` lists.
 
 Show classification summary before proceeding.
 
 ---
 
-## Phase 4A — MSSQL/MySQL: pgloader (tables + data)
+## Phase 4A — MSSQL / MySQL: catalog deploy + data copy
 
-If `pgloader_eligible` is not empty AND source is MSSQL or MySQL:
-load `sub-skills/convert/pgloader/SKILL.md` and execute it.
+All MSSQL and MySQL migrations use the catalog-based path. **pgloader is no longer the default** — it has memory heap issues on large schemas and requires a Docker image. The catalog approach is faster, parallel, and more reliable.
 
-pgloader handles: table schema, data loading, indexes, foreign keys, type casting.
-Output: data loaded directly into SPG. No SQL files generated for tables.
+### Step 1: Deploy table schema via catalog path
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parallel_deploy.py \
+  --source-type "$SOURCE_TYPE" \
+  --source-host "$SOURCE_HOST" --source-port "$SOURCE_PORT" \
+  --source-db   "$SOURCE_DATABASE" --source-user "$SOURCE_USER" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --workers 8 \
+  --output "$SPGLOADER_WORK_DIR/deployment/deployment_summary.json"
+```
+
+This deploys in 5 parallel phases: schemas → sequences → tables → indexes → foreign keys.
+
+### Step 2: Copy data from source to SPG
+
+Skip this step for **schema-only migrations** (DDL file source with no live data).
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/copy_mssql_data.py \
+  --work-dir    "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --workers 4
+```
+
+Optional flags:
+- `--truncate-first` — TRUNCATE each target table before copying (idempotent reruns)
+- `--batch-size 2000` — tune rows per INSERT batch (default 5000)
+- `--tables dbo.orders dbo.customers` — copy a subset of tables only
+
+Output: `$SPGLOADER_WORK_DIR/copy_data_report.json`
+
+### Why not pgloader?
+
+pgloader is available as a legacy fallback via `sub-skills/convert/pgloader/SKILL.md` but
+should only be used if the catalog path fails for a specific reason. Known pgloader issues:
+- OOM on tables > a few million rows (loads full result set into JVM heap)
+- Requires building a Docker image (`spgloader-pgloader:local`)
+- FreeTDS / TLS negotiation failures on macOS arm64
+- Single-threaded — slow for wide schemas (1000+ tables)
+
+---
 
 ## Phase 4A-Oracle — Oracle: catalog table deploy + data copy
 
-For Oracle sources, pgloader is NOT supported. Tables use the catalog-based path:
+For Oracle sources, the path is identical in structure to MSSQL/MySQL above.
 
 **Step 1: Deploy table DDL (schema only) via catalog path:**
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parallel_deploy.py \
   --source-type oracle \
-  --host "$SOURCE_HOST" --port "$SOURCE_PORT" \
-  --database "$SOURCE_DATABASE" --user "$SOURCE_USER" \
+  --source-host "$SOURCE_HOST" --source-port "$SOURCE_PORT" \
+  --source-db   "$SOURCE_DATABASE" --source-user "$SOURCE_USER" \
   --password-env "$SOURCE_PASSWORD_ENV" \
   --spg-service "$TARGET_SPG_SERVICE" \
-  --work-dir "$SPGLOADER_WORK_DIR"
+  --output "$SPGLOADER_WORK_DIR/deployment/deployment_summary.json"
 ```
 This deploys: tables (with column types mapped), sequences, indexes, foreign keys.
 
@@ -147,7 +187,7 @@ Write converted files to wave-ordered directories under `conversion/postgres/`:
 | 3 | `wave_3_functions/` | Functions |
 | 4 | `wave_4_procedures_triggers/` | Stored procedures + triggers |
 
-Note: Oracle tables and sequences are deployed by `parallel_deploy.py` — no wave_1_tables directory.
+Note: Tables for all sources are deployed by `parallel_deploy.py` — no wave_1_tables directory.
 
 ### EWI annotation rules
 
@@ -169,14 +209,13 @@ convert_objects.py writes `$SPGLOADER_WORK_DIR/conversion/_conversion_report.jso
 
 ```json
 {
-  "source_type": "oracle",
-  "pgloader_tables": [],
-  "oracle_catalog_tables": ["HR.EMPLOYEES", "HR.DEPARTMENTS"],
+  "source_type": "mssql",
+  "catalog_tables": ["dbo.orders", "dbo.customers"],
   "converted_objects": [
     {
-      "fqn": "HR.GET_EMP",
+      "fqn": "dbo.get_orders",
       "type": "procedure",
-      "output_file": "conversion/postgres/wave_4_procedures_triggers/hr__get_emp.sql",
+      "output_file": "conversion/postgres/wave_4_procedures_triggers/dbo__get_orders.sql",
       "ewi_codes": ["SPG-EWI-0004"]
     }
   ],
@@ -184,12 +223,11 @@ convert_objects.py writes `$SPGLOADER_WORK_DIR/conversion/_conversion_report.jso
 }
 ```
 
-For MSSQL/MySQL, `oracle_catalog_tables` is empty and `pgloader_tables` is populated.
-
 ## Output
 
+- `$SPGLOADER_WORK_DIR/deployment/deployment_summary.json` — table/index/FK deploy results
+- `$SPGLOADER_WORK_DIR/copy_data_report.json` — data copy results (if applicable)
 - `$SPGLOADER_WORK_DIR/conversion/postgres/wave_N_*/` — EWI-annotated converted .sql files
-- `$SPGLOADER_WORK_DIR/conversion/pgloader/migration.load` — pgloader config (if applicable)
 - `$SPGLOADER_WORK_DIR/conversion/_conversion_report.json`
 - Proceed to Phase 5 (deploy)
 
@@ -198,10 +236,12 @@ For MSSQL/MySQL, `oracle_catalog_tables` is empty and `pgloader_tables` is popul
 | Error | Likely cause | Action |
 |---|---|---|
 | `is_blocked = true` in `assessment_summary.json` | Phase 3.5 unresolved BLOCKs | Resolve BLOCK findings before proceeding |
+| `parallel_deploy.py` — `column X default expression is of type boolean` | pg_generator.py bug | Ensure pg_generator.py has the MSSQL default fixes (commit 8160bc4+) |
+| `parallel_deploy.py` — `syntax error at or near "["` | Bracket identifiers in defaults | Same fix — pg_generator.py bracket-stripping handles this |
 | `convert_objects.py` fails on a specific object | Unsupported DDL pattern | Check the EWI annotation — manually rewrite that object |
 | `fix_views.py` — `PIVOT` not converted | Missing `pivot_rules` in `view-fixes.yaml` | Add a pivot rule entry for that view's PIVOT syntax |
 | `fix_functions.py` — `END IF` missing | Complex nested IF structure | Check the function body; add a manual `END IF` at the correct position |
-| pgloader data load fails | Type mismatch or constraint violation | Check pgloader log; add a `CAST` or `USING` clause in the pgloader config |
+| `copy_mssql_data.py` — `env var not set` | Password not exported | Run `export MSSQL_SA_PASSWORD='...'` then retry |
+| `copy_mssql_data.py` — row type mismatch | MSSQL type not mapped cleanly | Add `--truncate-first`; check column types in SPG match source |
 | `copy_oracle_data.py` — `env var not set` | Password not exported | Run `export ORACLE_PWD='...'` then retry |
-| `copy_oracle_data.py` — row type mismatch | Oracle type not mapped cleanly | Add `--truncate-first`; check column types in SPG match Oracle source |
 | Oracle procedure — `END name;` in output | `_apply_oracle_func_subs` missed it | Check that the pattern `END \w+;` matches; add to `_ORACLE_FUNC_SUBS` if not |

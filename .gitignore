@@ -30,6 +30,8 @@ conversion/
 !lib/spgloader/conversion/
 !lib/spgloader/conversion/**
 deployment/
+!lib/spgloader/deployment/
+!lib/spgloader/deployment/**
 validation/
 deprecated/
 assessment/

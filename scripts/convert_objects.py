@@ -868,12 +868,12 @@ def main():
 
     # For MSSQL/MySQL: tables go to pgloader
     # For Oracle: tables go to parallel_deploy.py (catalog path) — skip here
-    pgloader_tables: list[str] = []
+    catalog_tables: list[str] = []
     oracle_catalog_tables: list[str] = []
     manifest_entries: list[dict] = []
 
     if source_type in ("mssql", "mysql", "mariadb"):
-        pgloader_tables = [o["fqn"] for o in objs if o["type"] == "table"]
+        catalog_tables = [o["fqn"] for o in objs if o["type"] == "table"]
 
     if source_type == "oracle":
         oracle_catalog_tables = [o["fqn"] for o in objs if o["type"] == "table"]
@@ -937,7 +937,7 @@ def main():
 
     manifest = {
         "source_type": source_type,
-        "pgloader_tables": pgloader_tables,
+        "catalog_tables": catalog_tables,
         "oracle_catalog_tables": oracle_catalog_tables,
         "converted_objects": manifest_entries,
         "failed": [],
