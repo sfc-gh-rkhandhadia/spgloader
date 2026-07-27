@@ -9,7 +9,7 @@ description: "Migrate MSSQL, MySQL, MariaDB, or Oracle databases to Snowflake Po
   annotations, deployment, and validation.
   Triggers: migrate to snowflake postgres, spgloader, mssql to spg,
   mysql to spg, mariadb to spg, oracle to spg, database migration to postgres,
-  pgloader migration, source ddl to snowflake postgres, convert mssql mysql mariadb oracle to postgres."
+  source ddl to snowflake postgres, convert mssql mysql mariadb oracle to postgres."
 ---
 
 # spgloader — Multi-Source to Snowflake Postgres Migration
@@ -162,17 +162,23 @@ $SPGLOADER_WORK_DIR/
 │   ├── deprecated_review.json    — per-group user disposition decisions
 │   └── deprecated_report.md      — human-readable report of detected patterns
 ├── conversion/
-│   ├── pgloader/migration.load   — pgloader config
 │   └── postgres/
-│       ├── wave_1_tables/        — Oracle tables only
 │       ├── wave_2_views/
+│       ├── wave_2_views_fixed/
 │       ├── wave_3_functions/
+│       ├── wave_3_functions_fixed/
 │       └── wave_4_procedures_triggers/
-│   └── _conversion_report.json
+│   ├── _conversion_report.json
+│   ├── deploy_report.json
+│   ├── functions_deploy_report.json
+│   ├── procedures_deploy_report.json
+│   └── repair_report.json
 ├── deployment/
 │   └── deployment_summary.json
 └── validation/
-    └── validation_report.json
+    ├── validation_report.json
+    ├── migration_report.html
+    └── migration_report.pdf  (optional)
 ```
 
 ## Progress Tracking
@@ -243,15 +249,27 @@ Objects migrated:
   Tables:              N  (catalog-based, <M> workers)
   Foreign keys:        N  (or: NOT migrated — no catalog)
   Indexes:             N  (or: NOT migrated — no catalog)
-  Views:               N  (LLM/rule conversion, wave 2)
-  Functions:           N  (LLM/rule conversion, wave 3)
-  Stored procedures:   N  (LLM/rule conversion, wave 4)
-  Triggers:            N  (LLM/rule conversion, wave 4)
+  Views:               N  (rule conversion + LLM repair)
+  Functions:           N  (rule conversion + LLM repair)
+  Stored procedures:   N  (rule conversion + LLM repair)
+
+LLM Repair (claude-sonnet-4-5):
+  Fixed by rules   : N
+  Fixed by LLM     : N
+  Still failing    : N  (UDTT types or truncated DDL)
 
 Deployment:   N succeeded / N failed / N skipped
 Validation:   N tables match / N FKs match / N indexes match
 
+Report:       <SPGLOADER_WORK_DIR>/migration_report.html
 Working dir:  <SPGLOADER_WORK_DIR>
+```
+
+Then offer to generate the HTML report:
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/generate_report.py \
+  "$SPGLOADER_WORK_DIR" \
+  --output "$SPGLOADER_WORK_DIR/migration_report.html"
 ```
 
 ---
