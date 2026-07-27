@@ -78,12 +78,16 @@ Output: `$SPGLOADER_WORK_DIR/copy_data_report.json`
 
 ### Why not pgloader?
 
-pgloader is available as a legacy fallback via `sub-skills/convert/pgloader/SKILL.md` but
-should only be used if the catalog path fails for a specific reason. Known pgloader issues:
+pgloader is available as a **legacy fallback** via `sub-skills/convert/pgloader/SKILL.md`
+but should only be used if the user **explicitly requests it** after acknowledging the
+performance warnings. Known pgloader issues:
 - OOM on tables > a few million rows (loads full result set into JVM heap)
 - Requires building a Docker image (`spgloader-pgloader:local`)
 - FreeTDS / TLS negotiation failures on macOS arm64
 - Single-threaded — slow for wide schemas (1000+ tables)
+
+**Never silently fall back to pgloader.** If the catalog path fails, surface the error
+to the user and fix it — do NOT automatically retry with pgloader.
 
 ---
 

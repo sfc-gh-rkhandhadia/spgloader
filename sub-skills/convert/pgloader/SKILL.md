@@ -1,15 +1,48 @@
 ---
 name: spgloader-convert-pgloader
-description: "Generate pgloader configuration and run tables+data migration from MSSQL or MySQL to Snowflake Postgres via Docker."
+description: "LEGACY fallback only: pgloader migration from MSSQL or MySQL. Default path is catalog-based (parallel_deploy.py + copy_source_data.py). Use this only when explicitly requested and after user acknowledges performance warnings."
 parent_skill: spgloader
 ---
 
-# spgloader — Phase 4a: pgloader Migration (Docker)
+# spgloader — Phase 4a: pgloader Migration (Docker) ⚠️ LEGACY
+
+## ⚠️ MANDATORY STOPPING POINT — Read before proceeding
+
+**pgloader is a legacy fallback. The default migration path is:**
+```
+parallel_deploy.py  (schema: tables, indexes, FKs)
+copy_source_data.py (data: streaming batches, parallel workers)
+```
+
+Before loading this sub-skill, you MUST display this warning and use
+`ask_user_question` to get explicit acknowledgement:
+
+```
+WARNING: pgloader has known performance issues
+
+  ❌  Memory: pgloader loads entire result sets into a JVM heap.
+      Large tables (millions of rows) frequently cause out-of-memory crashes.
+  ❌  Speed: single-threaded copy — slow for schemas with 100+ tables.
+  ❌  Docker required: must build spgloader-pgloader:local image first.
+  ❌  TLS issues: FreeTDS/TLS negotiation failures on macOS arm64.
+
+The recommended path (parallel_deploy.py + copy_source_data.py) does not
+have any of these limitations.
+
+Are you sure you want to use pgloader instead of the recommended path?
+```
+
+Use `ask_user_question` with options:
+- "Yes, I understand the risks — use pgloader anyway"
+- "No, use the recommended catalog path instead" (route back to convert/SKILL.md Phase 4A)
+
+**Only continue past this point if the user explicitly chooses pgloader.**
+
+---
 
 ## When to Load
 
-From `spgloader/convert/SKILL.md` when `pgloader_eligible` is not empty and
-`SOURCE_TYPE` is `mssql` or `mysql`.
+Only after the mandatory warning above is acknowledged.
 
 pgloader always runs inside Docker (`spgloader-pgloader:local`) rather than the host
 binary.  This ensures consistent FreeTDS/TLS behaviour across all host platforms
