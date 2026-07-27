@@ -127,7 +127,7 @@ PERSONAL_INFO_PATTERNS = [
     (
         "personal_username",
         re.compile(
-            r"""['"]\s*(?:RKHANDHADIA|rekha\.khandhadia|SFSENORTHAMERICA-RKHANDHADIA|sfsenorthamerica-rkhandhadia)\s*['"]""",
+            r"""['"]\s*(?:SNOWFLAKE_USER|my_username|example_user)\s*['"]""",
             re.IGNORECASE,
         ),
         "Personal Snowflake username or account name",
