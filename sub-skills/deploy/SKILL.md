@@ -98,18 +98,37 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_functions.py \
 
 ### Step 6: Deploy procedures
 
-Use `--include-legacy` to run non-interactively (skips the legacy group confirmation prompts).
+The script **never prompts via stdin**. All decisions come from `deprecated_review.json` (Phase 3.6).
 
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_procedures.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
-  --spg-service "$TARGET_SPG_SERVICE" \
-  --include-legacy
+  --spg-service "$TARGET_SPG_SERVICE"
 ```
 
-Other useful flags:
-- `--exclude-legacy` — skip all legacy groups (aspnet_, dba_, etc.) silently
-- `--no-interactive` — same as `--exclude-legacy` (non-interactive mode)
+**Handling exit code 2 (undecided legacy groups):**
+
+If `deploy_procedures.py` exits with code 2, it found legacy procedure groups not yet decided in
+Phase 3.6. It will have written them to `$SPGLOADER_WORK_DIR/deprecated/legacy_groups_pending.json`.
+
+In that case, the skill MUST:
+
+1. Read `legacy_groups_pending.json` to get the undecided groups.
+2. Use `ask_user_question` to present each group to the user with **migrate** or **skip** options.
+   Show the group label, description, and procedure count.
+3. Write the user's decisions back into `deprecated_review.json` under `groups[label].disposition`.
+4. Re-run `deploy_procedures.py` — it will now read the updated decisions and proceed.
+
+```python
+# Example: reading pending groups and prompting user
+import json, pathlib
+pending = json.loads(pathlib.Path(f"{WORK_DIR}/deprecated/legacy_groups_pending.json").read_text())
+# For each group in pending["pending_groups"]:
+#   ask_user_question with options: ["Migrate to PostgreSQL", "Skip — exclude from migration"]
+#   write decision to deprecated_review.json
+```
+
+**Never skip this step or default silently — the user must decide.**
 
 ---
 

@@ -5,24 +5,22 @@ deploy_procedures.py — Deploy stored procedure SQL files to SPG.
 Reads wave_4_procedures_triggers/*.sql, deploys each one, and writes a report.
 
 Legacy procedure detection:
-  Before deploying, the script groups procedures that match configurable
-  legacy-prefix rules (e.g. aspnet_*, sp_fivetran_*) and prompts the user
-  whether to deploy each group.  Use --include-legacy to skip the prompts
-  and deploy everything, or --exclude-legacy to skip all legacy groups.
+  This script NEVER prompts for user input via stdin.
+  All legacy/deprecated decisions must be made BEFORE calling this script:
 
-  Legacy rules live in references/legacy-proc-rules.yaml in the skill
-  directory (next to this script's parent).  They are intentionally kept
-  separate from the workspace so one rule set applies to all projects.
+  1. Phase 3.6 (analyze_deprecated.py) captures user decisions in
+     deprecated/deprecated_review.json via the skill's ask_user_question.
+
+  2. If legacy groups are found that are NOT in deprecated_review.json,
+     the script writes them to deprecated/legacy_groups_pending.json
+     and exits with code 2.  The calling SKILL must then prompt the user
+     via ask_user_question, update deprecated_review.json, and re-run.
+
+  3. On re-run, all groups are resolved in deprecated_review.json and
+     the deploy proceeds non-interactively.
 
 Usage:
-  # Interactive (default): prompts for each legacy group found
   python deploy_procedures.py --work-dir ~/.spgloader/... --spg-service ...
-
-  # Non-interactive: deploy everything including legacy
-  python deploy_procedures.py ... --include-legacy
-
-  # Non-interactive: skip all legacy groups
-  python deploy_procedures.py ... --exclude-legacy
 """
 import argparse
 import json
@@ -93,23 +91,6 @@ def _classify_procedure(short_name: str, rules: list[dict]) -> str | None:
     return None
 
 
-def _prompt_deploy_group(label: str, description: str,
-                          names: list[str], interactive: bool) -> bool:
-    """Ask the user whether to deploy a legacy group.
-
-    Returns True if the group should be deployed.
-    Always returns True when not interactive (handled by caller).
-    """
-    print(f"\n  ┌─ Legacy group detected: [{label}]")
-    print(f"  │  {description}")
-    print(f"  │  Procedures in this group ({len(names)}):")
-    for n in sorted(names):
-        print(f"  │    • {n}")
-    print(f"  └─ Deploy this group? [y/N]: ", end="", flush=True)
-    answer = input().strip().lower()
-    return answer in ("y", "yes")
-
-
 # ---------------------------------------------------------------------------
 # Core deploy
 # ---------------------------------------------------------------------------
@@ -129,6 +110,32 @@ def _short_name(fq_name: str) -> str:
     return fq_name.split(".")[-1]
 
 
+def _load_deprecated_skip_set(work_dir: Path) -> set[str]:
+    """Read deprecated_review.json (Phase 3.6) and return FQNs marked 'skip'.
+
+    Returns an empty set if the file does not exist (pre-3.6 workspace).
+    """
+    review_path = work_dir / "deprecated" / "deprecated_review.json"
+    if not review_path.exists():
+        return set()
+    try:
+        import json
+        data = json.loads(review_path.read_text(encoding="utf-8"))
+        skip_fqns: set[str] = set()
+        for group in data.get("groups", {}).values():
+            if group.get("disposition") == "skip":
+                for fqn in group.get("object_fqns", []):
+                    skip_fqns.add(fqn.lower())
+        return skip_fqns
+    except Exception as e:
+        print(f"  WARN: could not load deprecated_review.json: {e}", file=sys.stderr)
+        return set()
+
+
+# Exit code 2 = pending user decisions; skill must prompt then re-run.
+EXIT_PENDING_DECISIONS = 2
+
+
 def deploy_procedures(
     work_dir: Path,
     spg_service: str,
@@ -140,11 +147,13 @@ def deploy_procedures(
 ) -> dict:
     """Deploy procedures from wave_4_procedures_triggers/ to SPG.
 
-    Parameters
-    ----------
-    include_legacy  : deploy all legacy groups without prompting
-    exclude_legacy  : skip all legacy groups without prompting
-    interactive     : when True, prompt for each legacy group found
+    NEVER prompts via stdin.  All legacy/deprecated decisions come from
+    deprecated/deprecated_review.json (written by Phase 3.6 or by the
+    skill after calling ask_user_question).
+
+    If undecided legacy groups are found, writes them to
+    deprecated/legacy_groups_pending.json and sys.exit(2) so the
+    calling skill can prompt the user and re-run.
     """
     import psycopg2
 
@@ -158,7 +167,12 @@ def deploy_procedures(
         print("No procedure files found.")
         return {}
 
-    # Load legacy rules
+    # Load Phase 3.6 deprecated decisions — these take priority over everything
+    deprecated_skip = _load_deprecated_skip_set(work_dir)
+    if deprecated_skip:
+        print(f"  Phase 3.6 review: {len(deprecated_skip)} object(s) pre-marked 'skip'")
+
+    # Load legacy rules (for objects NOT covered by deprecated_review.json)
     rules = _load_legacy_rules(skill_dir)
 
     # ── 1. Parse all procedures and classify them ─────────────────────────
@@ -167,50 +181,104 @@ def deploy_procedures(
         sql = f.read_text(encoding="utf-8", errors="replace").strip()
         name = _extract_proc_name(sql) or f.stem
         sname = _short_name(name)
-        label = _classify_procedure(sname, rules)
-        procs.append({"file": f, "sql": sql, "name": name, "label": label})
+        # Check Phase 3.6 deprecated decision first
+        fqn_lower = name.lower()
+        short_lower = sname.lower()
+        deprecated = any(
+            fqn_lower == d or short_lower == d.split(".")[-1]
+            for d in deprecated_skip
+        )
+        label = None if deprecated else _classify_procedure(sname, rules)
+        procs.append({"file": f, "sql": sql, "name": name, "label": label,
+                      "deprecated_skip": deprecated})
 
     # ── 2. Handle legacy groups ───────────────────────────────────────────
-    # Collect unique legacy labels present in this workspace
+    # Collect unique legacy labels for procedures NOT already decided by Phase 3.6
     legacy_labels: dict[str, list[str]] = {}  # label → [proc_names]
     for p in procs:
-        if p["label"]:
+        if p["label"] and not p["deprecated_skip"]:
             legacy_labels.setdefault(p["label"], []).append(p["name"])
 
-    deploy_labels: set[str] = set()   # labels approved for deployment
-    skip_labels: set[str] = set()     # labels skipped
+    skip_labels: set[str] = set()  # labels skipped
+
+    # Report Phase 3.6 pre-decided objects
+    already_deprecated = [p["name"] for p in procs if p["deprecated_skip"]]
+    if already_deprecated:
+        print(f"  Phase 3.6 decisions: skipping {len(already_deprecated)} pre-reviewed object(s)")
 
     if legacy_labels:
-        if include_legacy:
-            deploy_labels = set(legacy_labels)
-            print(f"\n  --include-legacy: deploying all {len(legacy_labels)} legacy group(s)")
-        elif exclude_legacy:
-            skip_labels = set(legacy_labels)
-            print(f"\n  --exclude-legacy: skipping all {len(legacy_labels)} legacy group(s):")
-            for lbl, names in legacy_labels.items():
+        # Check if decisions are already recorded in deprecated_review.json
+        review_path = work_dir / "deprecated" / "deprecated_review.json"
+        reviewed_labels: set[str] = set()
+        if review_path.exists():
+            try:
+                rdata = json.loads(review_path.read_text(encoding="utf-8"))
+                for gkey, gval in rdata.get("groups", {}).items():
+                    if gval.get("disposition") in ("skip", "migrate"):
+                        reviewed_labels.add(gkey)
+                        reviewed_labels.add(gval.get("pattern_name", "").lower())
+            except Exception:
+                pass
+
+        # Separate already-decided from undecided
+        undecided: dict[str, list[str]] = {}
+        for lbl, names in legacy_labels.items():
+            rule = next((r for r in rules if r["label"] == lbl), {})
+            if lbl in reviewed_labels or rule.get("description", "").lower() in reviewed_labels:
+                skip_labels.add(lbl)  # default: skip if previously reviewed
+            else:
+                undecided[lbl] = names
+
+        if undecided:
+            # Write pending decisions file — the SKILL will read this,
+            # prompt the user via ask_user_question, update deprecated_review.json,
+            # and re-run this script.
+            pending: list[dict] = []
+            for lbl, names in undecided.items():
                 rule = next((r for r in rules if r["label"] == lbl), {})
-                print(f"    [{lbl}] {len(names)} procs — {rule.get('description','')[:60]}")
-        elif interactive:
-            print(f"\nLegacy procedure groups found: {len(legacy_labels)}")
-            for lbl, names in legacy_labels.items():
-                rule = next((r for r in rules if r["label"] == lbl), {})
-                if _prompt_deploy_group(lbl, rule.get("description", ""), names, interactive):
-                    deploy_labels.add(lbl)
-                    print(f"  → [{lbl}]: will be deployed")
-                else:
-                    skip_labels.add(lbl)
-                    print(f"  → [{lbl}]: will be skipped")
-        else:
-            # Non-interactive with no flag: default to skipping legacy
-            skip_labels = set(legacy_labels)
-            print(f"\n  Non-interactive mode: skipping {len(skip_labels)} legacy group(s) "
-                  f"(use --include-legacy to deploy them)")
+                pending.append({
+                    "label": lbl,
+                    "description": rule.get("description", ""),
+                    "procedures": sorted(names),
+                })
+            pending_path = work_dir / "deprecated" / "legacy_groups_pending.json"
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps({"pending_groups": pending}, indent=2), encoding="utf-8"
+            )
+            print(
+                f"\nERROR: {len(undecided)} legacy group(s) need user decisions."
+                f"\nWritten to: {pending_path}"
+                f"\nThe skill must prompt the user via ask_user_question,"
+                f" update deprecated_review.json, then re-run this script.",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_PENDING_DECISIONS)
+
+        # All legacy groups are already decided — apply skip/include from review
+        review_data = {}
+        if review_path.exists():
+            try:
+                review_data = json.loads(review_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        for lbl, names in legacy_labels.items():
+            disposition = "skip"  # default
+            for gval in review_data.get("groups", {}).values():
+                if gval.get("pattern_name", "") and lbl in gval.get("pattern_name", "").lower():
+                    disposition = gval.get("disposition", "skip")
+                    break
+            if disposition == "skip":
+                skip_labels.add(lbl)
+                print(f"  Skipping legacy group [{lbl}] ({len(names)} procs) per Phase 3.6 review")
+            else:
+                print(f"  Including legacy group [{lbl}] ({len(names)} procs) per Phase 3.6 review")
 
     # ── 3. Build the final ordered deploy list ────────────────────────────
     to_deploy = []
     skipped_legacy = []
     for p in procs:
-        if p["label"] in skip_labels:
+        if p["deprecated_skip"] or p["label"] in skip_labels:
             skipped_legacy.append(p["name"])
         else:
             to_deploy.append(p)
@@ -297,7 +365,7 @@ def main() -> None:
     parser.add_argument("--exclude-legacy", action="store_true",
                         help="Skip all legacy groups without prompting")
     parser.add_argument("--no-interactive", action="store_true",
-                        help="Non-interactive mode (defaults to --exclude-legacy behaviour)")
+                        help="Deprecated — script is always non-interactive; accepted for backwards compatibility")
     parser.add_argument("--repair", action="store_true",
                         help="After deploy, run repair_procedures.py on any failures")
     parser.add_argument("--rules-only", action="store_true",
