@@ -506,8 +506,10 @@ def render_html(data: dict) -> str:
   /* ── Charts ── */
   .chart-row{{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:28px}}
   .chart-card{{background:var(--surface);border:1px solid var(--border);
-    border-radius:10px;padding:18px;flex:1;min-width:260px;max-width:460px}}
-  .chart-card h3{{margin-bottom:14px}}
+    border-radius:10px;padding:18px;flex:1;min-width:260px;max-width:460px;
+    display:flex;flex-direction:column}}
+  .chart-card h3{{margin-bottom:14px;flex-shrink:0}}
+  .chart-card canvas{{flex:1;min-height:200px}}
 
   /* ── Summary cards (row) ── */
   .summary-row{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}}
@@ -797,7 +799,7 @@ new Chart(document.getElementById('tablesChart'), {{
       backgroundColor: '#0069be', borderRadius: 4 }}]
   }},
   options: {{ plugins: {{ legend: {{ display: false }} }},
-    scales: {{ y: {{ beginAtZero: true }} }}, maintainAspectRatio: false }}
+    scales: {{ y: {{ beginAtZero: true }} }}, responsive: true, maintainAspectRatio: false }}
 }});
 
 // Objects by type
@@ -810,7 +812,7 @@ new Chart(document.getElementById('typeChart'), {{
       borderWidth: 0 }}]
   }},
   options: {{ plugins: {{ legend: {{ position: 'bottom', labels: {{ boxWidth: 12 }} }} }},
-    maintainAspectRatio: false }}
+    responsive: true, maintainAspectRatio: false }}
 }});
 
 // Success donut
@@ -829,6 +831,7 @@ new Chart(document.getElementById('successChart'), {{
         return ` ${{ctx.label}}: ${{ctx.parsed}} (${{Math.round(ctx.parsed/total*100)}}%)`;
       }} }} }}
     }},
+    responsive: true,
     maintainAspectRatio: false
   }}
 }});
