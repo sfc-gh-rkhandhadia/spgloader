@@ -180,6 +180,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     parity_results = _load_json(ws / "parity" / "parity_results.json")
     parity_structured = bool(parity_results)
 
+    # Equivalence filter (user's legacy group include/skip choices)
+    equiv_filter = _load_json(ws / "parity" / "equivalence_filter.json")
+
     return {
         "generated":      date.today().isoformat(),
         "source_type":    source_type,
@@ -222,6 +225,7 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "parity_report_md":   parity_report_md,
         "parity_results":     parity_results,
         "parity_structured":  parity_structured,
+        "equiv_filter":       equiv_filter,
     }
 
 
@@ -405,6 +409,7 @@ def _build_equivalence_tab(data: dict) -> str:
 
     grand   = parity_results.get("grand", {})
     schemas = parity_results.get("schemas", {})
+    equiv_filter = data.get("equiv_filter", {})
 
     total_pass    = grand.get("pass",     0)
     total_fail    = grand.get("fail",     0)
@@ -412,6 +417,10 @@ def _build_equivalence_tab(data: dict) -> str:
     total_spgonly = grand.get("spg_only", 0)
     total_tested  = total_pass + total_fail
     pass_pct      = round(total_pass / total_tested * 100) if total_tested else 0
+
+    total_excluded = grand.get("excluded", sum(
+        len(s.get("excluded_objects", [])) for s in schemas.values()
+    ))
 
     # Summary cards
     cards = f"""
@@ -434,7 +443,34 @@ def _build_equivalence_tab(data: dict) -> str:
       <div class='summary-card'>
         <div class='s-label'>Pass Rate</div>
         <div class='s-value' style='color:var(--{"green" if pass_pct >= 80 else "amber" if pass_pct >= 60 else "red"})'>{pass_pct}%</div>
-      </div>"""
+      </div>
+      {f"""<div class='summary-card'>
+        <div class='s-label'>⏭ Excluded (legacy)</div>
+        <div class='s-value' style='color:var(--muted)'>{total_excluded}</div>
+      </div>""" if total_excluded else ""}"""
+
+    # Exclusion banner (when user opted out of some legacy groups)
+    exclusion_banner = ""
+    if equiv_filter and equiv_filter.get("excluded_groups"):
+        ex_groups = equiv_filter["excluded_groups"]
+        fqn_count = len(equiv_filter.get("excluded_fqns", []))
+        group_chips = "".join(
+            f"<span class='badge badge-muted' style='margin-right:4px'>{g}</span>"
+            for g in ex_groups
+        )
+        exclusion_banner = f"""
+  <div class="alert" style="background:var(--surface2);border-left:3px solid var(--blue);margin-bottom:20px">
+    <span class="alert-icon" style="color:var(--blue)">ℹ</span>
+    <div>
+      <strong>{len(ex_groups)} legacy group(s) excluded from this test by user choice
+      ({fqn_count} objects total):</strong><br>
+      <div style="margin-top:6px">{group_chips}</div>
+      <div style="margin-top:4px;font-size:11px;color:var(--muted)">
+        These objects were migrated but excluded from the equivalence test.
+        To include them, re-run Phase 6.6 and choose <em>Include</em> for these groups.
+      </div>
+    </div>
+  </div>"""
 
     # Per-schema sections with object tables
     schema_sections = ""
@@ -489,11 +525,19 @@ def _build_equivalence_tab(data: dict) -> str:
                 f"<td class='small'>{m.get('type','')}</td></tr>"
             )
 
+        excluded = s.get("excluded_objects", [])
+        excluded_rows = "".join(
+            f"<tr><td class='mono small'>{e.get('fqn','')}</td>"
+            f"<td class='small'>{e.get('type','')}</td></tr>"
+            for e in excluded
+        )
+
         schema_sections += f"""
     <div class="section">
       <h2>Schema: {schema_name}
         <span class='badge badge-{badge_style}' style='font-size:12px;margin-left:8px'>{badge_text}</span>
         <span class='badge badge-muted'    style='font-size:12px;margin-left:4px'>{len(missing)} missing</span>
+        {f"<span class='badge badge-info' style='font-size:12px;margin-left:4px'>{len(excluded)} excluded</span>" if excluded else ""}
       </h2>
       <div class="table-wrap">
         <table>
@@ -510,9 +554,14 @@ def _build_equivalence_tab(data: dict) -> str:
         <div class='table-wrap' style='margin-top:8px'><table>
         <thead><tr><th>Object</th><th>Type</th></tr></thead>
         <tbody>{missing_rows}</tbody></table></div></details>""" if missing else ""}
+      {f"""<details style='margin-top:8px'><summary style='cursor:pointer;font-size:12px;color:var(--blue)'>{len(excluded)} Excluded Objects (user opted out of testing)</summary>
+        <div class='table-wrap' style='margin-top:8px'><table>
+        <thead><tr><th>Object (FQN)</th><th>Type</th></tr></thead>
+        <tbody>{excluded_rows}</tbody></table></div></details>""" if excluded else ""}
     </div>"""
 
     return f"""
+  {exclusion_banner}
   <div class="section">
     <h2>Equivalence Test Summary (Phase 6.6)</h2>
     <p class="small" style="color:var(--muted);margin-bottom:14px">

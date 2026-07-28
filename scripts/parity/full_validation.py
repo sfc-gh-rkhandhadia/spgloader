@@ -24,22 +24,46 @@ Limitations:
 """
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import pymssql, psycopg2, psycopg2.extras, concurrent.futures, sys
+import pymssql, psycopg2, psycopg2.extras, concurrent.futures, sys, threading
 from config import MSSQL_CONF, SPG_CONF, is_mssql_system_schema, is_spg_system_schema, check_required
 
 check_required()
 
-BATCH = 12
+BATCH = 24   # higher parallelism — connections are reused per thread
 SEP   = "=" * 110
 
-def ms_conn():  return pymssql.connect(**MSSQL_CONF)
-def spg_conn(): return psycopg2.connect(**SPG_CONF)
+# ── Thread-local persistent connections (avoids per-object open/close overhead) ──
+_tls = threading.local()
+
+def ms_conn():
+    """Return a thread-local MSSQL connection, reconnecting if closed."""
+    c = getattr(_tls, 'ms', None)
+    try:
+        if c is not None:
+            c.cursor().execute("SELECT 1")
+            return c
+    except Exception:
+        pass
+    _tls.ms = pymssql.connect(**MSSQL_CONF)
+    return _tls.ms
+
+def spg_conn():
+    """Return a thread-local SPG connection, reconnecting if closed."""
+    c = getattr(_tls, 'spg', None)
+    try:
+        if c is not None and not c.closed:
+            return c
+    except Exception:
+        pass
+    _tls.spg = psycopg2.connect(**SPG_CONF)
+    _tls.spg.autocommit = True
+    return _tls.spg
 
 
 # ── Schema discovery ──────────────────────────────────────────────────────────
 
 def discover_schemas_mssql():
-    conn = ms_conn(); cur = conn.cursor()
+    cur = ms_conn().cursor()
     cur.execute("""
         SELECT DISTINCT s.name
         FROM sys.objects o
@@ -47,12 +71,10 @@ def discover_schemas_mssql():
         WHERE o.type IN ('P', 'FN', 'TF', 'IF', 'V')
         ORDER BY s.name
     """)
-    schemas = [r[0] for r in cur.fetchall() if not is_mssql_system_schema(r[0])]
-    conn.close()
-    return schemas
+    return [r[0] for r in cur.fetchall() if not is_mssql_system_schema(r[0])]
 
 def discover_schemas_spg():
-    conn = spg_conn(); cur = conn.cursor()
+    cur = spg_conn().cursor()
     cur.execute("""
         SELECT DISTINCT schemaname FROM pg_views
         UNION
@@ -60,15 +82,13 @@ def discover_schemas_spg():
         JOIN pg_namespace n ON p.pronamespace = n.oid
         ORDER BY 1
     """)
-    schemas = [r[0] for r in cur.fetchall() if not is_spg_system_schema(r[0])]
-    conn.close()
-    return schemas
+    return [r[0] for r in cur.fetchall() if not is_spg_system_schema(r[0])]
 
 
 # ── Object discovery per schema ───────────────────────────────────────────────
 
 def discover_mssql_schema(schema):
-    conn = ms_conn(); cur = conn.cursor(as_dict=True)
+    cur = ms_conn().cursor(as_dict=True)
     result = {}
     try:
         cur.execute("""
@@ -105,11 +125,10 @@ def discover_mssql_schema(schema):
             result[r['obj_name'].lower()] = {'name': r['obj_name'], 'type': r['obj_type']}
     except Exception:
         pass
-    conn.close()
     return result
 
 def discover_spg_schema(schema):
-    conn = spg_conn(); cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur = spg_conn().cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     result = {}
     try:
         cur.execute("""
@@ -133,7 +152,6 @@ def discover_spg_schema(schema):
             result[r['obj_name'].lower()] = {'name': r['obj_name'], 'type': 'VIEW'}
     except Exception:
         pass
-    conn.close()
     return result
 
 
@@ -141,23 +159,21 @@ def discover_spg_schema(schema):
 
 def validate_view(schema, name):
     try:
-        ms = ms_conn(); mc = ms.cursor()
+        mc = ms_conn().cursor()
         mc.execute("SELECT TOP 0 * FROM [%s].[%s]" % (schema, name))
         ms_cols  = [d[0].lower() for d in mc.description]
         mc.execute("SELECT COUNT(*) FROM [%s].[%s]" % (schema, name))
         ms_count = mc.fetchone()[0]
-        ms.close()
     except Exception as e:
         return {'verdict': 'ERROR', 'issues': ['MSSQL_ERR: %s' % str(e)[:100]],
                 'ms_rows': None, 'spg_rows': None}
 
     try:
-        sp = spg_conn(); sc = sp.cursor()
+        sc = spg_conn().cursor()
         sc.execute('SELECT * FROM "%s"."%s" LIMIT 0' % (schema, name))
         spg_cols  = [d[0].lower() for d in sc.description]
         sc.execute('SELECT COUNT(*) FROM "%s"."%s"' % (schema, name))
         spg_count = sc.fetchone()[0]
-        sp.close()
     except Exception as e:
         return {'verdict': 'ERROR', 'issues': ['SPG_ERR: %s' % str(e)[:120]],
                 'ms_rows': ms_count, 'spg_rows': None}
@@ -178,7 +194,7 @@ def validate_view(schema, name):
 
 def get_ms_params(schema, name):
     try:
-        conn = ms_conn(); cur = conn.cursor(as_dict=True)
+        cur = ms_conn().cursor(as_dict=True)
         cur.execute("""
             SELECT p.parameter_id, p.name AS pname, t.name AS tname
             FROM sys.procedures pr
@@ -188,14 +204,14 @@ def get_ms_params(schema, name):
             WHERE s.name = %s AND LOWER(pr.name) = %s
             ORDER BY p.parameter_id
         """, (schema, name))
-        rows = cur.fetchall(); conn.close()
+        rows = cur.fetchall()
         return [{'name': r['pname'].lstrip('@').lower(), 'type': r['tname']} for r in rows]
     except Exception as e:
         return 'ERR:%s' % str(e)[:80]
 
 def get_spg_params(schema, name):
     try:
-        conn = spg_conn(); cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur = spg_conn().cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("""
             SELECT pa.ordinal_position, pa.parameter_name, pa.data_type, pa.parameter_mode
             FROM information_schema.routines r
@@ -203,7 +219,7 @@ def get_spg_params(schema, name):
             WHERE r.routine_schema = %s AND LOWER(r.routine_name) = %s
             ORDER BY pa.ordinal_position
         """, (schema, name))
-        rows = cur.fetchall(); conn.close()
+        rows = cur.fetchall()
         return [{'name': (r['parameter_name'] or '').lstrip('_').lower(), 'type': r['data_type'] or ''}
                 for r in rows if (r['parameter_mode'] or 'IN') == 'IN']
     except Exception as e:
@@ -240,12 +256,23 @@ def validate_proc(schema, name):
 
 # ── Per-schema runner ─────────────────────────────────────────────────────────
 
-def run_schema(schema, grand, schema_results=None):
+def run_schema(schema, grand, schema_results=None, exclude_fqns=None):
     ms_obj  = discover_mssql_schema(schema)
     spg_obj = discover_spg_schema(schema)
 
     ms_names  = set(ms_obj.keys())
     spg_names = set(spg_obj.keys())
+
+    # Apply FQN exclusions (user opted out of testing these legacy objects)
+    excluded_names: set[str] = set()
+    if exclude_fqns:
+        for name in list(ms_names):
+            fqn = ('%s.%s' % (schema, name)).lower()
+            if fqn in exclude_fqns or name.lower() in exclude_fqns:
+                excluded_names.add(name)
+        ms_names  = ms_names  - excluded_names
+        spg_names = spg_names - excluded_names
+
     matched   = ms_names & spg_names
     only_ms   = ms_names - spg_names
     only_spg  = spg_names - ms_names
@@ -265,6 +292,7 @@ def run_schema(schema, grand, schema_results=None):
             'results': [],
             'missing_objects': [{'fqn': '%s.%s' % (schema, n), 'name': n, 'type': ms_obj[n]['type']} for n in sorted(only_ms)],
             'spg_only_objects': [{'fqn': '%s.%s' % (schema, n), 'name': n} for n in sorted(only_spg)],
+            'excluded_objects': [{'fqn': '%s.%s' % (schema, n), 'name': n, 'type': ms_obj[n]['type']} for n in sorted(excluded_names)],
         }
 
     def run_one(name):
@@ -354,7 +382,22 @@ def main():
     parser = argparse.ArgumentParser(description="Cross-schema structural validator")
     parser.add_argument("--inventory", help="Path to object_inventory.json (unused, accepted for compat)")
     parser.add_argument("--output-dir", help="Directory to write parity_results.json")
+    parser.add_argument("--exclude-fqns-file",
+        help="JSON file with {excluded_fqns: [...]} — skip these FQNs from the equivalence test")
     args, _ = parser.parse_known_args()
+
+    # Load FQN exclusions (user opted out of testing legacy groups)
+    exclude_fqns: set[str] = set()
+    if args.exclude_fqns_file:
+        import os
+        if os.path.exists(args.exclude_fqns_file):
+            with open(args.exclude_fqns_file) as ef:
+                edata = _json.load(ef)
+            for fqn in edata.get('excluded_fqns', []):
+                exclude_fqns.add(fqn.lower())
+                exclude_fqns.add(fqn.split('.')[-1].lower())
+            if exclude_fqns:
+                print("[FILTER] Excluding %d FQN(s) from equivalence test per equivalence_filter.json" % len(edata.get('excluded_fqns', [])))
 
     print("[NOTICE] full_validation.py is a structural spot-check tool. "
           "Results are not saved to audit tables. Use run.py for the full pipeline.")
@@ -376,7 +419,7 @@ def main():
     print(SEP)
 
     for schema in all_schemas:
-        run_schema(schema, grand, schema_results)
+        run_schema(schema, grand, schema_results, exclude_fqns=exclude_fqns if exclude_fqns else None)
 
     print("\n" + SEP)
     print("GRAND TOTAL ACROSS ALL SCHEMAS")
@@ -384,6 +427,10 @@ def main():
     print("  PASS: %d  |  FAIL/ERROR: %d  |  Missing-in-SPG: %d  |  SPG-only: %d" % (
         grand['pass'], grand['fail'], grand['missing'], grand['spg_only']))
     print(SEP)
+
+    grand['excluded'] = sum(len(s.get('excluded_objects', [])) for s in schema_results.values())
+    if grand['excluded']:
+        print("  Excluded from test (user choice): %d" % grand['excluded'])
 
     # Write structured JSON output
     out_dir = args.output_dir
@@ -403,7 +450,7 @@ def main():
                 'spg_only': s.get('spg_only', 0),
                 'results': s.get('results', []),
                 'missing_objects': s.get('missing_objects', []),
-                'spg_only_objects': s.get('spg_only_objects', []),
+                'excluded_objects': s.get('excluded_objects', []),
             }
             for sch, s in schema_results.items()
         }

@@ -285,6 +285,58 @@ For any ❌ FAILED objects, show the error message inline.
 
 ---
 
+## Step 7.5 — Legacy group filter for equivalence test
+
+Before running parity, ask the user whether to **include or exclude** each legacy group
+that was **migrated** (disposition = "migrate" in `deprecated_review.json`).
+
+Legacy framework objects (e.g. `aspnet_*`, `sp_fivetran_*`) may fail the structural
+check even if correctly deployed, so the user should decide whether they want them tested.
+
+**Read migrated groups:**
+```python
+import json, pathlib
+review = json.loads(pathlib.Path(f"{WORK_DIR}/deprecated/deprecated_review.json").read_text())
+migrated_groups = {
+    key: grp for key, grp in review.get("groups", {}).items()
+    if grp.get("disposition") == "migrate"
+}
+```
+
+**If migrated_groups is empty — skip this step entirely (no prompt needed).**
+
+**For each migrated group, call `ask_user_question`:**
+```
+header:   "<group_label>"
+question: "The '<group_label>' group (<N> objects) was migrated to SPG.
+           Include these in the equivalence test, or skip them?"
+options:
+  - label: "Include — test them in equivalence test"
+    description: "Objects will be compared MSSQL vs SPG. Any missing or
+                  structurally different objects appear as FAIL."
+  - label: "Skip — exclude from equivalence test"
+    description: "Objects are deployed but won't be tested. They won't
+                  appear as missing or failed in the report."
+```
+
+**Write decisions to `$SPGLOADER_WORK_DIR/parity/equivalence_filter.json`:**
+```json
+{
+  "excluded_groups": ["aspnet_membership"],
+  "excluded_fqns": ["dbo.aspnet_Applications", "dbo.aspnet_Membership"]
+}
+```
+
+If all groups are included, write `{ "excluded_groups": [], "excluded_fqns": [] }`.
+
+**Pass `--exclude-fqns-file` to Step 8:**
+```bash
+EQUIV_FILTER="$SPGLOADER_WORK_DIR/parity/equivalence_filter.json"
+# Add --exclude-fqns-file "$EQUIV_FILTER" to the full_validation.py call below
+```
+
+---
+
 ## Step 8 — Parity testing (SPG-side)
 
 Runs the same queries that succeeded on MSSQL side against SPG and diffs the results.
@@ -301,7 +353,8 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/full_validation.p
   --spg-user     "$SPG_USER" \
   --spg-password "$SPG_PASSWORD" \
   --spg-db       "$SPG_DATABASE" \
-  --output-dir   "$SPGLOADER_WORK_DIR/parity/"
+  --output-dir   "$SPGLOADER_WORK_DIR/parity/" \
+  --exclude-fqns-file "$SPGLOADER_WORK_DIR/parity/equivalence_filter.json"
 ```
 
 Show summary:
