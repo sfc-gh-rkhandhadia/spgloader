@@ -526,6 +526,22 @@ def render_html(data: dict) -> str:
   .alert-error{{background:light-dark(#fef2f2,#450a0a);border-left:3px solid var(--red)}}
   .alert-icon{{font-size:16px;margin-top:1px}}
   .detail-section{{margin-top:16px;padding-top:12px;border-top:1px solid var(--border)}}
+
+  @media print{{
+    *{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+    .tabs{{display:none}}
+    .tab-panel{{display:block!important;page-break-after:always}}
+    .tab-panel:last-child{{page-break-after:avoid}}
+    .kpi-card,.chart-card,.summary-card{{break-inside:avoid}}
+    table{{break-inside:auto}}
+    tr{{break-inside:avoid;break-after:auto}}
+    .header{{-webkit-print-color-adjust:exact}}
+    .content{{padding:16px}}
+    h2{{break-after:avoid}}
+    /* Replace canvas charts with hidden (charts don't render in headless) */
+    .chart-row{{display:none}}
+    .print-chart-summary{{display:flex!important}}
+  }}
   </style>
 </head>
 <body>
@@ -611,6 +627,16 @@ def render_html(data: dict) -> str:
       <h3>Migration Success</h3>
       <div class="chart-container"><canvas id="successChart"></canvas></div>
     </div>
+  </div>
+
+  <!-- Print-only stat row replaces canvas charts in PDF -->
+  <div class="print-chart-summary" style="display:none;gap:12px;flex-wrap:wrap;margin-bottom:24px;padding:16px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--blue)">{total_tables:,}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Tables</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--blue)">{total_indexes:,}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Indexes</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--green)">{total_views}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Views</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--green)">{total_funcs}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Functions</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'amber' if procs_fail else 'green'})">{total_procs}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Procedures</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--green)">{round(total_ok_objs/(total_ok_objs+total_fail_objs)*100) if (total_ok_objs+total_fail_objs) else 100}%</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Success Rate</div></div>
   </div>
 
   <div class="section">
