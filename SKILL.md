@@ -60,6 +60,13 @@ Store as `SOURCE_ENV` — existing | docker
 When the source is a DDL file (not a live connection), we need to load it into a running
 database to enable catalog-based extraction (FK, indexes, IDENTITY columns, etc.).
 
+**Note on SSMS exports:** SQL Server Management Studio "Scripts and Tables" exports produce
+a **directory** of individual `.sql` files (one per object) encoded as **UTF-16 LE**
+(BOM `\xff\xfe`). `load_source_ddl.py --ddl-dir` handles this automatically:
+it detects the encoding, strips `USE [dbname]` statements, sorts files in
+dependency order (Schema → Table → Function → View → Procedure), combines them,
+and runs a second FK pass to resolve forward-reference failures.
+
 Ask the user:
 
 ```
@@ -78,7 +85,8 @@ Store as `CONTAINER_PLATFORM` — docker | spcs | none
 
 **If CONTAINER_PLATFORM = docker or spcs:**
 - Set `SOURCE_ENV = docker` or `SOURCE_ENV = spcs`
-- Phase 1 will deploy the source DB container and load the DDL file
+- Phase 1 will deploy the source DB container and load the DDL file **or directory**
+- Use `--ddl-dir` when the source is an SSMS export directory; `--ddl-file` for a single combined file
 - Phase 3 will extract from the live catalog
 
 **If CONTAINER_PLATFORM = none:**

@@ -1,22 +1,41 @@
 #!/usr/bin/env python3
 """
-load_source_ddl.py — Load a DDL file into the source database Docker container.
+load_source_ddl.py — Load DDL into the source database Docker container.
 
-When the DDL came from a file (not a live existing database), pgloader still needs
-a live connection to read schema metadata.  This script creates a dedicated migration
-database in the running source container and loads the DDL there, giving pgloader a
-real catalog to query.
+Accepts either:
+  --ddl-file PATH   A single combined .sql file (original behaviour)
+  --ddl-dir  PATH   A directory of individual .sql files (SSMS "Scripts and
+                    Tables" export format — one file per object)
 
-After loading, it updates source_conn.env with the new SOURCE_DATABASE value.
+When --ddl-dir is given the script:
+  1. Auto-detects per-file encoding (UTF-16 LE BOM \xff\xfe is common for SSMS
+     exports; falls back to UTF-8).
+  2. Strips "USE [dbname]" lines so the correct target database is used.
+  3. Combines files in dependency order:
+       Schema → UserDefinedTableType → Table → Function → View →
+       StoredProcedure/Trigger → everything else
+  4. Loads the combined DDL into the container.
+  5. Runs a second FK-only pass to resolve FK ordering failures that occur when
+     tables are sorted alphabetically and reference later-named tables.
+
+After loading, updates source_conn.env with the new SOURCE_DATABASE value.
 
 Supported sources:
     mssql  — uses sqlcmd inside spgloader_mssql container
     mysql  — uses mysql client inside spgloader_mysql container
 
-Usage:
+Usage (single file — original):
     uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \\
         --source-type  mssql \\
         --ddl-file     /path/to/schema.sql \\
+        --database     migration_db \\
+        --password-env MSSQL_SA_PASSWORD \\
+        --work-dir     $SPGLOADER_WORK_DIR
+
+Usage (SSMS export directory):
+    uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \\
+        --source-type  mssql \\
+        --ddl-dir      "/path/to/Acuity Objects Scripts and Tables report" \\
         --database     migration_db \\
         --password-env MSSQL_SA_PASSWORD \\
         --work-dir     $SPGLOADER_WORK_DIR
@@ -25,7 +44,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -52,6 +71,19 @@ CONTAINER_INFO = {
     },
 }
 
+# SSMS object type priority — lower number = deployed first.
+# Derived from the file extension segment: dbo.TableName.<TypeKey>.sql
+_SSMS_TYPE_PRIORITY = {
+    "Schema": 0,
+    "UserDefinedTableType": 1,
+    "Table": 2,
+    "UserDefinedFunction": 3,
+    "View": 4,
+    "StoredProcedure": 5,
+    "Trigger": 6,
+    "UnresolvedEntity": 9,
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,11 +91,7 @@ CONTAINER_INFO = {
 
 def run(cmd: list[str], check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
     """Run a subprocess, optionally capturing output."""
-    result = subprocess.run(
-        cmd,
-        capture_output=capture,
-        text=True,
-    )
+    result = subprocess.run(cmd, capture_output=capture, text=True)
     if check and result.returncode != 0:
         print(f"Command failed: {' '.join(cmd)}", file=sys.stderr)
         if result.stdout:
@@ -79,11 +107,74 @@ def container_running(name: str) -> bool:
     return r.returncode == 0 and r.stdout.strip() == "true"
 
 
+def _detect_and_read(path: Path) -> str:
+    """Read a SQL file, auto-detecting UTF-16 LE (SSMS BOM \xff\xfe) or UTF-8."""
+    raw = path.read_bytes()
+    if raw[:2] == b"\xff\xfe":
+        return raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+    if raw[:3] == b"\xef\xbb\xbf":
+        return raw.decode("utf-8-sig", errors="replace")
+    return raw.decode("utf-8", errors="replace")
+
+
+def combine_ddl_directory(ddl_dir: Path) -> str:
+    """
+    Combine a directory of individual SSMS-generated .sql files into a single
+    ordered DDL string suitable for sqlcmd / mysql execution.
+
+    - Detects per-file encoding (UTF-16 LE or UTF-8).
+    - Strips USE [dbname] lines so the correct target database context is used.
+    - Orders files by object type (Schema first, Views last) to minimise
+      forward-reference failures.
+    """
+    files = sorted(
+        ddl_dir.glob("*.sql"),
+        key=lambda f: (
+            _SSMS_TYPE_PRIORITY.get(f.stem.split(".")[-1], 8),
+            f.name,
+        ),
+    )
+    if not files:
+        print(f"  Warning: no .sql files found in {ddl_dir}", file=sys.stderr)
+        return ""
+
+    counts: dict[str, int] = {}
+    parts: list[str] = []
+    for f in files:
+        obj_type = f.stem.split(".")[-1]
+        counts[obj_type] = counts.get(obj_type, 0) + 1
+        content = _detect_and_read(f)
+        # Strip USE [any_database_name] so the -d flag controls context
+        content = re.sub(
+            r"^\s*USE\s+\[[^\]]*\]\s*\r?\n?", "", content, flags=re.MULTILINE | re.IGNORECASE
+        )
+        parts.append(f"-- === {f.name} ===\n{content.strip()}\nGO\n")
+
+    combined = "\n".join(parts)
+    type_summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
+    print(f"  Combined {len(files)} files ({type_summary})")
+    return combined
+
+
+def _extract_fk_statements(ddl: str) -> str:
+    """
+    Extract ALTER TABLE ... FOREIGN KEY ... statements for a second-pass load.
+    Used to resolve FK failures caused by alphabetical table ordering.
+    """
+    fk_stmts = re.findall(
+        r"ALTER TABLE[^;G]*FOREIGN KEY[^G]*GO",
+        ddl,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return "\n".join(fk_stmts)
+
+
 # ---------------------------------------------------------------------------
 # MSSQL loader
 # ---------------------------------------------------------------------------
 
-def load_mssql(ddl_file: Path, database: str, password: str, container: str, sqlcmd: str) -> None:
+def load_mssql(ddl_file: Path, database: str, password: str, container: str,
+               sqlcmd: str, run_fk_pass: bool = False) -> None:
     print(f"  Container : {container}")
     print(f"  Database  : {database}")
     print(f"  DDL file  : {ddl_file}")
@@ -115,15 +206,46 @@ def load_mssql(ddl_file: Path, database: str, password: str, container: str, sql
 
     if result.returncode != 0:
         # sqlcmd exits non-zero on warnings — filter for real ERROR lines
-        error_lines = [l for l in (result.stdout + result.stderr).splitlines()
-                       if "error" in l.lower() and "warning" not in l.lower()]
+        error_lines = [
+            line for line in (result.stdout + result.stderr).splitlines()
+            if "error" in line.lower() and "warning" not in line.lower()
+        ]
         if error_lines:
-            print("  Errors during DDL load (warnings are expected for some objects):",
-                  file=sys.stderr)
-            for line in error_lines[:10]:
+            print("  Errors during DDL load (FK ordering errors are expected and "
+                  "will be retried):", file=sys.stderr)
+            for line in error_lines[:5]:
                 print(f"    {line}", file=sys.stderr)
+            if len(error_lines) > 5:
+                print(f"    ... ({len(error_lines) - 5} more)", file=sys.stderr)
 
     print(f"  DDL loaded into {container}/{database}")
+
+    # 4. Optional second FK pass — fixes ordering failures
+    if run_fk_pass:
+        print("  Running second FK pass to resolve ordering failures...")
+        combined_ddl = ddl_file.read_text(encoding="utf-8", errors="replace")
+        fk_sql = _extract_fk_statements(combined_ddl)
+        if fk_sql:
+            fk_path = ddl_file.parent / "_fk_pass2.sql"
+            fk_path.write_text(fk_sql, encoding="utf-8")
+            fk_container_path = "/tmp/spgloader_fk_pass2.sql"
+            run(["docker", "cp", str(fk_path), f"{container}:{fk_container_path}"])
+            run([
+                "docker", "exec", container,
+                sqlcmd, "-S", "localhost", "-U", "sa", "-P", password,
+                "-No", "-d", database, "-i", fk_container_path,
+            ], check=False)
+            # Count FKs now present
+            fk_count_result = run([
+                "docker", "exec", container,
+                sqlcmd, "-S", "localhost", "-U", "sa", "-P", password,
+                "-No", "-d", database,
+                "-Q", "SELECT COUNT(*) FROM sys.foreign_keys",
+            ], check=False)
+            fk_count = fk_count_result.stdout.strip().splitlines()
+            print(f"  FK pass 2 complete. FKs in DB: {fk_count[2].strip() if len(fk_count) > 2 else '?'}")
+        else:
+            print("  No FK statements found in combined DDL — skipping second pass.")
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +279,10 @@ def load_mysql(ddl_file: Path, database: str, password: str, container: str) -> 
     ], check=False)
 
     if result.returncode != 0:
-        error_lines = [l for l in (result.stdout + result.stderr).splitlines()
-                       if "error" in l.lower()]
+        error_lines = [
+            line for line in (result.stdout + result.stderr).splitlines()
+            if "error" in line.lower()
+        ]
         if error_lines:
             print("  Errors during DDL load:", file=sys.stderr)
             for line in error_lines[:10]:
@@ -200,12 +324,25 @@ def update_source_conn_env(work_dir: Path, database: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Load a DDL file into the source DB Docker container for pgloader"
+        description=(
+            "Load a DDL file (or directory of SSMS-exported .sql files) into "
+            "the source DB Docker container for catalog-based extraction."
+        )
     )
     parser.add_argument("--source-type", required=True, choices=["mssql", "mysql"],
                         help="Source database type")
-    parser.add_argument("--ddl-file", required=True,
-                        help="Path to the DDL .sql file to load")
+
+    src_group = parser.add_mutually_exclusive_group(required=True)
+    src_group.add_argument("--ddl-file",
+                           help="Path to a single combined .sql file to load")
+    src_group.add_argument("--ddl-dir",
+                           help=(
+                               "Path to a directory of individual .sql files "
+                               "(SSMS 'Scripts and Tables' export format). "
+                               "Files are combined in dependency order and "
+                               "loaded as a single batch."
+                           ))
+
     parser.add_argument("--database", required=True,
                         help="Name of the database to create and load into")
     parser.add_argument("--password-env", required=True,
@@ -213,11 +350,6 @@ def main() -> None:
     parser.add_argument("--work-dir", required=True,
                         help="spgloader workspace directory (to update source_conn.env)")
     args = parser.parse_args()
-
-    ddl_file = Path(args.ddl_file).expanduser().resolve()
-    if not ddl_file.exists():
-        print(f"Error: DDL file not found: {ddl_file}", file=sys.stderr)
-        sys.exit(1)
 
     work_dir = Path(args.work_dir).expanduser().resolve()
 
@@ -235,17 +367,42 @@ def main() -> None:
               f"{args.source_type}-compose.yml up -d", file=sys.stderr)
         sys.exit(1)
 
+    # ── Resolve the DDL to a single file ────────────────────────────────────
+    run_fk_pass = False
+    if args.ddl_file:
+        ddl_file = Path(args.ddl_file).expanduser().resolve()
+        if not ddl_file.exists():
+            print(f"Error: DDL file not found: {ddl_file}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        ddl_dir = Path(args.ddl_dir).expanduser().resolve()
+        if not ddl_dir.is_dir():
+            print(f"Error: DDL directory not found: {ddl_dir}", file=sys.stderr)
+            sys.exit(1)
+        print(f"\nCombining DDL directory: {ddl_dir}")
+        combined = combine_ddl_directory(ddl_dir)
+        if not combined:
+            print("Error: no SQL content found in directory.", file=sys.stderr)
+            sys.exit(1)
+        # Write combined file to workspace
+        ddl_file = work_dir / "combined_ddl.sql"
+        ddl_file.write_text(combined, encoding="utf-8")
+        print(f"  Written: {ddl_file}  ({ddl_file.stat().st_size / 1024:.0f} KB)")
+        run_fk_pass = True   # directory loads benefit from a second FK pass
+
+    # ── Load ────────────────────────────────────────────────────────────────
     print(f"\nLoading DDL into {args.source_type} container...")
 
     if args.source_type == "mssql":
-        load_mssql(ddl_file, args.database, password, container, info["sqlcmd"])
+        load_mssql(ddl_file, args.database, password, container, info["sqlcmd"],
+                   run_fk_pass=run_fk_pass)
     elif args.source_type == "mysql":
         load_mysql(ddl_file, args.database, password, container)
 
     update_source_conn_env(work_dir, args.database)
 
     print(f"\nSource DB ready: {args.source_type} @ {container}/{args.database}")
-    print("pgloader can now connect to the live source database.")
+    print("Catalog-based extraction can now connect to the live source database.")
 
 
 if __name__ == "__main__":

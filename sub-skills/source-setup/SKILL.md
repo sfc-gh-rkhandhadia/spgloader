@@ -120,6 +120,43 @@ SOURCE_USER=sa
 SOURCE_PASSWORD_ENV=MSSQL_SA_PASSWORD
 ```
 
+### Step 6b: Load DDL into the Docker container (if SOURCE_INPUT = file)
+
+If the user provided a DDL file or directory (not a live source), load it now.
+
+**Single combined `.sql` file:**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \
+  --source-type  "$SOURCE_TYPE" \
+  --ddl-file     "/path/to/schema.sql" \
+  --database     "migration_db" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --work-dir     "$SPGLOADER_WORK_DIR"
+```
+
+**SSMS "Scripts and Tables" export directory** (one `.sql` file per object, common
+UTF-16 LE encoding — use `--ddl-dir` and the script handles everything automatically):
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \
+  --source-type  "$SOURCE_TYPE" \
+  --ddl-dir      "/path/to/ssms_export_directory" \
+  --database     "migration_db" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --work-dir     "$SPGLOADER_WORK_DIR"
+```
+
+After loading, verify objects were created:
+```bash
+docker exec spgloader_mssql /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -No -d migration_db \
+  -Q "SELECT 'Tables' t, COUNT(*) FROM sys.tables UNION ALL \
+      SELECT 'Views', COUNT(*) FROM sys.views UNION ALL \
+      SELECT 'Functions', COUNT(*) FROM sys.objects WHERE type IN ('FN','TF','IF') \
+      ORDER BY t"
+```
+
+Update `source_conn.env` SOURCE_DATABASE to the loaded database name.
+
 MySQL / MariaDB:
 ```
 SOURCE_TYPE=mysql        # or mariadb

@@ -88,8 +88,17 @@ pattern_fixes:
   # CAST(DATEDIFF(unit, a, b AS TEXT)) → numeric epoch expression
   datediff_in_cast: true
 
-  # objectkey_cast: disabled by default; enable and list id_cols only if the
-  # project has a VARCHAR ObjectKey column compared to integer IDs.
+  # objectkey_cast: enable when the source schema uses a VARCHAR/TEXT column
+  # (commonly named "ObjectKey" or "ObjectClass") as a generic FK that joins
+  # to integer ID columns.  PostgreSQL has no implicit text↔integer cast, so
+  # every join of the form:
+  #   table.ObjectKey = other_table.SomeIntegerID
+  # will fail with "operator does not exist: text = integer".
+  # Set to true and list the integer ID column names (lowercase) to inject
+  # ::INTEGER casts on the right-hand side of those comparisons, e.g.:
+  #   table.ObjectKey = other_table.orderid::INTEGER  ← injected
+  # Typical id_cols for an order-management schema: orderid, orderitemid,
+  # vendorfirmid, clientid, vendorid.
   objectkey_cast: false
   objectkey_cast_id_cols: []
 
