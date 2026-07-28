@@ -148,6 +148,7 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     return {
         "generated":    date.today().isoformat(),
         "source_type":  source_type,
+        "source_db":    config.get("source_db", next(iter(schemas), "—")),
         "spg_instance": spg_instance,
         "is_blocked":   is_blocked,
         "schemas":      schemas,
@@ -192,6 +193,7 @@ def render_html(data: dict) -> str:
     warns      = data["warn_findings"]
     generated  = data["generated"]
     source     = data["source_type"]
+    source_db  = data["source_db"]
     spg        = data["spg_instance"]
 
     schema_rows_html = _build_schema_rows(schemas)
@@ -251,6 +253,13 @@ def render_html(data: dict) -> str:
   <!-- Executive Summary -->
   <section class="section" id="executive-summary">
     <h2>Executive Summary</h2>
+    <div class="info-strip">
+      <div class="info-item"><span class="info-label">Source Type</span><span class="info-value">{source}</span></div>
+      <div class="info-item"><span class="info-label">Source Database</span><span class="info-value">{source_db}</span></div>
+      <div class="info-item"><span class="info-label">Target Type</span><span class="info-value">Snowflake Postgres</span></div>
+      <div class="info-item"><span class="info-label">Target Instance</span><span class="info-value">{spg}</span></div>
+      <div class="info-item"><span class="info-label">Report Date</span><span class="info-value">{generated}</span></div>
+    </div>
     <div class="kpi-grid">
       <div class="kpi-card"><div class="num green">{data["total_tables"]}</div>
         <div class="label">Tables Migrated</div><div class="sub">100% success</div></div>
@@ -470,7 +479,11 @@ _CSS = """<style>
     padding-bottom: 10px; border-bottom: 2px solid var(--blue); }
   h3 { font-size: 14px; font-weight: 600; color: var(--text); margin: 16px 0 8px; }
 
-  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  .info-strip {{ display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px; padding:16px; background:var(--surface2); border-radius:8px; border:1px solid var(--border); }}
+  .info-item {{ display:flex; flex-direction:column; min-width:160px; }}
+  .info-label {{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:2px; }}
+  .info-value {{ font-size:14px; font-weight:600; color:var(--text); font-family:monospace; }}
+  .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 16px; margin-bottom: 32px; }
   .kpi-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
     padding: 20px 18px 16px; text-align: center; }
