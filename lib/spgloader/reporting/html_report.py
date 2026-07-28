@@ -63,7 +63,21 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
 
     # -- config -------------------------------------------------------
     config = _load_yaml(ws / ".spgloader" / "config.yaml")
-    source_type = config.get("source_type", "mysql").upper()
+    # Fall back to source_conn.env if config.yaml is missing
+    if not config:
+        env_path = ws / "source_conn.env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("SOURCE_TYPE="):
+                    config["source_type"] = line.split("=", 1)[1].strip()
+                elif line.startswith("SOURCE_DATABASE="):
+                    config.setdefault("source_db", line.split("=", 1)[1].strip())
+        target_path = ws / "target_conn.env"
+        if target_path.exists():
+            for line in target_path.read_text().splitlines():
+                if line.startswith("TARGET_SPG_SERVICE="):
+                    config["spg_instance"] = line.split("=", 1)[1].strip()
+    source_type = config.get("source_type", "mssql").upper()
     spg_instance = config.get("spg_instance", config.get("target_spg_service", "SPG"))
 
     # -- per-schema deployment reports --------------------------------
