@@ -369,14 +369,13 @@ def render_html(data: dict) -> str:
     # build per-tab HTML fragments
     schema_rows = ""
     for db, s in schemas.items():
-        fk_total = s["fk_benign"] + s["fk_real"]
         schema_rows += (
             f"<tr>"
             f"<td class='mono'>{db}</td>"
-            f"<td class='num ok'>{s['tables_ok']} / {s['tables_total']}</td>"
-            f"<td class='num ok'>{s['indexes_ok']}</td>"
-            f"<td class='num fail' title='Only benign \"already exists\" failures'>{s['fk_benign']}</td>"
-            f"<td class='num {'fail' if s['fk_real'] else ''}'>{s['fk_real'] or '—'}</td>"
+            f"<td class='num ok'>{s['tables_ok']:,} / {s['tables_total']:,}</td>"
+            f"<td class='num ok'>{s['indexes_ok']:,}</td>"
+            f"<td class='num muted' title='These are benign — already created in table phase'>{s['fk_benign']:,}</td>"
+            f"<td class='num {'fail' if s['fk_real'] else 'ok'}'>{s['fk_real'] if s['fk_real'] else '—'}</td>"
             f"<td class='num muted'>{s['elapsed_s']:.0f}s</td>"
             f"</tr>"
         )
@@ -646,14 +645,28 @@ def render_html(data: dict) -> str:
   <div class="section">
     <h2>Schema Deployment</h2>
     <div class="table-wrap">
-      <table>
-        <thead><tr><th>Database</th><th>Tables</th><th>Indexes</th>
-          <th>FK (benign)</th><th>FK (real fail)</th><th>Duration</th></tr></thead>
+      <table style="table-layout:fixed;width:100%">
+        <colgroup>
+          <col style="width:22%"/>
+          <col style="width:15%"/>
+          <col style="width:13%"/>
+          <col style="width:16%"/>
+          <col style="width:16%"/>
+          <col style="width:13%"/>
+        </colgroup>
+        <thead><tr>
+          <th style="text-align:left">Database</th>
+          <th style="text-align:right">Tables</th>
+          <th style="text-align:right">Indexes</th>
+          <th style="text-align:right">FK (benign)</th>
+          <th style="text-align:right">FK (real fail)</th>
+          <th style="text-align:right">Duration</th>
+        </tr></thead>
         <tbody>{schema_rows}</tbody>
       </table>
     </div>
-    <p class="footnote">* Benign FK failures: constraints created during the table phase are
-    correctly rejected as duplicates in the FK phase — all relationships are intact.</p>
+    <p class="footnote">* Benign FK failures: constraints already created during the table phase
+    are correctly rejected as duplicates in the FK phase — all relationships are intact.</p>
   </div>
 
   <div class="section">
