@@ -142,7 +142,7 @@ def deploy_procedures(
     dry_run: bool = False,
     include_legacy: bool = False,
     exclude_legacy: bool = False,
-    interactive: bool = True,
+    interactive: bool = False,
     skill_dir: Path | None = None,
 ) -> dict:
     """Deploy procedures from wave_4_procedures_triggers/ to SPG.
@@ -151,9 +151,12 @@ def deploy_procedures(
     deprecated/deprecated_review.json (written by Phase 3.6 or by the
     skill after calling ask_user_question).
 
-    If undecided legacy groups are found, writes them to
-    deprecated/legacy_groups_pending.json and sys.exit(2) so the
-    calling skill can prompt the user and re-run.
+    interactive=False (default / --no-interactive):
+      Undecided legacy groups are skipped silently.  Safe for pipelines.
+
+    interactive=True (skill omits --no-interactive):
+      Undecided legacy groups trigger exit code 2 + legacy_groups_pending.json
+      so the skill can prompt via ask_user_question and re-run.
     """
     import psycopg2
 
@@ -230,30 +233,39 @@ def deploy_procedures(
                 undecided[lbl] = names
 
         if undecided:
-            # Write pending decisions file — the SKILL will read this,
-            # prompt the user via ask_user_question, update deprecated_review.json,
-            # and re-run this script.
-            pending: list[dict] = []
-            for lbl, names in undecided.items():
-                rule = next((r for r in rules if r["label"] == lbl), {})
-                pending.append({
-                    "label": lbl,
-                    "description": rule.get("description", ""),
-                    "procedures": sorted(names),
-                })
-            pending_path = work_dir / "deprecated" / "legacy_groups_pending.json"
-            pending_path.parent.mkdir(parents=True, exist_ok=True)
-            pending_path.write_text(
-                json.dumps({"pending_groups": pending}, indent=2), encoding="utf-8"
-            )
-            print(
-                f"\nERROR: {len(undecided)} legacy group(s) need user decisions."
-                f"\nWritten to: {pending_path}"
-                f"\nThe skill must prompt the user via ask_user_question,"
-                f" update deprecated_review.json, then re-run this script.",
-                file=sys.stderr,
-            )
-            sys.exit(EXIT_PENDING_DECISIONS)
+            if not interactive:
+                # --no-interactive (default): skip undecided groups, never block
+                for lbl, names in undecided.items():
+                    skip_labels.add(lbl)
+                    rule = next((r for r in rules if r["label"] == lbl), {})
+                    print(
+                        f"  Skipping legacy group [{lbl}] ({len(names)} procs) "
+                        f"— no decision recorded, --no-interactive mode"
+                    )
+            else:
+                # Interactive mode: write pending file and exit so the skill
+                # can prompt the user via ask_user_question, then re-run.
+                pending: list[dict] = []
+                for lbl, names in undecided.items():
+                    rule = next((r for r in rules if r["label"] == lbl), {})
+                    pending.append({
+                        "label": lbl,
+                        "description": rule.get("description", ""),
+                        "procedures": sorted(names),
+                    })
+                pending_path = work_dir / "deprecated" / "legacy_groups_pending.json"
+                pending_path.parent.mkdir(parents=True, exist_ok=True)
+                pending_path.write_text(
+                    json.dumps({"pending_groups": pending}, indent=2), encoding="utf-8"
+                )
+                print(
+                    f"\n{len(undecided)} legacy group(s) need user decisions."
+                    f"\nWritten to: {pending_path}"
+                    f"\nThe skill will prompt the user via ask_user_question,"
+                    f" update deprecated_review.json, then re-run this script.",
+                    file=sys.stderr,
+                )
+                sys.exit(EXIT_PENDING_DECISIONS)
 
         # All legacy groups are already decided — apply skip/include from review
         review_data = {}
@@ -375,8 +387,10 @@ def main() -> None:
                         help="Deploy all legacy groups without prompting")
     parser.add_argument("--exclude-legacy", action="store_true",
                         help="Skip all legacy groups without prompting")
-    parser.add_argument("--no-interactive", action="store_true",
-                        help="Deprecated — script is always non-interactive; accepted for backwards compatibility")
+    parser.add_argument("--no-interactive", action="store_true", default=True,
+                        help="Non-interactive mode: skip undecided legacy groups silently (DEFAULT)")
+    parser.add_argument("--interactive", action="store_true", default=False,
+                        help="Interactive mode: pause for user decision on undecided legacy groups (skill use only)")
     parser.add_argument("--repair", action="store_true",
                         help="After deploy, run repair_procedures.py on any failures")
     parser.add_argument("--rules-only", action="store_true",
@@ -400,7 +414,9 @@ def main() -> None:
         dry_run=args.dry_run,
         include_legacy=args.include_legacy,
         exclude_legacy=args.exclude_legacy,
-        interactive=not args.no_interactive,
+        interactive=args.interactive,  # False by default; True only when skill passes --interactive
+        skill_dir=skill_dir,
+    )
         skill_dir=skill_dir,
     )
 

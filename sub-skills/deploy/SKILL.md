@@ -98,26 +98,38 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_functions.py \
 
 ### Step 6: Deploy procedures
 
-The script **never prompts via stdin**. All decisions come from `deprecated_review.json` (Phase 3.6).
+The script **defaults to non-interactive mode** — it never prompts via stdin.
+All decisions come from `deprecated_review.json` (Phase 3.6).
 
+**Normal run (non-interactive, default):**
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_procedures.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
   --spg-service "$TARGET_SPG_SERVICE"
+# --no-interactive is the default; explicit flag is also accepted
+```
+If undecided legacy groups exist, they are skipped silently and logged.
+
+**Interactive run — use this when you want the user to decide:**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_procedures.py \
+  --work-dir "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --interactive
 ```
 
-**Handling exit code 2 (undecided legacy groups):**
+**Handling exit code 2 (undecided legacy groups in interactive mode):**
 
 If `deploy_procedures.py` exits with code 2, it found legacy procedure groups not yet decided in
 Phase 3.6. It will have written them to `$SPGLOADER_WORK_DIR/deprecated/legacy_groups_pending.json`.
 
-In that case, the skill MUST:
+The skill MUST:
 
 1. Read `legacy_groups_pending.json` to get the undecided groups.
 2. Use `ask_user_question` to present each group to the user with **migrate** or **skip** options.
    Show the group label, description, and procedure count.
 3. Write the user's decisions back into `deprecated_review.json` under `groups[label].disposition`.
-4. Re-run `deploy_procedures.py` — it will now read the updated decisions and proceed.
+4. Re-run `deploy_procedures.py --interactive` — it will now read the updated decisions and proceed.
 
 ```python
 # Example: reading pending groups and prompting user
