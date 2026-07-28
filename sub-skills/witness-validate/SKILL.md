@@ -368,6 +368,69 @@ Parity Testing
 
 ---
 
+## Step 8.5 — Optional: Deep behavioral validation (execution + data hashing)
+
+The structural parity test (`full_validation.py`) checks parameter signatures, column
+names, and row counts. It does **not** execute functions/procedures or compare result
+set contents.
+
+For client sign-off or production readiness, ask the user:
+
+```
+ask_user_question:
+  header: "Deep Validation"
+  question: "The structural equivalence test is complete.
+             Do you want to run behavioral execution testing?
+             This executes functions and procedures on both MSSQL and SPG,
+             compares result sets with data hashing, and generates a client-ready
+             PowerPoint from live execution data."
+  options:
+    - label: "Yes — run behavioral execution + result-set comparison"
+      description: "Loads seed data into SPG, executes functions/procedures on both
+                    sides, compares outputs with data hashing, writes to SPG audit
+                    tables, and generates a Snowflake-branded PowerPoint sign-off.
+                    Uses the mssql_spg_migration_validation_testing skill."
+    - label: "No — structural check is sufficient"
+      description: "Skip behavioral execution. The HTML report and parity_report.md
+                    are the sign-off artifacts."
+```
+
+**If user chooses Yes:**
+
+State: "Loading the behavioral validation skill now."
+
+Load `mssql_spg_migration_validation_testing/SKILL.md` and execute its full workflow.
+
+Pass the following context:
+- `MSSQL_HOST` = `$SOURCE_HOST`
+- `MSSQL_PORT` = `${SOURCE_PORT:-1433}`
+- `MSSQL_USER` = sa
+- `MSSQL_PASSWORD` = `$MSSQL_SA_PASSWORD`
+- `MSSQL_DATABASE` = `$SOURCE_DATABASE`
+- `SPG_HOST` = `$SPG_HOST`
+- `SPG_USER` = `$SPG_USER`
+- `SPG_PASSWORD` = `$SPG_PASSWORD`
+- `SHARED_DIR` = `$SPGLOADER_WORK_DIR/validation_shared`
+
+The skill will:
+1. Load seed data into SPG (`load_mssql_to_spg.py`)
+2. Discover and prioritize objects (INVENTORY stage)
+3. Generate test cases from seed data (GENERATE stage)
+4. Execute on both sides (EXECUTE stage)
+5. Normalize type differences (NORMALIZE stage)
+6. Diff and classify mismatches (DIFF stage)
+7. Propose repairs (REPAIR stage — optional)
+8. Generate PowerPoint sign-off (REPORT stage)
+
+The PowerPoint is a **separate artifact** from the spgloader HTML report — it contains
+live execution verdicts, failure breakdowns, and remediation priorities for client delivery.
+
+**If user chooses No:**
+
+Continue to Step 9 (markdown/parity report + HTML regeneration).
+
+---
+
 ## Step 9 — Generate sign-off reports
 
 ```bash
