@@ -263,16 +263,27 @@ def deploy_procedures(
             except Exception:
                 pass
         for lbl, names in legacy_labels.items():
-            disposition = "skip"  # default
+            # Find the user's explicit decision — never default silently
+            disposition = None
             for gval in review_data.get("groups", {}).values():
                 if gval.get("pattern_name", "") and lbl in gval.get("pattern_name", "").lower():
-                    disposition = gval.get("disposition", "skip")
+                    disposition = gval.get("disposition")
                     break
+            if disposition is None:
+                # This should never happen — undecided groups were caught above and
+                # exited with code 2.  If we somehow reach here, refuse to default.
+                print(
+                    f"\nERROR: No user decision found for legacy group [{lbl}]."
+                    f"\nThis group was not in deprecated_review.json."
+                    f"\nDelete legacy_groups_pending.json and re-run to be prompted.",
+                    file=sys.stderr,
+                )
+                sys.exit(EXIT_PENDING_DECISIONS)
             if disposition == "skip":
                 skip_labels.add(lbl)
-                print(f"  Skipping legacy group [{lbl}] ({len(names)} procs) per Phase 3.6 review")
+                print(f"  Skipping legacy group [{lbl}] ({len(names)} procs) — user chose skip")
             else:
-                print(f"  Including legacy group [{lbl}] ({len(names)} procs) per Phase 3.6 review")
+                print(f"  Including legacy group [{lbl}] ({len(names)} procs) — user chose migrate")
 
     # ── 3. Build the final ordered deploy list ────────────────────────────
     to_deploy = []
