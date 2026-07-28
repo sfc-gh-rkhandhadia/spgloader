@@ -857,13 +857,30 @@ def main():
     base = work_dir / "conversion" / "postgres"
 
     # ── Load deprecated review dispositions (Phase 3.6) ──────────────────
+    # IMPORTANT: always derive skip set from groups[].disposition, which
+    # reflects the user's ask_user_question decisions.  Do NOT read
+    # skip_objects directly — that flat list is written at scan time and
+    # is not updated when the user changes a group from "skip" to "migrate".
     skip_fqns: set[str] = set()
     review_path = work_dir / "deprecated" / "deprecated_review.json"
     if review_path.exists():
         review = json.loads(review_path.read_text())
-        skip_fqns = {fqn.lower() for fqn in review.get("skip_objects", [])}
+        for group in review.get("groups", {}).values():
+            if group.get("disposition") == "skip":
+                for fqn in group.get("object_fqns", []):
+                    skip_fqns.add(fqn.lower())
+        # Fallback: include skip_objects only for groups NOT listed in groups{}
+        # (pre-3.6 workspaces that wrote skip_objects without groups structure)
+        group_fqns = {
+            fqn.lower()
+            for g in review.get("groups", {}).values()
+            for fqn in g.get("object_fqns", [])
+        }
+        for fqn in review.get("skip_objects", []):
+            if fqn.lower() not in group_fqns:
+                skip_fqns.add(fqn.lower())
         if skip_fqns:
-            print(f"Deprecated review loaded: {len(skip_fqns)} object(s) will be skipped.")
+            print(f"Deprecated review loaded: {len(skip_fqns)} object(s) will be skipped (disposition=skip).")
 
     wave_map = {
         "view":      "wave_2_views",

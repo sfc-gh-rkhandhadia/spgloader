@@ -214,24 +214,52 @@ def deploy_procedures(
         review_path = work_dir / "deprecated" / "deprecated_review.json"
         # Map label → disposition ("skip" | "migrate" | None)
         recorded_disposition: dict[str, str] = {}
+        # Also map every FQN in object_fqns → disposition so we can look up
+        # by procedure name when the rule label doesn't match the group key
+        fqn_disposition: dict[str, str] = {}
         if review_path.exists():
             try:
                 rdata = json.loads(review_path.read_text(encoding="utf-8"))
                 for gkey, gval in rdata.get("groups", {}).items():
                     disp = gval.get("disposition")
                     if disp in ("skip", "migrate"):
-                        # Index by both the group key and pattern_name for flexible matching
+                        # Index by group key, pattern_name, and any prefix of key
                         recorded_disposition[gkey.lower()] = disp
                         pname = gval.get("pattern_name", "")
                         if pname:
                             recorded_disposition[pname.lower()] = disp
+                        # Index every known FQN in this group by short name
+                        for fqn in gval.get("object_fqns", []):
+                            fqn_disposition[fqn.lower()] = disp
+                            fqn_disposition[fqn.split(".")[-1].lower()] = disp
             except Exception:
                 pass
+
+        def _lookup_disposition(lbl: str, proc_names: list[str]) -> str | None:
+            """Look up disposition for a legacy label.
+            Falls back to FQN lookup when label doesn't match group key
+            (e.g. rule label 'aspnet' vs group key 'aspnet_membership').
+            """
+            # 1. Exact label / pattern_name match
+            d = recorded_disposition.get(lbl.lower())
+            if d:
+                return d
+            # 2. Prefix match: rule label is a prefix of a group key
+            for key, disp in recorded_disposition.items():
+                if key.startswith(lbl.lower()) or lbl.lower().startswith(key):
+                    return disp
+            # 3. FQN match: look up any procedure in this group by name
+            for name in proc_names:
+                short = name.split(".")[-1].lower()
+                d = fqn_disposition.get(name.lower()) or fqn_disposition.get(short)
+                if d:
+                    return d
+            return None
 
         # Separate already-decided from undecided
         undecided: dict[str, list[str]] = {}
         for lbl, names in legacy_labels.items():
-            disp = recorded_disposition.get(lbl.lower())
+            disp = _lookup_disposition(lbl, names)
             if disp == "skip":
                 skip_labels.add(lbl)
                 print(f"  Skipping legacy group [{lbl}] ({len(names)} procs) — user chose skip")
