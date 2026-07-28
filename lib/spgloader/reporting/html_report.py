@@ -49,9 +49,18 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     schemas: dict[str, dict] = {}
     deploy_dir = ws / "deployment"
     if deploy_dir.exists():
-        for f in sorted(deploy_dir.glob("*_deploy.json")):
+        # Collect deployment files: legacy per-schema *_deploy.json OR
+        # the single deployment_summary.json written by parallel_deploy.py
+        deploy_files = sorted(deploy_dir.glob("*_deploy.json"))
+        summary_file = deploy_dir / "deployment_summary.json"
+        if not deploy_files and summary_file.exists():
+            deploy_files = [summary_file]
+        for f in deploy_files:
             d = _load_json(f)
-            db = f.stem.replace("_deploy", "")
+            if f.name == "deployment_summary.json":
+                db = d.get("source_db", "migration_db")
+            else:
+                db = f.stem.replace("_deploy", "")
             phases = d.get("phases", {})
             # Count benign vs real FK failures
             benign = sum(
