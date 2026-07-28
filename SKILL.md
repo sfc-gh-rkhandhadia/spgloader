@@ -227,6 +227,7 @@ conversions. The following gaps apply and are annotated in the output:
   - IDENTITY detection: regex-based only (may miss edge cases)
   Recommendation: load the DDL file into a Docker or SPCS container
   and re-run to get full structural fidelity.
+  Data copy uses copy_source_data.py (pymssql/mysql-connector over TCP) — pgloader is not used.
 ```
 
 ## Global Safety Rules
@@ -295,13 +296,22 @@ source "$SPGLOADER_WORK_DIR/source_conn.env"
 # Provides: SOURCE_CONTAINER (if Docker was used)
 ```
 
-### Step 2 — Drop the Docker source container (if applicable)
+### Step 2 — Drop the source environment (Docker or SPCS)
 
+**Docker:**
 ```bash
 if [ -n "$SOURCE_CONTAINER" ]; then
   docker rm -f "$SOURCE_CONTAINER"
 fi
 ```
+
+**SPCS** (if `SPCS_SERVICE` is set in `source_conn.env`):
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/teardown_spcs_source.py \
+  --work-dir "$SPGLOADER_WORK_DIR" --yes
+```
+
+This reads `SPCS_SERVICE` and `SPCS_POOL` from `source_conn.env` and drops both resources.
 
 ### Step 3 — Drop the SPG instance
 
