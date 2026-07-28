@@ -75,8 +75,8 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
 
     # -- procedure / trigger deployment report -------------------------
     proc_report = _load_json(ws / "conversion" / "procedures_deploy_report.json")
-    proc_succeeded = [_clean_name(n) for n in proc_report.get("succeeded", [])]
-    proc_failed    = [_clean_name(n) for n in proc_report.get("failed", [])]
+    proc_succeeded = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n))) for n in proc_report.get("succeeded", [])]
+    proc_failed    = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n))) for n in proc_report.get("failed", [])]
 
     # categorise by object type from the name prefix
     procedures = [p for p in proc_succeeded if not _is_trigger_fn(p)]

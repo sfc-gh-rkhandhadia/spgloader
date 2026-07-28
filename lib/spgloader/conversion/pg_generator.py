@@ -338,7 +338,7 @@ def _gen_indexes(indexes: list[dict]) -> list[str]:
         # Prefix with table OID-style hash to avoid name conflicts across schemas
         safe_name = _safe_index_name(idx["name"])
         unique = "UNIQUE " if idx.get("is_unique") else ""
-        cols   = ", ".join(_quote_ident(c.split()[0].lower()) +
+        cols   = ", ".join(_quote_ident(_strip_mssql_brackets(c.split()[0]).lower()) +
                            (" DESC" if c.upper().endswith(" DESC") else "")
                            for c in idx.get("columns", []))
         if not cols:
@@ -347,13 +347,13 @@ def _gen_indexes(indexes: list[dict]) -> list[str]:
         stmt = f'CREATE {unique}INDEX IF NOT EXISTS "{safe_name}" ON "{schema}"."{table}" ({cols})'
 
         if idx.get("include_cols"):
-            inc = ", ".join(_quote_ident(c.lower()) for c in idx["include_cols"])
+            inc = ", ".join(_quote_ident(_strip_mssql_brackets(c).lower()) for c in idx["include_cols"])
             stmt += f" INCLUDE ({inc})"
 
         if idx.get("predicate"):
-            # MSSQL filter_definition is already WHERE-clause SQL;
-            # downcase identifiers but keep the expression
-            stmt += f" WHERE {idx['predicate'].lower()}"
+            # Strip MSSQL bracket identifiers from the filter expression
+            predicate = re.sub(r'\[([^\]]+)\]', r'\1', idx['predicate'])
+            stmt += f" WHERE {predicate.lower()}"
 
         stmt += ";"
         stmts.append(stmt)
@@ -448,6 +448,14 @@ def _normalise_default(expr: str | None) -> str | None:
         return f"'{val}'"
 
     return val.lower()
+
+
+def _strip_mssql_brackets(name: str) -> str:
+    """Strip MSSQL T-SQL bracket identifiers: [col_name] → col_name."""
+    name = name.strip()
+    if name.startswith('[') and name.endswith(']'):
+        return name[1:-1]
+    return name
 
 
 def _quote_ident(name: str) -> str:

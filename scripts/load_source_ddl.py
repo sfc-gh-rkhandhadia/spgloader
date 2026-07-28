@@ -191,7 +191,40 @@ def load_mssql(ddl_file: Path, database: str, password: str, container: str,
         "-No", "-Q", create_sql,
     ])
 
-    # 2. Copy the DDL file into the container
+    # 2. Pre-process the DDL for single-file SSMS full-database scripts:
+    #    a) Strip USE [dbname] statements so -d flag controls context.
+    #    b) Drop the preamble (CREATE DATABASE, ALTER DATABASE, EXEC config)
+    #       that precedes actual object DDL — these fail on Linux containers
+    #       and corrupt sqlcmd's ODBC cursor state.
+    content = _detect_and_read(ddl_file)
+    # Strip USE [any_database_name] lines
+    processed = re.sub(
+        r"^\s*USE\s+\[[^\]]*\]\s*\r?\n?", "", content, flags=re.MULTILINE | re.IGNORECASE
+    )
+    # Find the first batch that contains a real schema object definition.
+    # Split on GO boundaries and keep from the first batch that contains
+    # CREATE TABLE/VIEW/PROCEDURE/FUNCTION/SEQUENCE/TYPE.
+    _OBJECT_DDL_RE = re.compile(
+        r"^\s*CREATE\s+(?:TABLE|VIEW|PROCEDURE|FUNCTION|SEQUENCE|TYPE)\b",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    batches = re.split(r"\bGO\b[ \t]*(?:\r?\n|$)", processed, flags=re.IGNORECASE)
+    first_obj_idx = next(
+        (i for i, b in enumerate(batches) if _OBJECT_DDL_RE.search(b)),
+        None,
+    )
+    if first_obj_idx is not None and first_obj_idx > 0:
+        skipped = first_obj_idx
+        processed = "GO\n".join(batches[first_obj_idx:])
+        print(f"  Stripped database-creation preamble ({skipped} batches) from DDL")
+
+    if processed != content:
+        # Write preprocessed file to a temp location so the original is untouched
+        tmp_path = ddl_file.parent / f"_preprocessed_{ddl_file.name}"
+        tmp_path.write_text(processed, encoding="utf-8")
+        ddl_file = tmp_path
+        print(f"  Preprocessed DDL written: {tmp_path.name}")
+
     container_path = f"/tmp/spgloader_ddl_{ddl_file.name}"
     print(f"  Copying DDL into container → {container_path}")
     run(["docker", "cp", str(ddl_file), f"{container}:{container_path}"])
