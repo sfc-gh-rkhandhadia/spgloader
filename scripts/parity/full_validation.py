@@ -240,7 +240,7 @@ def validate_proc(schema, name):
 
 # ── Per-schema runner ─────────────────────────────────────────────────────────
 
-def run_schema(schema, grand):
+def run_schema(schema, grand, schema_results=None):
     ms_obj  = discover_mssql_schema(schema)
     spg_obj = discover_spg_schema(schema)
 
@@ -259,13 +259,21 @@ def run_schema(schema, grand):
         print("  (empty schema — no objects on either side)")
         return
 
+    # Collect results for JSON output
+    if schema_results is not None:
+        schema_results[schema] = {
+            'results': [],
+            'missing_objects': [{'fqn': '%s.%s' % (schema, n), 'name': n, 'type': ms_obj[n]['type']} for n in sorted(only_ms)],
+            'spg_only_objects': [{'fqn': '%s.%s' % (schema, n), 'name': n} for n in sorted(only_spg)],
+        }
+
     def run_one(name):
         obj_type = ms_obj[name]['type']
         if obj_type == 'VIEW':
             r = validate_view(schema, name)
         else:
             r = validate_proc(schema, name)
-        r.update({'name': name, 'type': obj_type, 'schema': schema})
+        r.update({'name': name, 'type': obj_type, 'schema': schema, 'fqn': '%s.%s' % (schema, name)})
         return r
 
     all_results = []
@@ -279,6 +287,14 @@ def run_schema(schema, grand):
 
     order = {'FAIL': 0, 'ERROR': 1, 'PASS': 2}
     all_results.sort(key=lambda r: (order.get(r['verdict'], 9), r['type'], r['name']))
+
+    # Store in collector for JSON output
+    if schema_results is not None and schema in schema_results:
+        schema_results[schema]['results'] = all_results
+        schema_results[schema]['pass'] = sum(1 for r in all_results if r['verdict'] == 'PASS')
+        schema_results[schema]['fail'] = sum(1 for r in all_results if r['verdict'] in ('FAIL', 'ERROR'))
+        schema_results[schema]['missing'] = len(only_ms)
+        schema_results[schema]['spg_only'] = len(only_spg)
 
     view_res = [r for r in all_results if r['type'] == 'VIEW']
     proc_res = [r for r in all_results if r['type'] in ('PROCEDURE', 'FUNCTION')]
@@ -334,6 +350,12 @@ def run_schema(schema, grand):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    import argparse, json as _json
+    parser = argparse.ArgumentParser(description="Cross-schema structural validator")
+    parser.add_argument("--inventory", help="Path to object_inventory.json (unused, accepted for compat)")
+    parser.add_argument("--output-dir", help="Directory to write parity_results.json")
+    args, _ = parser.parse_known_args()
+
     print("[NOTICE] full_validation.py is a structural spot-check tool. "
           "Results are not saved to audit tables. Use run.py for the full pipeline.")
 
@@ -346,6 +368,7 @@ def main():
     print("Union         : %s" % all_schemas)
 
     grand = {'pass': 0, 'fail': 0, 'missing': 0, 'spg_only': 0}
+    schema_results = {}  # collector for JSON output
 
     print("\n" + SEP)
     print("FULL CROSS-SCHEMA VALIDATION REPORT")
@@ -353,7 +376,7 @@ def main():
     print(SEP)
 
     for schema in all_schemas:
-        run_schema(schema, grand)
+        run_schema(schema, grand, schema_results)
 
     print("\n" + SEP)
     print("GRAND TOTAL ACROSS ALL SCHEMAS")
@@ -361,6 +384,34 @@ def main():
     print("  PASS: %d  |  FAIL/ERROR: %d  |  Missing-in-SPG: %d  |  SPG-only: %d" % (
         grand['pass'], grand['fail'], grand['missing'], grand['spg_only']))
     print(SEP)
+
+    # Write structured JSON output
+    out_dir = args.output_dir
+    if not out_dir:
+        # Try to find the parity/ dir relative to where the script is run from
+        import os
+        out_dir = os.path.join(os.getcwd(), 'parity')
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+    results_data = {
+        'grand': grand,
+        'schemas': {
+            sch: {
+                'pass': s.get('pass', 0),
+                'fail': s.get('fail', 0),
+                'missing': s.get('missing', 0),
+                'spg_only': s.get('spg_only', 0),
+                'results': s.get('results', []),
+                'missing_objects': s.get('missing_objects', []),
+                'spg_only_objects': s.get('spg_only_objects', []),
+            }
+            for sch, s in schema_results.items()
+        }
+    }
+    json_path = os.path.join(out_dir, 'parity_results.json')
+    with open(json_path, 'w') as f:
+        _json.dump(results_data, f, indent=2)
+    print("\nParity results written: %s" % json_path)
 
 
 if __name__ == "__main__":

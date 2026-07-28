@@ -176,6 +176,10 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         parity_report_md = parity_file.read_text(encoding="utf-8")[:8000]
     parity_ran = parity_file.exists()
 
+    # Structured parity results (written by full_validation.py)
+    parity_results = _load_json(ws / "parity" / "parity_results.json")
+    parity_structured = bool(parity_results)
+
     return {
         "generated":      date.today().isoformat(),
         "source_type":    source_type,
@@ -214,8 +218,10 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "witness_results":  witness_results,
         "witness_summary":  witness_summary,
         # Parity (Phase 6.6)
-        "parity_ran":       parity_ran,
-        "parity_report_md": parity_report_md,
+        "parity_ran":         parity_ran,
+        "parity_report_md":   parity_report_md,
+        "parity_results":     parity_results,
+        "parity_structured":  parity_structured,
     }
 
 
@@ -350,6 +356,173 @@ def _build_dep_rows(groups: dict) -> str:
 # render_html  (main template)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# _build_equivalence_tab  (Phase 6.6 parity / equivalence test)
+# ---------------------------------------------------------------------------
+
+_VERDICT_STYLE = {
+    "PASS":  ("success", "✓ Pass"),
+    "FAIL":  ("fail",    "✗ Fail"),
+    "ERROR": ("fail",    "⚠ Error"),
+}
+
+
+def _build_equivalence_tab(data: dict) -> str:
+    parity_structured = data.get("parity_structured", False)
+    parity_results    = data.get("parity_results", {})
+    parity_ran        = data.get("parity_ran", False)
+    parity_md         = data.get("parity_report_md", "")
+
+    if not parity_ran and not parity_structured:
+        return """
+  <div class="section">
+    <div class="alert alert-success" style="background:var(--surface2);border-left:3px solid var(--muted)">
+      <span class="alert-icon" style="color:var(--muted)">○</span>
+      <div><strong>Not Run</strong> — Equivalence / parity testing was not yet executed.
+      Re-invoke the skill and choose Phase 6.6 at the end of Phase 6.</div>
+    </div>
+  </div>"""
+
+    if not parity_structured:
+        # Fall back to rendering the markdown report
+        import re as _re
+        ph = _re.sub(r"^### (.+)$", r"<h3>\1</h3>", parity_md, flags=_re.MULTILINE)
+        ph = _re.sub(r"^## (.+)$",  r"<h2>\1</h2>",  ph, flags=_re.MULTILINE)
+        ph = _re.sub(r"^# (.+)$",   r"<h2>\1</h2>",  ph, flags=_re.MULTILINE)
+        ph = _re.sub(r"\|(.+)\|",   lambda m: "<tr>" + "".join(f"<td>{c.strip()}</td>" for c in m.group(1).split("|")) + "</tr>", ph)
+        ph = _re.sub(r"`([^`]+)`",  r"<code>\1</code>", ph)
+        ph = _re.sub(r"^- (.+)$",   r"<li>\1</li>", ph, flags=_re.MULTILINE)
+        return f"""
+  <div class="section">
+    <div class="alert alert-success" style="background:var(--surface2);border-left:3px solid var(--amber)">
+      <span class="alert-icon" style="color:var(--amber)">⚠</span>
+      <div>Structured results not available — showing markdown report.
+      Re-run <code>full_validation.py</code> to generate <code>parity_results.json</code>.</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;
+                padding:20px;font-size:13px;line-height:1.6">{ph}</div>
+  </div>"""
+
+    grand   = parity_results.get("grand", {})
+    schemas = parity_results.get("schemas", {})
+
+    total_pass    = grand.get("pass",     0)
+    total_fail    = grand.get("fail",     0)
+    total_missing = grand.get("missing",  0)
+    total_spgonly = grand.get("spg_only", 0)
+    total_tested  = total_pass + total_fail
+    pass_pct      = round(total_pass / total_tested * 100) if total_tested else 0
+
+    # Summary cards
+    cards = f"""
+      <div class='summary-card'>
+        <div class='s-label'>✓ Pass</div>
+        <div class='s-value' style='color:var(--green)'>{total_pass}</div>
+      </div>
+      <div class='summary-card'>
+        <div class='s-label'>✗ Fail / Error</div>
+        <div class='s-value' style='color:var(--red)'>{total_fail}</div>
+      </div>
+      <div class='summary-card'>
+        <div class='s-label'>⊘ Missing in SPG</div>
+        <div class='s-value' style='color:var(--amber)'>{total_missing}</div>
+      </div>
+      <div class='summary-card'>
+        <div class='s-label'>SPG-only Objects</div>
+        <div class='s-value' style='color:var(--muted)'>{total_spgonly}</div>
+      </div>
+      <div class='summary-card'>
+        <div class='s-label'>Pass Rate</div>
+        <div class='s-value' style='color:var(--{"green" if pass_pct >= 80 else "amber" if pass_pct >= 60 else "red"})'>{pass_pct}%</div>
+      </div>"""
+
+    # Per-schema sections with object tables
+    schema_sections = ""
+    for schema_name, s in sorted(schemas.items()):
+        results  = s.get("results", [])
+        missing  = s.get("missing_objects", [])
+        spg_only = s.get("spg_only_objects", [])
+        s_pass   = s.get("pass", 0)
+        s_fail   = s.get("fail", 0)
+
+        if not results and not missing and not spg_only:
+            continue
+
+        badge_style = "success" if s_fail == 0 else "fail"
+        badge_text  = f"✓ {s_pass} pass" if s_fail == 0 else f"✗ {s_fail} fail"
+
+        rows = ""
+        for r in results:
+            verdict   = r.get("verdict", "?")
+            vst, vlbl = _VERDICT_STYLE.get(verdict, ("muted", verdict))
+            obj_type  = r.get("type", "")
+            name      = r.get("name", "")
+            ms_rows   = r.get("ms_rows")
+            spg_rows  = r.get("spg_rows")
+            ms_p      = r.get("ms_p")
+            spg_p     = r.get("spg_p")
+            issues    = "; ".join(r.get("issues", []))[:120]
+
+            if obj_type == "VIEW":
+                ms_val  = str(ms_rows)  if ms_rows  is not None else "—"
+                spg_val = str(spg_rows) if spg_rows is not None else "—"
+            else:
+                ms_val  = f"{ms_p}p"  if ms_p  is not None else "—"
+                spg_val = f"{spg_p}p" if spg_p is not None else "—"
+
+            rows += (
+                f"<tr>"
+                f"<td class='mono small'>{schema_name}</td>"
+                f"<td class='mono small'>{name}</td>"
+                f"<td class='small'>{obj_type}</td>"
+                f"<td class='num small'>{ms_val}</td>"
+                f"<td class='num small'>{spg_val}</td>"
+                f"<td><span class='badge badge-{vst}'>{vlbl}</span></td>"
+                f"<td class='small'>{issues}</td>"
+                f"</tr>"
+            )
+
+        missing_rows = ""
+        for m in missing:
+            missing_rows += (
+                f"<tr><td class='mono small'>{m.get('fqn','')}</td>"
+                f"<td class='small'>{m.get('type','')}</td></tr>"
+            )
+
+        schema_sections += f"""
+    <div class="section">
+      <h2>Schema: {schema_name}
+        <span class='badge badge-{badge_style}' style='font-size:12px;margin-left:8px'>{badge_text}</span>
+        <span class='badge badge-muted'    style='font-size:12px;margin-left:4px'>{len(missing)} missing</span>
+      </h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Schema</th><th>Object</th><th>Type</th>
+            <th style="text-align:right">MSSQL</th>
+            <th style="text-align:right">SPG</th>
+            <th>Verdict</th><th>Issues</th>
+          </tr></thead>
+          <tbody>{rows if rows else "<tr><td colspan='7' class='muted-msg'>No matched objects tested</td></tr>"}</tbody>
+        </table>
+      </div>
+      {f"""<details style='margin-top:12px'><summary style='cursor:pointer;font-size:12px;color:var(--amber)'>{len(missing)} Missing Objects (in MSSQL, not in SPG)</summary>
+        <div class='table-wrap' style='margin-top:8px'><table>
+        <thead><tr><th>Object</th><th>Type</th></tr></thead>
+        <tbody>{missing_rows}</tbody></table></div></details>""" if missing else ""}
+    </div>"""
+
+    return f"""
+  <div class="section">
+    <h2>Equivalence Test Summary (Phase 6.6)</h2>
+    <p class="small" style="color:var(--muted);margin-bottom:14px">
+      Structural parity: object existence, parameter counts, view row counts compared between MSSQL source and SPG target.
+    </p>
+    <div class="summary-row">{cards}</div>
+  </div>
+  {schema_sections}"""
+
+
 _WITNESS_ICONS = {
     "validated":           ("success", "✓ Validated"),
     "partially_validated": ("warn",    "⚠ Partial"),
@@ -372,8 +545,6 @@ def _build_witness_tab(data: dict) -> str:
 
     results  = data["witness_results"]
     summary  = data["witness_summary"]
-    parity_ran = data.get("parity_ran", False)
-    parity_md  = data.get("parity_report_md", "")
 
     # Summary cards
     cards = ""
@@ -410,41 +581,13 @@ def _build_witness_tab(data: dict) -> str:
     if not rows:
         rows = "<tr><td colspan='5' class='muted-msg'>No objects validated</td></tr>"
 
-    # Parity section
-    if parity_ran and parity_md:
-        # Convert markdown to minimal HTML (just paragraphs and headers)
-        import re as _re
-        parity_html = _re.sub(r"^### (.+)$", r"<h3>\1</h3>", parity_md, flags=_re.MULTILINE)
-        parity_html = _re.sub(r"^## (.+)$", r"<h2>\1</h2>", parity_html, flags=_re.MULTILINE)
-        parity_html = _re.sub(r"^# (.+)$", r"<h2>\1</h2>", parity_html, flags=_re.MULTILINE)
-        parity_html = _re.sub(r"`([^`]+)`", r"<code>\1</code>", parity_html)
-        parity_html = _re.sub(r"^- (.+)$", r"<li>\1</li>", parity_html, flags=_re.MULTILINE)
-        parity_section = f"""
-  <div class="section">
-    <h2>Parity Testing (Phase 6.6)</h2>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;font-size:13px;line-height:1.6">
-      {parity_html}
-    </div>
-  </div>"""
-    elif parity_ran:
-        parity_section = """
-  <div class="section">
-    <h2>Parity Testing (Phase 6.6)</h2>
-    <p class="muted-msg">Parity testing ran but no report was generated.</p>
-  </div>"""
-    else:
-        parity_section = """
-  <div class="section">
-    <h2>Parity Testing (Phase 6.6)</h2>
-    <div class="alert alert-success" style="background:var(--surface2);border-left:3px solid var(--muted)">
-      <span class="alert-icon" style="color:var(--muted)">○</span>
-      <div>Parity testing not yet run.</div>
-    </div>
-  </div>"""
-
     return f"""
   <div class="section">
     <h2>Source-Side Witness Validation (Phase 6.5)</h2>
+    <p class="small" style="color:var(--muted);margin-bottom:14px">
+      Synthetic 3-row dataset seeded into source DB. Views and procedures queried on MSSQL to confirm they execute and return rows.
+      Parity testing against SPG is in the <strong>Equivalence Test</strong> tab.
+    </p>
     <div class="summary-row">
       {cards}
     </div>
@@ -454,8 +597,7 @@ def _build_witness_tab(data: dict) -> str:
         <tbody>{rows}</tbody>
       </table>
     </div>
-  </div>
-  {parity_section}"""
+  </div>"""
 
 
 def render_html(data: dict) -> str:
@@ -537,7 +679,8 @@ def render_html(data: dict) -> str:
         ext_list += f"<li class='mono small'>{e}</li>"
     ext_html = f"<ul>{ext_list}</ul>" if ext_list else "<p class='muted-msg'>None required</p>"
 
-    witness_tab = _build_witness_tab(data)
+    witness_tab      = _build_witness_tab(data)
+    equivalence_tab  = _build_equivalence_tab(data)
     chart_labels = json.dumps(list(schemas.keys()))
     chart_tables = json.dumps([s["tables_ok"] for s in schemas.values()])
 
@@ -704,6 +847,7 @@ def render_html(data: dict) -> str:
   <button class="tab-btn" onclick="showTab('validation')">Validation</button>
   <button class="tab-btn" onclick="showTab('assessment')">Assessment</button>
   <button class="tab-btn" onclick="showTab('witness')">Witness</button>
+  <button class="tab-btn" onclick="showTab('equivalence')">Equivalence Test</button>
 </div>
 
 <div class="content">
@@ -948,6 +1092,12 @@ def render_html(data: dict) -> str:
 <div class="tab-panel" id="tab-witness">
 {witness_tab}
 </div><!-- /witness -->
+
+
+<!-- ═══════════════════════ EQUIVALENCE TEST ════════════════════════ -->
+<div class="tab-panel" id="tab-equivalence">
+{equivalence_tab}
+</div><!-- /equivalence -->
 
 </div><!-- /content -->
 
