@@ -503,10 +503,27 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("Clearing existing data and resetting IDENTITY counters…")
     cur = conn.cursor()
+    # pymssql sends SET QUOTED_IDENTIFIER OFF by default, which breaks DELETE
+    # on tables with indexed views or computed columns.  Force it ON first.
+    cur.execute("SET QUOTED_IDENTIFIER ON")
     cur.execute("EXEC sp_msforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL'")
     conn.commit()
-    cur.execute("EXEC sp_msforeachtable 'DELETE FROM ?'")
-    conn.commit()
+    # Delete per-table individually with QUOTED_IDENTIFIER ON to avoid the
+    # sp_msforeachtable QUOTED_IDENTIFIER restriction
+    cur.execute("""
+        SELECT s.name + '.' + t.name
+        FROM sys.tables t
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        ORDER BY s.name, t.name
+    """)
+    all_tables = [r[0] for r in cur.fetchall()]
+    for tbl in all_tables:
+        try:
+            cur.execute(f"SET QUOTED_IDENTIFIER ON; DELETE FROM [{tbl.replace('.', '].[')}]")
+            conn.commit()
+        except Exception:
+            conn.rollback()  # ignore tables that can't be cleared (views, etc.)
+    cur.execute("SET QUOTED_IDENTIFIER ON")
     # Reset every IDENTITY column to 0 so first insert gets ID = 1
     cur.execute("""
         SELECT s.name + '.' + t.name
