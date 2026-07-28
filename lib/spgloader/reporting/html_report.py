@@ -163,6 +163,19 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     val_report     = _load_json(ws / "validation" / "validation_report.json")
     val_checks     = val_report.get("checks", [])
 
+    # -- witness validation (Phase 6.5) ------------------------------------
+    witness_chains = _load_json(ws / "witness" / "validation_chains.json")
+    witness_results = witness_chains.get("validation_results", {})
+    witness_summary = witness_chains.get("summary", {})
+    witness_ran     = bool(witness_results)
+
+    # -- parity testing (Phase 6.6) ----------------------------------------
+    parity_report_md = ""
+    parity_file = ws / "parity" / "parity_report.md"
+    if parity_file.exists():
+        parity_report_md = parity_file.read_text(encoding="utf-8")[:8000]
+    parity_ran = parity_file.exists()
+
     return {
         "generated":      date.today().isoformat(),
         "source_type":    source_type,
@@ -196,6 +209,13 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "dep_groups":     dep_groups,
         # Validation
         "val_checks":     val_checks,
+        # Witness (Phase 6.5)
+        "witness_ran":      witness_ran,
+        "witness_results":  witness_results,
+        "witness_summary":  witness_summary,
+        # Parity (Phase 6.6)
+        "parity_ran":       parity_ran,
+        "parity_report_md": parity_report_md,
     }
 
 
@@ -330,6 +350,114 @@ def _build_dep_rows(groups: dict) -> str:
 # render_html  (main template)
 # ---------------------------------------------------------------------------
 
+_WITNESS_ICONS = {
+    "validated":           ("success", "✓ Validated"),
+    "partially_validated": ("warn",    "⚠ Partial"),
+    "failed":              ("fail",    "✗ Failed"),
+    "unsupported":         ("muted",   "⊘ Unsupported"),
+    "skipped":             ("muted",   "⏭ Skipped"),
+}
+
+
+def _build_witness_tab(data: dict) -> str:
+    if not data.get("witness_ran"):
+        return """
+  <div class="section">
+    <div class="alert alert-success" style="background:var(--surface2);border-left:3px solid var(--muted)">
+      <span class="alert-icon" style="color:var(--muted)">○</span>
+      <div><strong>Not Run</strong> — Witness validation was skipped.
+      To run, re-invoke the skill and choose Phase 6.5 at the end of Phase 6.</div>
+    </div>
+  </div>"""
+
+    results  = data["witness_results"]
+    summary  = data["witness_summary"]
+    parity_ran = data.get("parity_ran", False)
+    parity_md  = data.get("parity_report_md", "")
+
+    # Summary cards
+    cards = ""
+    order = ["validated", "partially_validated", "failed", "unsupported", "skipped"]
+    style_to_color = {"success": "green", "warn": "amber", "fail": "red", "muted": "muted"}
+    for status in order:
+        count = summary.get(status, 0)
+        if count == 0:
+            continue
+        style, label = _WITNESS_ICONS.get(status, ("muted", status))
+        color = style_to_color.get(style, "muted")
+        cards += (f"<div class='summary-card'>"
+                  f"<div class='s-label'>{label}</div>"
+                  f"<div class='s-value' style='color:var(--{color})'>{count}</div>"
+                  f"</div>")
+
+    # Per-object table
+    rows = ""
+    for fqn, r in sorted(results.items()):
+        status = r.get("status", "skipped")
+        obj_type = r.get("type", "")
+        note = r.get("note", "")[:120]
+        style, label = _WITNESS_ICONS.get(status, ("muted", status))
+        schema = fqn.split(".")[0] if "." in fqn else "dbo"
+        name = fqn.split(".")[-1]
+        rows += (f"<tr>"
+                 f"<td class='mono small'>{schema}</td>"
+                 f"<td class='mono small'>{name}</td>"
+                 f"<td class='small'>{obj_type}</td>"
+                 f"<td><span class='badge badge-{style}'>{label}</span></td>"
+                 f"<td class='small'>{note}</td>"
+                 f"</tr>")
+
+    if not rows:
+        rows = "<tr><td colspan='5' class='muted-msg'>No objects validated</td></tr>"
+
+    # Parity section
+    if parity_ran and parity_md:
+        # Convert markdown to minimal HTML (just paragraphs and headers)
+        import re as _re
+        parity_html = _re.sub(r"^### (.+)$", r"<h3>\1</h3>", parity_md, flags=_re.MULTILINE)
+        parity_html = _re.sub(r"^## (.+)$", r"<h2>\1</h2>", parity_html, flags=_re.MULTILINE)
+        parity_html = _re.sub(r"^# (.+)$", r"<h2>\1</h2>", parity_html, flags=_re.MULTILINE)
+        parity_html = _re.sub(r"`([^`]+)`", r"<code>\1</code>", parity_html)
+        parity_html = _re.sub(r"^- (.+)$", r"<li>\1</li>", parity_html, flags=_re.MULTILINE)
+        parity_section = f"""
+  <div class="section">
+    <h2>Parity Testing (Phase 6.6)</h2>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;font-size:13px;line-height:1.6">
+      {parity_html}
+    </div>
+  </div>"""
+    elif parity_ran:
+        parity_section = """
+  <div class="section">
+    <h2>Parity Testing (Phase 6.6)</h2>
+    <p class="muted-msg">Parity testing ran but no report was generated.</p>
+  </div>"""
+    else:
+        parity_section = """
+  <div class="section">
+    <h2>Parity Testing (Phase 6.6)</h2>
+    <div class="alert alert-success" style="background:var(--surface2);border-left:3px solid var(--muted)">
+      <span class="alert-icon" style="color:var(--muted)">○</span>
+      <div>Parity testing not yet run.</div>
+    </div>
+  </div>"""
+
+    return f"""
+  <div class="section">
+    <h2>Source-Side Witness Validation (Phase 6.5)</h2>
+    <div class="summary-row">
+      {cards}
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Schema</th><th>Object</th><th>Type</th><th>Status</th><th>Note</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </div>
+  {parity_section}"""
+
+
 def render_html(data: dict) -> str:
     source       = data["source_type"]
     source_db    = data["source_db"]
@@ -409,6 +537,7 @@ def render_html(data: dict) -> str:
         ext_list += f"<li class='mono small'>{e}</li>"
     ext_html = f"<ul>{ext_list}</ul>" if ext_list else "<p class='muted-msg'>None required</p>"
 
+    witness_tab = _build_witness_tab(data)
     chart_labels = json.dumps(list(schemas.keys()))
     chart_tables = json.dumps([s["tables_ok"] for s in schemas.values()])
 
@@ -574,6 +703,7 @@ def render_html(data: dict) -> str:
   <button class="tab-btn" onclick="showTab('objects')">Objects</button>
   <button class="tab-btn" onclick="showTab('validation')">Validation</button>
   <button class="tab-btn" onclick="showTab('assessment')">Assessment</button>
+  <button class="tab-btn" onclick="showTab('witness')">Witness</button>
 </div>
 
 <div class="content">
@@ -812,6 +942,12 @@ def render_html(data: dict) -> str:
   </div>
 
 </div><!-- /assessment -->
+
+
+<!-- ═══════════════════════════ WITNESS ═════════════════════════════ -->
+<div class="tab-panel" id="tab-witness">
+{witness_tab}
+</div><!-- /witness -->
 
 </div><!-- /content -->
 

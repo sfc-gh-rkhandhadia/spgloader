@@ -132,6 +132,12 @@ Execute phases in order. Load each sub-skill, execute its full workflow, then co
 | 4 | `sub-skills/convert/SKILL.md` | Convert non-table objects (LLM, EWI-annotated) |
 | 5 | `sub-skills/deploy/SKILL.md` | Deploy to SPG (catalog-based parallel for tables; DDL for rest) |
 | 6 | `sub-skills/validate/SKILL.md` | Row counts + schema spot checks |
+| **6.5** | **`sub-skills/witness-validate/SKILL.md`** | **Witness validation: seed synthetic data (Docker/SPCS) + confirm views/procs return rows on source** |
+| **6.6** | **`sub-skills/witness-validate/SKILL.md`** | **Parity testing: same queries on SPG, diff results, sign-off report** |
+
+**Phase 6.5 and 6.6 are optional** — the sub-skill asks the user at the start of Phase 6.5 whether to proceed.
+If source is an existing customer instance (`SOURCE_ENV=existing`), synthetic seeding is automatically
+skipped; only `validate_chains` + parity run against existing data.
 
 **Phase 3.5 is mandatory and cannot be skipped.** If it returns BLOCKED, the migration
 halts until the user resolves all BLOCK findings. Phase 4 always checks
@@ -183,10 +189,20 @@ $SPGLOADER_WORK_DIR/
 │   └── repair_report.json
 ├── deployment/
 │   └── deployment_summary.json
-└── validation/
-    ├── validation_report.json
-    ├── migration_report.html
-    └── migration_report.pdf  (optional)
+├── validation/
+│   ├── validation_report.json
+│   ├── migration_report.html
+│   └── migration_report.pdf  (optional)
+├── witness/                         ← Phase 6.5 output
+│   ├── object_inventory.json        — parse_ddl output
+│   ├── dep_graph.json               — dependency graph + SPG constraints
+│   ├── spg_column_constraints.json  — SPG CHECK constraints
+│   ├── mssql_deploy_report.json     — bridge from spgloader deploy artifacts
+│   ├── seed_report.json             — seeding results (stub if skipped)
+│   └── validation_chains.json       — view/proc/fn confirmation results
+└── parity/                          ← Phase 6.6 output
+    ├── parity_report.md             — sign-off report
+    └── migration_signoff.pptx       — PowerPoint sign-off (if requested)
 ```
 
 ## Progress Tracking
@@ -202,6 +218,8 @@ Phase 3.6: Deprecated Review     ← pending / in_progress / skipped / completed
 Phase 4: Conversion              ← pending / in_progress / completed
 Phase 5: Deploy                  ← pending / in_progress / completed
 Phase 6: Validate                ← pending / in_progress / completed
+Phase 6.5: Witness Validation    ← pending / in_progress / skipped / completed
+Phase 6.6: Parity Testing        ← pending / in_progress / skipped / completed
 ```
 
 ## Mandatory Stopping Points
