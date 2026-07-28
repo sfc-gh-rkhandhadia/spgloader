@@ -255,7 +255,8 @@ def render_html(data: dict) -> str:
   <!-- Executive Summary -->
   <section class="section" id="executive-summary">
     <h2>Executive Summary</h2>
-    <div class="kpi-grid"><div class="num green">{data["total_tables"]}</div>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="num green">{data["total_tables"]}</div>
         <div class="label">Tables Migrated</div><div class="sub">100% success</div></div>
       <div class="kpi-card"><div class="num green">{data["total_indexes"]}</div>
         <div class="label">Indexes Deployed</div></div>
