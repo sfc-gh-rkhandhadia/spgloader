@@ -224,8 +224,11 @@ def get_spg_params(schema, name):
             ORDER BY pa.ordinal_position
         """, (schema, name))
         rows = cur.fetchall()
+        # Include IN and INOUT params — exclude pure OUT (return values only).
+        # MSSQL OUTPUT params become INOUT in PostgreSQL, not pure OUT.
+        # Filtering to IN-only drops valid INOUT params and undercounts SPG params.
         return [{'name': (r['parameter_name'] or '').lstrip('_').lower(), 'type': r['data_type'] or ''}
-                for r in rows if (r['parameter_mode'] or 'IN') == 'IN']
+                for r in rows if (r['parameter_mode'] or 'IN') in ('IN', 'INOUT')]
     except Exception as e:
         return 'ERR:%s' % str(e)[:80]
 
