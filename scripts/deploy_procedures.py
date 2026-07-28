@@ -210,25 +210,34 @@ def deploy_procedures(
         print(f"  Phase 3.6 decisions: skipping {len(already_deprecated)} pre-reviewed object(s)")
 
     if legacy_labels:
-        # Check if decisions are already recorded in deprecated_review.json
+        # Load decisions from deprecated_review.json
         review_path = work_dir / "deprecated" / "deprecated_review.json"
-        reviewed_labels: set[str] = set()
+        # Map label → disposition ("skip" | "migrate" | None)
+        recorded_disposition: dict[str, str] = {}
         if review_path.exists():
             try:
                 rdata = json.loads(review_path.read_text(encoding="utf-8"))
                 for gkey, gval in rdata.get("groups", {}).items():
-                    if gval.get("disposition") in ("skip", "migrate"):
-                        reviewed_labels.add(gkey)
-                        reviewed_labels.add(gval.get("pattern_name", "").lower())
+                    disp = gval.get("disposition")
+                    if disp in ("skip", "migrate"):
+                        # Index by both the group key and pattern_name for flexible matching
+                        recorded_disposition[gkey.lower()] = disp
+                        pname = gval.get("pattern_name", "")
+                        if pname:
+                            recorded_disposition[pname.lower()] = disp
             except Exception:
                 pass
 
         # Separate already-decided from undecided
         undecided: dict[str, list[str]] = {}
         for lbl, names in legacy_labels.items():
-            rule = next((r for r in rules if r["label"] == lbl), {})
-            if lbl in reviewed_labels or rule.get("description", "").lower() in reviewed_labels:
-                skip_labels.add(lbl)  # default: skip if previously reviewed
+            disp = recorded_disposition.get(lbl.lower())
+            if disp == "skip":
+                skip_labels.add(lbl)
+                print(f"  Skipping legacy group [{lbl}] ({len(names)} procs) — user chose skip")
+            elif disp == "migrate":
+                print(f"  Including legacy group [{lbl}] ({len(names)} procs) — user chose migrate")
+                # Not in skip_labels → will be deployed
             else:
                 undecided[lbl] = names
 
@@ -266,36 +275,6 @@ def deploy_procedures(
                     file=sys.stderr,
                 )
                 sys.exit(EXIT_PENDING_DECISIONS)
-
-        # All legacy groups are already decided — apply skip/include from review
-        review_data = {}
-        if review_path.exists():
-            try:
-                review_data = json.loads(review_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        for lbl, names in legacy_labels.items():
-            # Find the user's explicit decision — never default silently
-            disposition = None
-            for gval in review_data.get("groups", {}).values():
-                if gval.get("pattern_name", "") and lbl in gval.get("pattern_name", "").lower():
-                    disposition = gval.get("disposition")
-                    break
-            if disposition is None:
-                # This should never happen — undecided groups were caught above and
-                # exited with code 2.  If we somehow reach here, refuse to default.
-                print(
-                    f"\nERROR: No user decision found for legacy group [{lbl}]."
-                    f"\nThis group was not in deprecated_review.json."
-                    f"\nDelete legacy_groups_pending.json and re-run to be prompted.",
-                    file=sys.stderr,
-                )
-                sys.exit(EXIT_PENDING_DECISIONS)
-            if disposition == "skip":
-                skip_labels.add(lbl)
-                print(f"  Skipping legacy group [{lbl}] ({len(names)} procs) — user chose skip")
-            else:
-                print(f"  Including legacy group [{lbl}] ({len(names)} procs) — user chose migrate")
 
     # ── 3. Build the final ordered deploy list ────────────────────────────
     to_deploy = []
@@ -415,8 +394,6 @@ def main() -> None:
         include_legacy=args.include_legacy,
         exclude_legacy=args.exclude_legacy,
         interactive=args.interactive,  # False by default; True only when skill passes --interactive
-        skill_dir=skill_dir,
-    )
         skill_dir=skill_dir,
     )
 
