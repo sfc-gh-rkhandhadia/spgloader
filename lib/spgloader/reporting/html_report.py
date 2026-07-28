@@ -242,7 +242,9 @@ def render_html(data: dict) -> str:
   <div class="header-meta">
     <div class="item"><span class="label">Report Date</span><span class="value">{generated}</span></div>
     <div class="item"><span class="label">Source</span><span class="value">{source}</span></div>
-    <div class="item"><span class="label">Target</span><span class="value">{spg}</span></div>
+    <div class="item"><span class="label">Source DB</span><span class="value">{source_db}</span></div>
+    <div class="item"><span class="label">Target</span><span class="value">Snowflake Postgres</span></div>
+    <div class="item"><span class="label">Target DB</span><span class="value">{spg}</span></div>
     <div class="item"><span class="label">Schemas</span><span class="value">{len(schemas)}</span></div>
     <div class="item"><span class="label">Assessment</span><span class="value">{assess_status}</span></div>
   </div>
@@ -253,15 +255,7 @@ def render_html(data: dict) -> str:
   <!-- Executive Summary -->
   <section class="section" id="executive-summary">
     <h2>Executive Summary</h2>
-    <div class="info-strip">
-      <div class="info-item"><span class="info-label">Source Type</span><span class="info-value">{source}</span></div>
-      <div class="info-item"><span class="info-label">Source Database</span><span class="info-value">{source_db}</span></div>
-      <div class="info-item"><span class="info-label">Target Type</span><span class="info-value">Snowflake Postgres</span></div>
-      <div class="info-item"><span class="info-label">Target Instance</span><span class="info-value">{spg}</span></div>
-      <div class="info-item"><span class="info-label">Report Date</span><span class="info-value">{generated}</span></div>
-    </div>
-    <div class="kpi-grid">
-      <div class="kpi-card"><div class="num green">{data["total_tables"]}</div>
+    <div class="kpi-grid"><div class="num green">{data["total_tables"]}</div>
         <div class="label">Tables Migrated</div><div class="sub">100% success</div></div>
       <div class="kpi-card"><div class="num green">{data["total_indexes"]}</div>
         <div class="label">Indexes Deployed</div></div>
