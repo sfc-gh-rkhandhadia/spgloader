@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-load_source_ddl.py — Load DDL into the source database Docker container.
+load_source_ddl.py — Load DDL into the source database container (Docker or SPCS).
 
 Accepts either:
   --ddl-file PATH   A single combined .sql file (original behaviour)
@@ -21,10 +21,10 @@ When --ddl-dir is given the script:
 After loading, updates source_conn.env with the new SOURCE_DATABASE value.
 
 Supported sources:
-    mssql  — uses sqlcmd inside spgloader_mssql container
+    mssql  — uses sqlcmd inside Docker container, or pymssql over TCP (SPCS/--host)
     mysql  — uses mysql client inside spgloader_mysql container
 
-Usage (single file — original):
+Usage (Docker — original):
     uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \\
         --source-type  mssql \\
         --ddl-file     /path/to/schema.sql \\
@@ -32,7 +32,16 @@ Usage (single file — original):
         --password-env MSSQL_SA_PASSWORD \\
         --work-dir     $SPGLOADER_WORK_DIR
 
-Usage (SSMS export directory):
+Usage (SPCS / remote host — TCP via pymssql):
+    uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \\
+        --source-type  mssql \\
+        --host         <spcs-dns-name> \\
+        --ddl-file     /path/to/schema.sql \\
+        --database     migration_db \\
+        --password-env MSSQL_SA_PASSWORD \\
+        --work-dir     $SPGLOADER_WORK_DIR
+
+Usage (SSMS export directory, Docker):
     uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \\
         --source-type  mssql \\
         --ddl-dir      "/path/to/Acuity Objects Scripts and Tables report" \\
@@ -49,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -355,15 +365,124 @@ def update_source_conn_env(work_dir: Path, database: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# SPCS / TCP loader (pymssql — no Docker)
+# ---------------------------------------------------------------------------
+
+def load_mssql_tcp(
+    ddl_file: Path,
+    database: str,
+    password: str,
+    host: str,
+    port: int = 1433,
+    run_fk_pass: bool = False,
+) -> None:
+    """Load DDL into an MSSQL instance accessible over TCP (SPCS or any remote host).
+
+    Uses pymssql so no Docker exec / docker cp is required.  The DDL file stays
+    local and is executed batch-by-batch by splitting on GO boundaries.
+    """
+    try:
+        import pymssql  # type: ignore
+    except ImportError:
+        print("Error: pymssql is not installed.", file=sys.stderr)
+        print("  Run: uv add pymssql", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"  Host     : {host}:{port}")
+    print(f"  Database : {database}")
+    print(f"  DDL file : {ddl_file}")
+
+    # Connect to master to create the target database
+    print(f"  Connecting to {host}:{port} (master)...")
+    conn = pymssql.connect(
+        host=host, port=port, user="sa", password=password,
+        database="master", login_timeout=60, timeout=120,
+    )
+    conn.autocommit(True)
+    cursor = conn.cursor()
+
+    # Create database if not exists
+    cursor.execute(
+        f"IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = '{database}') "
+        f"CREATE DATABASE [{database}]"
+    )
+    print(f"  Database '{database}' ensured.")
+    cursor.close()
+    conn.close()
+
+    # Re-connect to the target database
+    conn = pymssql.connect(
+        host=host, port=port, user="sa", password=password,
+        database=database, login_timeout=60, timeout=300,
+    )
+    conn.autocommit(True)
+    cursor = conn.cursor()
+
+    content = _detect_and_read(ddl_file)
+    # Strip USE [dbname] — we already set the database on connect
+    content = re.sub(
+        r"^\s*USE\s+\[[^\]]*\]\s*\r?\n?", "", content, flags=re.MULTILINE | re.IGNORECASE
+    )
+
+    # Split on GO boundaries and execute each non-empty batch
+    batches = re.split(r"\bGO\b[ \t]*(?:\r?\n|$)", content, flags=re.IGNORECASE)
+    total = len([b for b in batches if b.strip()])
+    print(f"  Executing {total} batch(es)...")
+
+    errors = 0
+    for i, batch in enumerate(batches):
+        batch = batch.strip()
+        if not batch:
+            continue
+        try:
+            cursor.execute(batch)
+        except Exception as e:
+            msg = str(e).replace("\n", " ").strip()
+            # FK ordering failures are expected and handled by the second pass
+            if "foreign key" not in msg.lower():
+                print(f"  Batch {i+1} error: {msg[:120]}", file=sys.stderr)
+                errors += 1
+
+    if errors:
+        print(f"  {errors} batch(es) had errors (FK errors are expected and retried)",
+              file=sys.stderr)
+
+    # Optional second FK pass
+    if run_fk_pass:
+        print("  Running second FK pass to resolve ordering failures...")
+        fk_sql = _extract_fk_statements(content)
+        if fk_sql:
+            fk_batches = re.split(r"\bGO\b[ \t]*(?:\r?\n|$)", fk_sql, flags=re.IGNORECASE)
+            fk_errors = 0
+            for batch in fk_batches:
+                batch = batch.strip()
+                if not batch:
+                    continue
+                try:
+                    cursor.execute(batch)
+                except Exception as e:
+                    fk_errors += 1
+            print(f"  FK pass 2 complete ({fk_errors} errors).")
+
+    cursor.close()
+    conn.close()
+    print(f"  DDL loaded into {host}:{port}/{database}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Load a DDL file (or directory of SSMS-exported .sql files) into "
-            "the source DB Docker container for catalog-based extraction."
+            "the source DB (Docker container or SPCS/remote host via TCP)."
         )
     )
     parser.add_argument("--source-type", required=True, choices=["mssql", "mysql"],
                         help="Source database type")
+    parser.add_argument("--host",
+                        help="Remote host (SPCS DNS name or IP). If omitted, uses Docker.")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Port override (default: 1433 for mssql, 3306 for mysql)")
 
     src_group = parser.add_mutually_exclusive_group(required=True)
     src_group.add_argument("--ddl-file",
@@ -391,15 +510,6 @@ def main() -> None:
         print(f"Error: env var '{args.password_env}' is not set.", file=sys.stderr)
         sys.exit(1)
 
-    info = CONTAINER_INFO[args.source_type]
-    container = info["container"]
-
-    if not container_running(container):
-        print(f"Error: container '{container}' is not running.", file=sys.stderr)
-        print(f"  Start it with: docker compose -f references/docker-templates/"
-              f"{args.source_type}-compose.yml up -d", file=sys.stderr)
-        sys.exit(1)
-
     # ── Resolve the DDL to a single file ────────────────────────────────────
     run_fk_pass = False
     if args.ddl_file:
@@ -417,24 +527,51 @@ def main() -> None:
         if not combined:
             print("Error: no SQL content found in directory.", file=sys.stderr)
             sys.exit(1)
-        # Write combined file to workspace
         ddl_file = work_dir / "combined_ddl.sql"
         ddl_file.write_text(combined, encoding="utf-8")
         print(f"  Written: {ddl_file}  ({ddl_file.stat().st_size / 1024:.0f} KB)")
-        run_fk_pass = True   # directory loads benefit from a second FK pass
+        run_fk_pass = True
 
     # ── Load ────────────────────────────────────────────────────────────────
-    print(f"\nLoading DDL into {args.source_type} container...")
+    if args.host:
+        # SPCS / remote TCP path — no Docker required
+        info = CONTAINER_INFO.get(args.source_type, {})
+        default_port = 1433 if args.source_type == "mssql" else 3306
+        port = args.port or default_port
 
-    if args.source_type == "mssql":
-        load_mssql(ddl_file, args.database, password, container, info["sqlcmd"],
-                   run_fk_pass=run_fk_pass)
-    elif args.source_type == "mysql":
-        load_mysql(ddl_file, args.database, password, container)
+        if args.source_type != "mssql":
+            print("Error: --host (TCP) mode currently only supports --source-type mssql.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        print(f"\nLoading DDL into {args.source_type} via TCP ({args.host}:{port})...")
+        load_mssql_tcp(
+            ddl_file, args.database, password,
+            host=args.host, port=port, run_fk_pass=run_fk_pass,
+        )
+    else:
+        # Docker path (original behaviour)
+        info = CONTAINER_INFO[args.source_type]
+        container = info["container"]
+
+        if not container_running(container):
+            print(f"Error: container '{container}' is not running.", file=sys.stderr)
+            print(f"  Start it with: docker compose -f references/docker-templates/"
+                  f"{args.source_type}-compose.yml up -d", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"\nLoading DDL into {args.source_type} container...")
+
+        if args.source_type == "mssql":
+            load_mssql(ddl_file, args.database, password, container, info["sqlcmd"],
+                       run_fk_pass=run_fk_pass)
+        elif args.source_type == "mysql":
+            load_mysql(ddl_file, args.database, password, container)
 
     update_source_conn_env(work_dir, args.database)
 
-    print(f"\nSource DB ready: {args.source_type} @ {container}/{args.database}")
+    target = f"{args.host or 'docker-container'}/{args.database}"
+    print(f"\nSource DB ready: {args.source_type} @ {target}")
     print("Catalog-based extraction can now connect to the live source database.")
 
 

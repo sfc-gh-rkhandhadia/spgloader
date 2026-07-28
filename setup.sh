@@ -42,6 +42,13 @@ else
     echo "    Install: https://docs.docker.com/get-docker/"
 fi
 
+if command -v snow >/dev/null 2>&1; then
+    echo "  snow CLI: OK ($(snow --version 2>&1 | head -1))"
+else
+    echo "  WARNING: snow CLI not found — SPCS-based source setup disabled"
+    echo "    Install: pip install snowflake-cli-labs"
+fi
+
 if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "Setup failed: $ERRORS required prerequisite(s) missing. Fix them and re-run."

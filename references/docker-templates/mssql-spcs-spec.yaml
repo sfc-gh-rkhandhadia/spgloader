@@ -1,0 +1,17 @@
+spec:
+  containers:
+  - name: source-db
+    image: <REPO_URL>/mssql-source:latest
+    env:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "{{ MSSQL_SA_PASSWORD }}"
+    resources:
+      requests:
+        memory: 2G
+        cpu: "1"
+      limits:
+        memory: 4G
+  endpoints:
+  - name: db
+    port: 1433
+    protocol: TCP

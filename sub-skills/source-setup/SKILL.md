@@ -182,136 +182,113 @@ SOURCE_PASSWORD_ENV=ORACLE_PWD
 ## SPCS (Snowpark Container Services) {#spcs}
 
 Use SPCS when Docker is not available on the local machine. The source DB runs as
-a Snowflake-managed service and is accessible via a service endpoint.
+a Snowflake-managed service and is accessible via a service endpoint DNS name.
+
+**Data copy uses `copy_source_data.py` (pymssql over TCP) — pgloader is not used.**
 
 ### Step 1: ⚠️ MANDATORY STOPPING POINT — SPCS compute pool creation is billable
 
-Confirm with the user before creating any SPCS resources.
+Confirm with the user before creating any SPCS resources. The compute pool incurs
+credit charges while running. Remind them to tear it down after migration completes.
 
 ### Step 2: Prerequisites
 
 ```bash
-# Verify snow CLI and Snowflake connection
-snow --version
-snow connection test
+snow --version          # must be installed
+snow connection test    # must succeed
+docker --version        # needed to push the source DB image
 ```
 
 Ensure the active Snowflake role has `CREATE COMPUTE POOL`, `CREATE SERVICE`, and
 `CREATE IMAGE REPOSITORY` privileges.
 
-### Step 3: Create image repository and push source DB image
+### Step 3: Collect source DB password
+
+Ask the user for the source DB admin password and store it as an environment variable:
 
 ```bash
-REPO_URL=$(snow sql -q "CREATE IMAGE REPOSITORY IF NOT EXISTS spgloader_source_repo" \
-  --format=json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['repository_url'])")
-
-# Build and push the source image
-docker buildx build --platform linux/amd64 \
-  -t "$REPO_URL/source-db:latest" \
-  -f <SKILL_DIR>/references/docker-templates/<db>-compose.yml \
-  --push .
+export MSSQL_SA_PASSWORD="<password>"      # MSSQL
+export MYSQL_ROOT_PASSWORD="<password>"    # MySQL
 ```
 
-### Step 4: Create compute pool and SPCS service
+### Step 4: Deploy source DB on SPCS
 
-```sql
--- Compute pool (XS is sufficient for source DB during migration)
-CREATE COMPUTE POOL IF NOT EXISTS spgloader_source_pool
-  MIN_NODES = 1 MAX_NODES = 1
-  INSTANCE_FAMILY = CPU_X64_XS;
-
--- Service spec written to stage
-CREATE STAGE IF NOT EXISTS spgloader_specs;
-```
-
-Write a service spec to `/tmp/source_db_spec.yaml` then deploy:
+Run `setup_spcs_source.py` — this handles the image repo, docker pull+push, compute
+pool, service spec, service deployment, RUNNING wait, DNS retrieval, and writes
+`source_conn.env` in one step:
 
 ```bash
-cat > /tmp/source_db_spec.yaml << 'EOF'
-spec:
-  containers:
-  - name: source-db
-    image: <REPO_URL>/source-db:latest
-    env:
-      MSSQL_SA_PASSWORD: $MSSQL_SA_PASSWORD     # or MySQL/Oracle equivalents
-      ACCEPT_EULA: "Y"
-    ports:
-    - containerPort: 1433     # adjust per source type
-  endpoints:
-  - name: db
-    port: 1433
-    protocol: TCP
-EOF
-
-snow sql -q "PUT file:///tmp/source_db_spec.yaml @spgloader_specs AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
-
-snow sql -q "
-CREATE SERVICE IF NOT EXISTS spgloader_source_db
-  IN COMPUTE POOL spgloader_source_pool
-  FROM @spgloader_specs
-  SPEC = 'source_db_spec.yaml'
-"
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/setup_spcs_source.py \
+  --source-type  "$SOURCE_TYPE" \
+  --database     "migration_db" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --work-dir     "$SPGLOADER_WORK_DIR"
 ```
 
-### Step 5: Wait for service to be READY
+Optional flags:
+- `--pool-name NAME` — custom compute pool name (default: `spgloader_source_pool`)
+- `--service-name NAME` — custom service name (default: `spgloader_source_db`)
+- `--instance-family CPU_X64_S` — larger instance if needed (default: `CPU_X64_XS`)
+- `--connection my_conn` — Snowflake connection name
+- `--skip-push` — skip docker pull+push if image is already in the repo
 
+The script prints the service DNS name and writes `source_conn.env` including
+`SOURCE_HOST`, `SPCS_SERVICE`, and `SPCS_POOL` keys.
+
+Read the DNS name from the written file:
 ```bash
-while true; do
-  svc_status=$(snow sql -q "SHOW SERVICES LIKE 'SPGLOADER_SOURCE_DB'" --format=json \
-    | python3 -c "import sys,json; rows=json.load(sys.stdin); print(rows[0]['status'] if rows else 'UNKNOWN')")
-  echo "Service status: $svc_status"
-  [ "$svc_status" = "RUNNING" ] && break
-  sleep 15
-done
-```
-
-### Step 6: Retrieve service endpoint
-
-```bash
-SERVICE_HOST=$(snow sql \
-  -q "SELECT system\$get_service_dns_name('spgloader_source_db')" \
-  --format=json | python3 -c "import sys,json; print(json.load(sys.stdin)[0][0])")
+SERVICE_HOST=$(grep '^SOURCE_HOST=' "$SPGLOADER_WORK_DIR/source_conn.env" | cut -d= -f2)
 echo "Source DB endpoint: $SERVICE_HOST"
 ```
 
-### Step 7: Load DDL file into the SPCS source DB (if SOURCE_INPUT = file)
+### Step 5: Load DDL file into the SPCS source DB (if SOURCE_INPUT = file)
 
+Pass `--host` to route through the TCP/pymssql path instead of Docker exec:
+
+**Single combined `.sql` file:**
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \
   --source-type  "$SOURCE_TYPE" \
+  --host         "$SERVICE_HOST" \
   --ddl-file     "/path/to/schema.sql" \
   --database     "migration_db" \
   --password-env "$SOURCE_PASSWORD_ENV" \
-  --work-dir     "$SPGLOADER_WORK_DIR" \
-  --host         "$SERVICE_HOST"
+  --work-dir     "$SPGLOADER_WORK_DIR"
 ```
 
-### Step 8: Write source_conn.env
-
-Write `$SPGLOADER_WORK_DIR/source_conn.env` using the service endpoint as host:
-
-```
-SOURCE_TYPE=<source_type>
-SOURCE_HOST=<SERVICE_HOST>
-SOURCE_PORT=<port>
-SOURCE_DATABASE=migration_db
-SOURCE_USER=<user>
-SOURCE_PASSWORD_ENV=<PASS_ENV_VAR>
-SPCS_SERVICE=spgloader_source_db
-SPCS_POOL=spgloader_source_pool
+**SSMS export directory** (use `--ddl-dir`; encoding and ordering handled automatically):
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \
+  --source-type  "$SOURCE_TYPE" \
+  --host         "$SERVICE_HOST" \
+  --ddl-dir      "/path/to/ssms_export_directory" \
+  --database     "migration_db" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --work-dir     "$SPGLOADER_WORK_DIR"
 ```
 
-The `SPCS_SERVICE` and `SPCS_POOL` entries are used by Phase 6 (validate) to clean up
-SPCS resources after migration completes.
-
-### Step 9: Test connectivity
+### Step 6: Test connectivity
 
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/extract_ddl.py \
-  --source-type <SOURCE_TYPE> --host "$SERVICE_HOST" --port <port> \
-  --database migration_db --user <user> --password-env <PASS_ENV_VAR> \
+  --source-type "$SOURCE_TYPE" \
+  --work-dir    "$SPGLOADER_WORK_DIR" \
   --test-connection
 ```
+
+(`extract_ddl.py` reads `source_conn.env` automatically when `--work-dir` is given.)
+
+### Teardown (after migration completes)
+
+Run this at the end of Phase 6 to drop the SPCS service and compute pool:
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/teardown_spcs_source.py \
+  --work-dir "$SPGLOADER_WORK_DIR"
+```
+
+This reads `SPCS_SERVICE` and `SPCS_POOL` from `source_conn.env` and prompts for
+confirmation before dropping. Use `--yes` to skip the prompt in automated flows.
 
 ---
 
