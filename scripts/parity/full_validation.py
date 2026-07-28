@@ -195,13 +195,17 @@ def validate_view(schema, name):
 def get_ms_params(schema, name):
     try:
         cur = ms_conn().cursor(as_dict=True)
+        # Use sys.objects to cover both procedures (P) AND scalar/table functions (FN, TF, IF)
+        # sys.procedures only returns procedures — functions have 0 rows there
         cur.execute("""
             SELECT p.parameter_id, p.name AS pname, t.name AS tname
-            FROM sys.procedures pr
-            JOIN sys.schemas s ON pr.schema_id = s.schema_id
-            JOIN sys.parameters p ON pr.object_id = p.object_id
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            JOIN sys.parameters p ON o.object_id = p.object_id
             JOIN sys.types t ON p.user_type_id = t.user_type_id
-            WHERE s.name = %s AND LOWER(pr.name) = %s
+            WHERE o.type IN ('P', 'FN', 'TF', 'IF')
+              AND s.name = %s AND LOWER(o.name) = %s
+              AND p.parameter_id > 0
             ORDER BY p.parameter_id
         """, (schema, name))
         rows = cur.fetchall()
