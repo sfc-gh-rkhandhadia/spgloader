@@ -15,9 +15,30 @@ embedded in this module — all values come from the workspace at runtime.
 from __future__ import annotations
 
 import json
+import urllib.request
 from datetime import date
 from pathlib import Path
 from typing import Any
+
+_CHARTJS_CDN = "https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+_CHARTJS_INLINE: str | None = None  # cached after first fetch
+
+
+def _chartjs_script() -> str:
+    """Return an inline <script> block with Chart.js source.
+    Falls back to the CDN <script src> tag if the fetch fails.
+    """
+    global _CHARTJS_INLINE
+    if _CHARTJS_INLINE is None:
+        try:
+            with urllib.request.urlopen(_CHARTJS_CDN, timeout=5) as resp:
+                _CHARTJS_INLINE = resp.read().decode("utf-8")
+        except Exception:
+            _CHARTJS_INLINE = ""  # empty = use CDN fallback below
+    if _CHARTJS_INLINE:
+        return f"<script>\n{_CHARTJS_INLINE}\n</script>"
+    # Fallback: CDN URL (requires internet when opening the report)
+    return f'<script src="{_CHARTJS_CDN}"></script>'
 
 import yaml
 
@@ -289,7 +310,7 @@ def render_html(data: dict) -> str:
   </div>
 </div>
 
-<script src="/libs/chart.js@4.4.4/chart.umd.js"></script>
+{_chartjs_script()}
 <script>
 const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 Chart.defaults.color = isDark ? '#94a3b8' : '#64748b';
