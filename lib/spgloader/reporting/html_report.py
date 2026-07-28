@@ -506,10 +506,9 @@ def render_html(data: dict) -> str:
   /* ── Charts ── */
   .chart-row{{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:28px}}
   .chart-card{{background:var(--surface);border:1px solid var(--border);
-    border-radius:10px;padding:18px;flex:1;min-width:260px;max-width:460px;
-    display:flex;flex-direction:column}}
-  .chart-card h3{{margin-bottom:14px;flex-shrink:0}}
-  .chart-card canvas{{flex:1;min-height:200px}}
+    border-radius:10px;padding:18px;flex:1;min-width:260px;max-width:460px}}
+  .chart-card h3{{margin-bottom:14px}}
+  .chart-container{{position:relative;height:220px;width:100%}}
 
   /* ── Summary cards (row) ── */
   .summary-row{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px}}
@@ -603,15 +602,15 @@ def render_html(data: dict) -> str:
   <div class="chart-row">
     <div class="chart-card">
       <h3>Tables per Schema</h3>
-      <canvas id="tablesChart" width="400" height="200"></canvas>
+      <div class="chart-container"><canvas id="tablesChart"></canvas></div>
     </div>
     <div class="chart-card">
       <h3>Objects by Type</h3>
-      <canvas id="typeChart" width="280" height="200"></canvas>
+      <div class="chart-container"><canvas id="typeChart"></canvas></div>
     </div>
     <div class="chart-card">
       <h3>Migration Success</h3>
-      <canvas id="successChart" width="220" height="200"></canvas>
+      <div class="chart-container"><canvas id="successChart"></canvas></div>
     </div>
   </div>
 
