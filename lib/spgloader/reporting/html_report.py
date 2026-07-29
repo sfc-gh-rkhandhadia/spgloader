@@ -340,8 +340,20 @@ def _build_val_rows(checks: list) -> str:
         elif note:
             detail = note
 
+        _check_tips = {
+            "table_count":        "Compares the number of base tables in the source schema against SPG. A mismatch means some tables were not deployed.",
+            "column_count_sample": "Spot-checks column counts on a sample of tables. source=0 means the table was created via CREATE TABLE AS SELECT and has no static column list in the source catalog (not a migration error).",
+            "primary_key_sample":  "Verifies that primary key column sets match between source and SPG for a sample of tables.",
+            "identity_serial":     "Counts AUTO_INCREMENT / IDENTITY columns. SPG uses GENERATED ALWAYS AS IDENTITY or SERIAL. Missing entries indicate sequences that may need reseeding.",
+            "foreign_key_count":   "Compares FK constraint counts. Mismatches usually mean the referenced table lacks a UNIQUE constraint that PostgreSQL requires.",
+            "index_count":         "Compares total index counts. SPG typically shows a higher count because PostgreSQL creates implicit indexes for PRIMARY KEY and UNIQUE constraints.",
+        }
+        tip = _check_tips.get(chk, "")
+        tip_attr = f' data-tip="{tip}"' if tip else ""
         label = chk.replace("_", " ").title()
-        rows.append(f"<tr><td>{label}</td><td>{badge}</td>"
+        rows.append(f"<tr><td{tip_attr} style='{'cursor:help' if tip else ''}'>{label}"
+                    f"{'<span class=\"tip-icon\">\u24d8</span>' if tip else ''}"
+                    f"</td><td>{badge}</td>"
                     f"<td class='small'>{detail}</td></tr>")
     return "".join(rows) or "<tr><td colspan='3' class='muted-msg'>No checks run</td></tr>"
 
@@ -844,6 +856,27 @@ def render_html(data: dict) -> str:
   .summary-card .s-label{{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}}
   .summary-card .s-value{{font-size:22px;font-weight:700;margin-top:2px}}
 
+  /* ── Tooltips ── */
+  [data-tip]{{position:relative;cursor:default}}
+  [data-tip]::after{{
+    content:attr(data-tip);
+    position:absolute;
+    bottom:calc(100% + 8px);
+    left:50%;transform:translateX(-50%);
+    background:light-dark(#1e293b,#f1f5f9);
+    color:light-dark(#f1f5f9,#1e293b);
+    padding:7px 11px;
+    border-radius:7px;
+    font-size:12px;font-weight:400;line-height:1.45;
+    width:max-content;max-width:260px;white-space:normal;
+    opacity:0;pointer-events:none;transition:opacity .15s;
+    z-index:200;
+    box-shadow:0 4px 12px rgba(0,0,0,.2);
+  }}
+  [data-tip]:hover::after{{opacity:1}}
+  .tip-icon{{font-size:10px;color:var(--muted);margin-left:3px;
+    vertical-align:super;cursor:help;user-select:none}}
+
   /* ── Misc ── */
   .muted-msg{{color:var(--muted);font-style:italic;font-size:13px;padding:8px 0}}
   .footnote{{font-size:11px;color:var(--muted);margin-top:6px;padding-top:6px;
@@ -912,34 +945,34 @@ def render_html(data: dict) -> str:
 <div class="tab-panel active" id="tab-overview">
 
   <div class="kpi-grid">
-    <div class="kpi-card">
+    <div class="kpi-card" data-tip="Base tables (CREATE TABLE) migrated from the source database. Temporary and derived tables are excluded. All source tables should appear here at 100%.">
       <div class="num green">{total_tables:,}</div>
-      <div class="label">Tables</div>
+      <div class="label">Tables<span class="tip-icon">ⓘ</span></div>
       <div class="sub">100% deployed</div>
     </div>
-    <div class="kpi-card">
+    <div class="kpi-card" data-tip="Non-primary-key indexes deployed to SPG. PostgreSQL auto-creates implicit indexes for PRIMARY KEY and UNIQUE constraints, so the SPG count is typically higher than the source. Skipped = duplicate names or unsupported index types.">
       <div class="num green">{total_indexes:,}</div>
-      <div class="label">Indexes</div>
+      <div class="label">Indexes<span class="tip-icon">ⓘ</span></div>
       <div class="sub">{sum(s['indexes_fail'] for s in schemas.values())} skipped</div>
     </div>
-    <div class="kpi-card">
+    <div class="kpi-card" data-tip="CREATE VIEW objects converted from source SQL dialect to PostgreSQL-compatible syntax and deployed to SPG.">
       <div class="num green">{total_views}</div>
-      <div class="label">Views</div>
+      <div class="label">Views<span class="tip-icon">ⓘ</span></div>
       <div class="sub">All deployed</div>
     </div>
-    <div class="kpi-card">
+    <div class="kpi-card" data-tip="Scalar and table-valued functions (UDFs) converted to PL/pgSQL. Failed functions are first attempted by the rule engine, then by LLM repair.">
       <div class="num green">{total_funcs}</div>
-      <div class="label">Functions</div>
+      <div class="label">Functions<span class="tip-icon">ⓘ</span></div>
       <div class="sub">All deployed</div>
     </div>
-    <div class="kpi-card">
+    <div class="kpi-card" data-tip="Stored procedures converted from source dialect (T-SQL / PL/SQL / MySQL) to PL/pgSQL. Failures first go through rule-based repair, then LLM repair. Remaining failures need manual review.">
       <div class="num {'green' if not procs_fail else 'amber'}">{total_procs}</div>
-      <div class="label">Procedures</div>
+      <div class="label">Procedures<span class="tip-icon">ⓘ</span></div>
       <div class="sub">{len(procs_fail)} failed · {len(procs_legacy)} legacy skipped</div>
     </div>
-    <div class="kpi-card">
+    <div class="kpi-card" data-tip="Procedures and functions that failed initial conversion and were successfully repaired by the Cortex AI LLM repair loop. &#39;Still failing&#39; = objects that exceeded the repair budget and require manual intervention.">
       <div class="num purple">{total_repair}</div>
-      <div class="label">LLM Repaired</div>
+      <div class="label">LLM Repaired<span class="tip-icon">ⓘ</span></div>
       <div class="sub">{len(still_failed)} still failing</div>
     </div>
   </div>
