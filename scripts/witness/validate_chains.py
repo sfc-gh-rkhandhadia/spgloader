@@ -560,7 +560,8 @@ def validate_all(
     raw = sc.raw if sc else conn
 
     objects = {o["fqn"]: o for o in inventory["objects"]}
-    deployed = set(deploy_report.get("succeeded", []))
+    # Normalise to lowercase so mixed-case FQNs (e.g. MonEve_to_end) match
+    deployed = {s.lower() for s in deploy_report.get("succeeded", [])}
     results: dict[str, dict] = {}
 
     if not is_mysql:
@@ -607,7 +608,7 @@ def validate_all(
 
         result: dict[str, Any] = {"type": obj_type}
 
-        if fqn not in deployed:
+        if fqn.lower() not in deployed:
             result.update({"status": SKIPPED, "note": "Object not deployed"})
         elif is_unsupported(obj.get("ddl", "")):
             result.update({"status": UNSUPPORTED, "note": "CLR / EXTERNAL / OPENROWSET — cannot validate in isolated environment"})
