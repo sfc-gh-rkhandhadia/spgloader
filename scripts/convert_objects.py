@@ -112,8 +112,20 @@ def convert_view(ddl: str) -> tuple[str, list[str]]:
 
 
 def convert_procedure(ddl: str) -> tuple[str, list[str]]:
-    """Convert a T-SQL stored procedure to a PL/pgSQL function."""
+    """Convert a T-SQL / MySQL stored procedure to a PL/pgSQL function."""
     codes = ["SPG-EWI-0004"]
+    # Strip MySQL-specific DEFINER clause (no-op for MSSQL DDL)
+    ddl = re.sub(
+        r'CREATE\s+DEFINER\s*=\s*`[^`]*`@`[^`]*`\s+',
+        'CREATE ', ddl, flags=re.IGNORECASE,
+    )
+    # Strip MySQL backtick quoting from procedure/function names
+    ddl = re.sub(r'`(\w+)`', r'\1', ddl)
+    # Strip MySQL integer display widths: INT(11) -> INT, TINYINT(1) -> TINYINT
+    ddl = re.sub(
+        r'\b(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)\s*\(\d+\)',
+        r'\1', ddl, flags=re.IGNORECASE,
+    )
     ddl = strip_brackets(ddl)
     ddl, tc = apply_type_mappings(ddl)
     codes.extend(tc)
@@ -168,16 +180,41 @@ def convert_procedure(ddl: str) -> tuple[str, list[str]]:
         param = param.strip()
         if not param:
             continue
-        is_output = bool(re.search(r"\bOUTPUT\b", param, re.IGNORECASE))
+        # MySQL parameters already carry IN/OUT/INOUT; detect and strip before re-adding
+        mysql_mode_m = re.match(r'^(IN|OUT|INOUT)\s+', param, re.IGNORECASE)
+        if mysql_mode_m:
+            mysql_mode_str = mysql_mode_m.group(1).upper()
+            mode = "INOUT" if mysql_mode_str == "INOUT" else ("OUT" if mysql_mode_str == "OUT" else "IN")
+            param = param[mysql_mode_m.end():].strip()
+        else:
+            is_output = bool(re.search(r"\bOUTPUT\b", param, re.IGNORECASE))
+            mode = "INOUT" if is_output else "IN"
         param = re.sub(r"\s+OUTPUT\b", "", param, flags=re.IGNORECASE)
         param = re.sub(r"\s+=\s*.+$", "", param)
         param = re.sub(r"\bAS\b\s+", "", param, flags=re.IGNORECASE)
         param = re.sub(r"@(\w+)", r"\1", param)
-        mode = "INOUT" if is_output else "IN"
         params.append(f"    {mode} {param.strip()}")
 
     body = re.sub(r"\bSET\s+NOCOUNT\s+ON\s*;?", "", body, flags=re.IGNORECASE)
     body = re.sub(r"\bSET\s+XACT_ABORT\s+ON\s*;?", "", body, flags=re.IGNORECASE)
+    # Strip MySQL session variables (no PG equivalent)
+    body = re.sub(r"\bUNIQUE_CHECKS\s*:?=\s*\d+\s*;?", "-- UNIQUE_CHECKS (MySQL only)", body, flags=re.IGNORECASE)
+    body = re.sub(r"\bFOREIGN_KEY_CHECKS\s*:?=\s*\d+\s*;?", "-- FOREIGN_KEY_CHECKS (MySQL only)", body, flags=re.IGNORECASE)
+    body = re.sub(r"\bSQL_MODE\s*:?=\s*[^;]+;?", "-- SQL_MODE (MySQL only)", body, flags=re.IGNORECASE)
+    # Convert MySQL EXIT HANDLER to PL/pgSQL EXCEPTION WHEN OTHERS
+    body = re.sub(
+        r"DECLARE\s+EXIT\s+HANDLER\s+FOR\s+SQLEXCEPTION\s*(?:BEGIN)?\s*(.*?)\s*(?:END\s*;?)?",
+        r"-- EXIT HANDLER converted:\n        EXCEPTION WHEN OTHERS THEN\n        \1",
+        body, flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Remove MySQL CONTINUE HANDLER FOR NOT FOUND (PL/pgSQL cursor handles this automatically)
+    body = re.sub(
+        r"DECLARE\s+CONTINUE\s+HANDLER\s+FOR\s+NOT\s+FOUND\s+[^;]+;?",
+        "-- CONTINUE HANDLER FOR NOT FOUND (removed; PL/pgSQL cursor exits automatically)",
+        body, flags=re.IGNORECASE,
+    )
+    # Convert MySQL proc_label:begin to just begin
+    body = re.sub(r"^\s*\w+\s*:\s*begin\b", "BEGIN", body, flags=re.IGNORECASE | re.MULTILINE)
     body = re.sub(r"\bBEGIN\s+TRANSACTION\s*;?", "-- BEGIN TRANSACTION", body, flags=re.IGNORECASE)
     body = re.sub(r"\bCOMMIT\s+TRANSACTION\s*;?", "-- COMMIT", body, flags=re.IGNORECASE)
     body = re.sub(r"\bROLLBACK\s+TRANSACTION\s*;?", "-- ROLLBACK", body, flags=re.IGNORECASE)
@@ -241,8 +278,27 @@ $$;"""
 
 
 def convert_function(ddl: str) -> tuple[str, list[str]]:
-    """Convert a T-SQL scalar or table-valued function to PL/pgSQL."""
+    """Convert a T-SQL / MySQL scalar or table-valued function to PL/pgSQL."""
     codes = ["SPG-EWI-0004"]
+    # Strip MySQL-specific DEFINER clause (no-op for MSSQL DDL)
+    ddl = re.sub(
+        r'CREATE\s+DEFINER\s*=\s*`[^`]*`@`[^`]*`\s+',
+        'CREATE ', ddl, flags=re.IGNORECASE,
+    )
+    # Strip MySQL backtick quoting
+    ddl = re.sub(r'`(\w+)`', r'\1', ddl)
+    # Strip MySQL CHARSET/COLLATE from RETURNS clause
+    ddl = re.sub(
+        r'\bCHARSET\s+\w+(?:\s+COLLATE\s+\w+)?',
+        '', ddl, flags=re.IGNORECASE,
+    )
+    # Strip MySQL integer/bool display widths: INT(6)->INT, SMALLINT(1)->SMALLINT, BOOLEAN(1)->BOOLEAN
+    ddl = re.sub(
+        r'\b(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT|BOOLEAN)\s*\(\d+\)',
+        r'\1', ddl, flags=re.IGNORECASE,
+    )
+    # Strip MySQL := assignment operator from RETURNS lines (use = in pg header)
+    ddl = re.sub(r':=\s*last_insert_id\([^)]*\)', 'last_insert_id()', ddl)
     ddl = strip_brackets(ddl)
     ddl = downcase_identifiers(ddl)
     ddl, tc = apply_type_mappings(ddl)
@@ -352,8 +408,21 @@ $$;"""
 
 
 def convert_trigger(ddl: str) -> tuple[str, list[str]]:
-    """Convert a T-SQL trigger to a PL/pgSQL trigger function + CREATE TRIGGER."""
+    """Convert a T-SQL / MySQL trigger to a PL/pgSQL trigger function + CREATE TRIGGER."""
     codes = ["SPG-EWI-0005"]
+    # Strip MySQL DEFINER clause and backtick quoting
+    ddl = re.sub(
+        r'CREATE\s+DEFINER\s*=\s*`[^`]*`@`[^`]*`\s+',
+        'CREATE ', ddl, flags=re.IGNORECASE,
+    )
+    ddl = re.sub(r'`(\w+)`', r'\1', ddl)
+    # MySQL trigger syntax uses: CREATE TRIGGER name event ON table FOR EACH ROW
+    # Normalise to MSSQL-like: CREATE TRIGGER name ON table AFTER event
+    ddl = re.sub(
+        r'CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+(\S+)\s+FOR\s+EACH\s+ROW',
+        r'CREATE TRIGGER \1 ON \4 \2 \3',
+        ddl, flags=re.IGNORECASE,
+    )
     ddl = strip_brackets(ddl)
     ddl = downcase_identifiers(ddl)
     ddl, tc = apply_type_mappings(ddl)

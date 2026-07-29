@@ -94,6 +94,7 @@ _DEFAULT_CONFIG = {
     "max_iterations": 3,
     "temperature": 0.1,
     "max_tokens": 4096,
+    "workers": 4,
     "snowflake_connection": "",
     "warehouse": "COMPUTE_WH",
     "prompt_template": "procedure-repair-prompt.md",
@@ -441,6 +442,8 @@ def repair_procedures(
         config["model"] = model_override
     if max_iterations_override:
         config["max_iterations"] = max_iterations_override
+    # Resolve workers: CLI override > config file > _DEFAULT_CONFIG (4)
+    resolved_workers = workers if workers is not None else config.get("workers", 4)
 
     # Resolve the source directory for converted SQL files
     _wave_dir = Path(wave_dir).expanduser() if wave_dir else (
@@ -567,7 +570,7 @@ def repair_procedures(
         config={**config, "_spg_service": spg_service},
         debug=debug or config.get("debug_llm_output", False),
         source_type=source_type,
-        workers=workers,
+        workers=resolved_workers,
         wave_dir=_wave_dir,
     )
 
@@ -608,8 +611,8 @@ def main() -> None:
                         help="Override Cortex model (e.g. mistral-large2)")
     parser.add_argument("--max-iterations", type=int, default=None,
                         help="Override max LLM iterations per procedure")
-    parser.add_argument("--workers", type=int, default=1,
-                        help="Parallel repair workers (default: 1; use 4-8 to speed up LLM phase)")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Parallel repair workers (default: from llm-repair-config.yaml, fallback 4)")
     parser.add_argument("--debug-llm", action="store_true",
                         help="Save every LLM attempt to llm_review/")
     parser.add_argument("--source-type", default=None,

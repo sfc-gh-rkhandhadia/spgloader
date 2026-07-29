@@ -67,6 +67,50 @@ substitutions:
     replacement: 'text'
     context:     post_downcase
 
+  # ---- MySQL text/blob types (map to PG text / bytea) ----
+  - pattern:     'LONGTEXT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+  - pattern:     'MEDIUMTEXT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+  - pattern:     'TINYTEXT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+  - pattern:     'LONGBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+  - pattern:     'MEDIUMBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+  - pattern:     'TINYBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+  - pattern:     '\bBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+  - pattern:     'longtext\b'
+    replacement: 'text'
+    context:     post_downcase
+  - pattern:     'mediumtext\b'
+    replacement: 'text'
+    context:     post_downcase
+  - pattern:     'tinytext\b'
+    replacement: 'text'
+    context:     post_downcase
+  - pattern:     'longblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+  - pattern:     'mediumblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+  - pattern:     'tinyblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+  - pattern:     '\bblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+
   # ---- Integer types ----
   - pattern:     'TINYINT\b'
     replacement: 'SMALLINT'

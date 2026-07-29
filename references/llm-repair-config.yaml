@@ -1,8 +1,8 @@
 # llm-repair-config.yaml
 # ---------------------------------------------------------------------------
 # Configuration for the LLM procedure repair loop in repair_procedures.py.
-# Edit this file to tune model, iterations, and Snowflake connection without
-# touching the Python code.
+# Edit this file to tune model, iterations, workers, and Snowflake connection
+# without touching the Python code.
 # ---------------------------------------------------------------------------
 
 # Snowflake Cortex model to use for code repair.
@@ -23,6 +23,12 @@ temperature: 0.1
 
 # Maximum tokens the LLM may return per procedure.
 max_tokens: 4096
+
+# Number of parallel repair workers.
+# Each worker opens its own Snowflake + SPG connection and repairs
+# one procedure at a time. Set to CPU count or Cortex concurrency limit.
+# 1 = sequential (slow), 8 = good balance for interactive sessions.
+workers: 8
 
 # Snowflake connection name from ~/.snowflake/connections.toml.
 # Leave empty to use the default connection.
