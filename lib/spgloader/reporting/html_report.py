@@ -1224,3 +1224,13 @@ def generate(workspace_dir: str | Path, output_path: str | Path | None = None) -
     html = render_html(data)
     out.write_text(html, encoding="utf-8")
     return out
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Generate spgloader HTML migration report")
+    ap.add_argument("--work-dir", required=True, help="Workspace directory")
+    ap.add_argument("--output", default=None, help="Output HTML path (default: <work-dir>/migration_report.html)")
+    args = ap.parse_args()
+    out = generate(args.work_dir, args.output)
+    print(f"Report written: {out}")
