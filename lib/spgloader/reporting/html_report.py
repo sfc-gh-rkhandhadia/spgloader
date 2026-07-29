@@ -167,8 +167,22 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     dep_groups     = dep_review.get("groups", {}) if isinstance(dep_review, dict) else {}
 
     # -- validation -------------------------------------------------------
-    val_report     = _load_json(ws / "validation" / "validation_report.json")
-    val_checks     = val_report.get("checks", [])
+    val_report = _load_json(ws / "validation" / "validation_report.json")
+    # MySQL multi-db fallback: merge per-db validation_{db}.json files
+    if not val_report:
+        per_db_val = sorted((ws / "validation").glob("validation_*.json")) \
+                     if (ws / "validation").exists() else []
+        if per_db_val:
+            merged_checks: list = []
+            for _vf in per_db_val:
+                _vd = _load_json(_vf)
+                db_name = _vf.stem.replace("validation_", "")
+                for chk in _vd.get("checks", []):
+                    # Tag each check with the source schema so rows are labelled
+                    merged_checks.append({**chk, "_schema": db_name})
+            val_report = {"checks": merged_checks,
+                          "source": "per-db validation files"}
+    val_checks = val_report.get("checks", [])
 
     # -- witness validation (Phase 6.5) ------------------------------------
     witness_chains = _load_json(ws / "witness" / "validation_chains.json")
@@ -417,11 +431,16 @@ def _build_val_rows(checks: list) -> str:
         tip = _check_tips.get(chk, "")
         tip_attr = f' data-tip="{tip}"' if tip else ""
         label = chk.replace("_", " ").title()
-        rows.append(f"<tr><td{tip_attr} style='{'cursor:help' if tip else ''}'>{label}"
-                    f"{'<span class=\"tip-icon\">\u24d8</span>' if tip else ''}"
-                    f"</td><td>{badge}</td>"
-                    f"<td class='small'>{detail}</td></tr>")
-    return "".join(rows) or "<tr><td colspan='3' class='muted-msg'>No checks run</td></tr>"
+        schema = c.get("_schema", "")
+        schema_cell = f"<td class='mono small'>{schema}</td>" if schema else "<td class='muted'>—</td>"
+        rows.append(
+            f"<tr>{schema_cell}"
+            f"<td{tip_attr} style='{'cursor:help' if tip else ''}'>{label}"
+            f"{'<span class=\"tip-icon\">ⓘ</span>' if tip else ''}"
+            f"</td><td>{badge}</td>"
+            f"<td class='small'>{detail}</td></tr>"
+        )
+    return "".join(rows) or "<tr><td colspan='4' class='muted-msg'>No checks run</td></tr>"
 
 
 def _build_dep_rows(groups: dict) -> str:
@@ -1381,7 +1400,7 @@ def render_html(data: dict) -> str:
     <h2>Schema Validation Checks</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Check</th><th>Result</th><th>Details</th></tr></thead>
+        <thead><tr><th>Schema</th><th>Check</th><th>Result</th><th>Details</th></tr></thead>
         <tbody>{val_rows}</tbody>
       </table>
     </div>
