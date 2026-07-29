@@ -14,6 +14,7 @@ dependencies = [
     "pymssql>=2.3.13",
     "snowflake-connector-python>=4.7.1",
     "faker>=24.0",
+    "python-pptx>=1.0.2",
 ]
 
 [project.optional-dependencies]
