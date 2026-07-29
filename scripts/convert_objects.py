@@ -937,6 +937,13 @@ def main():
     ddl_path = Path(args.ddl_objects) if args.ddl_objects else work_dir / "ddl_objects.json"
     source_type = args.source_type
     objs = json.loads(ddl_path.read_text())
+    # Support both flat list and {"objects": [...]} wrapper
+    if isinstance(objs, dict):
+        objs = objs.get("objects", [])
+    # Normalize type to lowercase so all scripts are consistent
+    for o in objs:
+        if "type" in o:
+            o["type"] = o["type"].lower()
     base = work_dir / "conversion" / "postgres"
 
     # ── Load deprecated review dispositions (Phase 3.6) ──────────────────

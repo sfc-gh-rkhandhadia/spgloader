@@ -209,6 +209,9 @@ def main():
         print(f"ERROR: ddl_objects.json not found: {ddl_path}", file=sys.stderr)
         sys.exit(1)
     ddl_objects = json.loads(ddl_path.read_text())
+    # Support both flat list and {"objects": [...]} wrapper
+    if isinstance(ddl_objects, dict):
+        ddl_objects = ddl_objects.get("objects", [])
 
     output_dir = work_dir / "deprecated"
     output_dir.mkdir(parents=True, exist_ok=True)

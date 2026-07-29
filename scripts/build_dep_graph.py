@@ -18,6 +18,8 @@ def main():
     args = parser.parse_args()
 
     objects = json.loads(Path(args.input).read_text())
+    if isinstance(objects, dict):
+        objects = objects.get("objects", [])
     result = build_dep_graph_result(objects)
     Path(args.output).write_text(json.dumps(result, indent=2))
 

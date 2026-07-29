@@ -40,6 +40,8 @@ def main():
     # Load objects
     if args.ddl_objects:
         objects = json.loads(Path(args.ddl_objects).read_text())
+        if isinstance(objects, dict):
+            objects = objects.get("objects", [])
     elif args.ddl_file:
         objects = parse_ddl_file(args.ddl_file, args.source_type)
     else:
