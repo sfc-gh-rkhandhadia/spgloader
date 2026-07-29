@@ -1204,6 +1204,81 @@ def render_html(data: dict) -> str:
   </div>
 
   <div class="section">
+    <h2>Non-Table Objects Deployment</h2>
+    <p class="small" style="color:var(--muted);margin-bottom:12px">
+      Views, functions, and stored procedures are converted from source SQL to PL/pgSQL by the rule
+      engine, then re-attempted by the LLM repair loop for any failures.
+    </p>
+    <div class="table-wrap">
+      <table style="table-layout:fixed;width:100%">
+        <colgroup>
+          <col style="width:18%"/>
+          <col style="width:13%"/>
+          <col style="width:13%"/>
+          <col style="width:16%"/>
+          <col style="width:16%"/>
+          <col style="width:12%"/>
+          <col style="width:12%"/>
+        </colgroup>
+        <thead><tr>
+          <th style="text-align:left">Object Type</th>
+          <th style="text-align:right">Deployed</th>
+          <th style="text-align:right">Failed</th>
+          <th style="text-align:right">Fixed by Rules</th>
+          <th style="text-align:right">Fixed by LLM</th>
+          <th style="text-align:right">Still Failing</th>
+          <th style="text-align:right">Skipped</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Views</strong></td>
+            <td class="num ok">{total_views}</td>
+            <td class="num {'fail' if views_fail else 'ok'}">{len(views_fail)}</td>
+            <td class="num ok">{len(views_fixed)}</td>
+            <td class="num muted">—</td>
+            <td class="num ok">0</td>
+            <td class="num muted">0</td>
+          </tr>
+          <tr>
+            <td><strong>Functions</strong></td>
+            <td class="num ok">{total_funcs}</td>
+            <td class="num {'fail' if funcs_fail else 'ok'}">{len(funcs_fail)}</td>
+            <td class="num muted">—</td>
+            <td class="num muted">—</td>
+            <td class="num ok">0</td>
+            <td class="num muted">0</td>
+          </tr>
+          <tr>
+            <td><strong>Procedures</strong></td>
+            <td class="num {'ok' if not procs_fail else 'amber'}">{total_procs}</td>
+            <td class="num {'fail' if procs_fail else 'ok'}">{len(procs_fail)}</td>
+            <td class="num ok">{len(rule_fixed)}</td>
+            <td class="num ok">{len(llm_fixed)}</td>
+            <td class="num {'fail' if still_failed else 'ok'}">{len(still_failed)}</td>
+            <td class="num muted">{len(procs_legacy)}</td>
+          </tr>
+          <tr style="font-weight:600;border-top:2px solid var(--border)">
+            <td>Total</td>
+            <td class="num ok">{total_views + total_funcs + total_procs}</td>
+            <td class="num {'fail' if (views_fail or funcs_fail or procs_fail) else 'ok'}">{len(views_fail) + len(funcs_fail) + len(procs_fail)}</td>
+            <td class="num ok">{len(views_fixed) + len(rule_fixed)}</td>
+            <td class="num ok">{len(llm_fixed)}</td>
+            <td class="num {'fail' if still_failed else 'ok'}">{len(still_failed)}</td>
+            <td class="num muted">{len(procs_legacy)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="footnote">
+      Failed = initial conversion error before repair ·
+      Fixed by Rules = rule-based plpgsql-fixes.yaml patterns ·
+      Fixed by LLM = Cortex AI repair loop ·
+      Still Failing = exceeded repair budget, needs manual review ·
+      Skipped = legacy/deprecated objects excluded by user
+    </p>
+  </div>
+
+  <div class="section">
     <h2>Index Failures</h2>
     <p class="small" style="margin-bottom:10px;color:var(--muted)">
       These indexes could not be migrated due to MSSQL-specific features with no
