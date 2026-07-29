@@ -83,6 +83,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     deploy_dir    = ws / "deployment"
     deploy_files  = sorted(deploy_dir.glob("*_deploy.json")) if deploy_dir.exists() else []
     summary_file  = deploy_dir / "deployment_summary.json"
+    if not deploy_files and deploy_dir.exists():
+        # spgloader MySQL/multi-db layout: deployment_<db>.json
+        deploy_files = sorted(deploy_dir.glob("deployment_*.json"))
     if not deploy_files and summary_file.exists():
         deploy_files = [summary_file]
 
@@ -114,15 +117,19 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     total_indexes = sum(s["indexes_ok"]  for s in schemas.values())
 
     # -- views deployment -------------------------------------------------
-    vr           = _load_json(ws / "conversion" / "deploy_report.json")
-    views_ok     = [_clean_name(n) for n in vr.get("succeeded", [])]
-    views_fail   = vr.get("failed", [])
-    views_fixed  = [_clean_name(n) for n in vr.get("auto_fixed", [])]
+    vr         = _load_json(ws / "conversion" / "deploy_report.json")
+    if not vr.get("succeeded") and (ws / "conversion" / "fix_report.json").exists():
+        vr     = _load_json(ws / "conversion" / "fix_report.json")
+    views_ok   = [_clean_name(n) for n in vr.get("succeeded", [])]
+    views_fail = vr.get("failed", [])
+    views_fixed = [_clean_name(n) for n in vr.get("auto_fixed", [])]
 
     # -- functions deployment ---------------------------------------------
-    fr           = _load_json(ws / "conversion" / "functions_deploy_report.json")
-    funcs_ok     = [_clean_name(n) for n in fr.get("succeeded", [])]
-    funcs_fail   = fr.get("failed", [])
+    fr         = _load_json(ws / "conversion" / "functions_deploy_report.json")
+    if not fr.get("succeeded") and (ws / "conversion" / "functions_fix_report.json").exists():
+        fr     = _load_json(ws / "conversion" / "functions_fix_report.json")
+    funcs_ok   = [_clean_name(n) for n in fr.get("succeeded", [])]
+    funcs_fail = fr.get("failed", [])
 
     # -- procedures deployment --------------------------------------------
     pr           = _load_json(ws / "conversion" / "procedures_deploy_report.json")
