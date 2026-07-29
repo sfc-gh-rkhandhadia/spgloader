@@ -397,35 +397,129 @@ ask_user_question:
 
 **If user chooses Yes:**
 
-State: "Loading the behavioral validation skill now."
+Resolve the behavioral validation skill directory:
+```bash
+BEHAV_SKILL_DIR="$HOME/.snowflake/cortex/plugins/spg-migration/mssql_spg_migration_validation_testing/scripts"
+# Fallback if not installed as a plugin:
+[ -d "$BEHAV_SKILL_DIR" ] || BEHAV_SKILL_DIR="$HOME/.snowflake/cortex/skills/mssql_spg_migration_validation_testing/scripts"
+```
 
-Load `mssql_spg_migration_validation_testing/SKILL.md` and execute its full workflow.
+Set env vars for all scripts (all already defined from Step 1):
+```bash
+export MSSQL_HOST="$SOURCE_HOST"
+export MSSQL_PORT="${SOURCE_PORT:-1433}"
+export MSSQL_USER="sa"
+export MSSQL_PASSWORD="$MSSQL_SA_PASSWORD"
+export MSSQL_DATABASE="$SOURCE_DATABASE"
+export SPG_HOST SPG_USER SPG_PASSWORD SPG_DATABASE
+export SHARED_DIR="$SPGLOADER_WORK_DIR/validation_shared"
+export VALIDATION_OUTPUT_DIR="$SPGLOADER_WORK_DIR/validation_exec"
+mkdir -p "$SPGLOADER_WORK_DIR/validation_exec" "$SPGLOADER_WORK_DIR/validation_shared"
+```
 
-Pass the following context:
-- `MSSQL_HOST` = `$SOURCE_HOST`
-- `MSSQL_PORT` = `${SOURCE_PORT:-1433}`
-- `MSSQL_USER` = sa
-- `MSSQL_PASSWORD` = `$MSSQL_SA_PASSWORD`
-- `MSSQL_DATABASE` = `$SOURCE_DATABASE`
-- `SPG_HOST` = `$SPG_HOST`
-- `SPG_USER` = `$SPG_USER`
-- `SPG_PASSWORD` = `$SPG_PASSWORD`
-- `SHARED_DIR` = `$SPGLOADER_WORK_DIR/validation_shared`
+**Sub-step 8.5.1 — Setup audit tables in SPG (once per instance)**
+```bash
+PGPASSWORD="$SPG_PASSWORD" psql -h "$SPG_HOST" -U "$SPG_USER" -d "$SPG_DATABASE" \
+  -f "$BEHAV_SKILL_DIR/setup_validation_tables.sql"
+```
 
-The skill will:
-1. Load seed data into SPG (`load_mssql_to_spg.py`)
-2. Discover and prioritize objects (INVENTORY stage)
-3. Generate test cases from seed data (GENERATE stage)
-4. Execute on both sides (EXECUTE stage)
-5. Normalize type differences (NORMALIZE stage)
-6. Diff and classify mismatches (DIFF stage)
-7. Propose repairs (REPAIR stage — optional)
-8. Generate PowerPoint sign-off (REPORT stage)
+**Sub-step 8.5.2 — Copy seed data from MSSQL into SPG**
 
-The PowerPoint is a **separate artifact** from the spgloader HTML report — it contains
-live execution verdicts, failure breakdowns, and remediation priorities for client delivery.
+This copies the rows that were seeded in Step 6 from MSSQL into the corresponding SPG tables
+so both sides have identical data for execution comparison.
 
-**If user chooses No:**
+```bash
+python3 "$BEHAV_SKILL_DIR/load_mssql_to_spg.py" \
+  --mssql-host "$MSSQL_HOST" --mssql-port "$MSSQL_PORT" \
+  --mssql-user "$MSSQL_USER" --mssql-password "$MSSQL_PASSWORD" \
+  --mssql-db "$MSSQL_DATABASE" \
+  --spg-host "$SPG_HOST" --spg-user "$SPG_USER" --spg-password "$SPG_PASSWORD" \
+  --spg-db "$SPG_DATABASE"
+```
+
+Show: `Seed data loaded: N tables, M rows`
+
+**Sub-step 8.5.3 — Execute all procedures/functions on MSSQL (capture outputs + sample params)**
+
+Discovers every proc/function in the source DB, samples real parameter values from the
+seed data, calls each one, and saves outputs + sampled params to a shared file for SPG reuse.
+
+```bash
+python3 "$BEHAV_SKILL_DIR/mssql_proc_executor.py"
+```
+
+Output is written to `$VALIDATION_OUTPUT_DIR/mssql_output.jsonl` and
+`$VALIDATION_OUTPUT_DIR/shared_sampled_params.json`.
+
+**Sub-step 8.5.4 — Execute same procedures/functions on SPG (using identical params)**
+
+Re-executes every proc/function on SPG using the SAME sampled parameter values captured
+in sub-step 8.5.3. This ensures a true apples-to-apples comparison.
+
+```bash
+python3 "$BEHAV_SKILL_DIR/spg_proc_executor.py"
+```
+
+Output is written to `$VALIDATION_OUTPUT_DIR/spg_output.jsonl`.
+
+**Sub-step 8.5.5 — Diff outputs and write audit records**
+
+Compares MSSQL vs SPG result sets row-by-row, classifies mismatches using the verdict
+taxonomy (PASS / FAIL / SPG_ERROR / BOTH_FAILED / FAIL_MISSING_PREREQ / SKIPPED), and
+writes all results to `validation.validation_result` in SPG.
+
+```bash
+python3 "$BEHAV_SKILL_DIR/compare_proc_outputs.py"
+```
+
+**Sub-step 8.5.6 — Execute and compare views on both sides**
+
+```bash
+python3 "$BEHAV_SKILL_DIR/validate_batch.py"
+```
+
+**Show comparison summary:**
+```
+Behavioral Execution Comparison
+================================
+Procedures/Functions:
+  ✅ PASS              N  (exact output match both sides)
+  ❌ FAIL              N  (both ran, outputs differ)
+  ⚠️  SPG_ERROR         N  (MSSQL OK → SPG threw runtime error)
+  ⚠️  SPG_NO_RESULTSET  N  (proc needs FUNCTION conversion)
+  ⏭️  BOTH_FAILED       N  (missing prereq state — not a conversion defect)
+  ⏭️  SKIPPED           N  (write/DML procs — use validate_write_procs.py)
+
+Views:
+  ✅ PASS  N   ❌ FAIL  N   MSSQL_ONLY  N   SPG_ONLY  N
+
+Results stored in: validation.validation_result (run_number=N)
+```
+
+**Sub-step 8.5.7 — Generate PowerPoint sign-off report**
+
+Ask:
+```
+ask_user_question:
+  header: "PowerPoint Report"
+  question: "Generate a Snowflake-branded client-delivery PowerPoint from the live execution results?"
+  options:
+    - label: "Yes — generate .pptx"
+      description: "27-slide deck: KPIs, pass rate visual, failure categories, remediation priorities, failed object appendix."
+    - label: "No — skip"
+```
+
+If yes:
+```bash
+python3 "$BEHAV_SKILL_DIR/generate_migration_report.py" \
+  --client "Migration Report" \
+  --spg-host "$SPG_HOST" --spg-password "$SPG_PASSWORD" \
+  --mssql-host "$MSSQL_HOST" --mssql-port "$MSSQL_PORT" \
+  --mssql-user "$MSSQL_USER" --mssql-password "$MSSQL_PASSWORD" \
+  --mssql-db "$MSSQL_DATABASE"
+```
+
+**If user chooses No (skip deep validation):**
 
 Continue to Step 9 (markdown/parity report + HTML regeneration).
 
