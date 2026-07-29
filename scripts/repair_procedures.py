@@ -495,6 +495,8 @@ def repair_procedures(
     original_tsql: dict[str, str] = {}
     if ddl_path.exists():
         data = json.loads(ddl_path.read_text())
+        if isinstance(data, dict):
+            data = data.get("objects", [])
         for obj in data:
             if obj.get("type") == "procedure":
                 name = obj["name"].strip('["').rstrip(']"]').lower()
