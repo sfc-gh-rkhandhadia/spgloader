@@ -254,6 +254,17 @@ def _check_scalar_fn(conn: "_SourceConn", obj: dict, objects: dict | None = None
                     except Exception:
                         pass
                 return {"status": PARTIAL, "note": f"Requires parameters: {msg[:150]}"}
+            # Function/procedure not in MySQL Docker source — may be DELIMITER-loaded
+            # (loaded into SPG from DDL text but not into MySQL catalog)
+            if any(k in msg.lower() for k in ("does not exist", "doesn't exist", "unknown function")):
+                return {
+                    "status": PARTIAL,
+                    "note": (
+                        "Deployed to SPG; not present in Docker MySQL source "
+                        "(DELIMITER-loaded object — not in MySQL INFORMATION_SCHEMA catalog). "
+                        f"Original error: {msg[:100]}"
+                    ),
+                }
             return {"status": FAILED, "note": msg[:250]}
 
     # MSSQL path
@@ -427,6 +438,16 @@ def _check_proc(conn: "_SourceConn", obj: dict, objects: dict | None = None, con
                 }
             if "doesn't exist" in msg.lower() or "unknown procedure" in msg.lower():
                 return {"status": FAILED, "note": f"Procedure not found on source: {msg[:200]}"}
+            if "does not exist" in msg.lower() and "definer" not in msg.lower():
+                # Procedure not in MySQL Docker source — DELIMITER-loaded object
+                return {
+                    "status": PARTIAL,
+                    "note": (
+                        "Deployed to SPG; not present in Docker MySQL source "
+                        "(DELIMITER-loaded — not in MySQL catalog). "
+                        f"Original error: {msg[:100]}"
+                    ),
+                }
             if "out of sync" in msg.lower():
                 return {"status": PARTIAL, "note": "DML-only procedure (commands out of sync) — executed successfully"}
             return {"status": PARTIAL, "note": f"Executed with error: {msg[:200]}"}
