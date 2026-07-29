@@ -161,12 +161,23 @@ def _convert_row(row: tuple) -> tuple:
     return tuple(_pg_value(v) for v in row)
 
 
+def _convert_row_mysql(row: tuple, col_names: list[str], bool_cols: set[str]) -> tuple:
+    """Like _convert_row but converts MySQL TINYINT(1) 0/1 to Python bool for boolean columns."""
+    result = []
+    for val, col in zip(row, col_names):
+        if col in bool_cols and isinstance(val, int):
+            result.append(bool(val))
+        else:
+            result.append(_pg_value(val))
+    return tuple(result)
+
+
 # ---------------------------------------------------------------------------
 # Per-table copy
 # ---------------------------------------------------------------------------
 
 def _copy_table(
-    source_conn,
+    env: dict,
     spg_service: str,
     schema: str,
     table: str,
@@ -176,7 +187,7 @@ def _copy_table(
 ) -> dict:
     """Copy one table from source to SPG.
 
-    Opens its own SPG connection (thread-safe: one connection per worker).
+    Opens its own source AND SPG connections (thread-safe: one connection per worker).
     Returns a result dict: {table, rows_copied, error, elapsed_s}
     """
     import psycopg2
@@ -189,27 +200,52 @@ def _copy_table(
 
     t0 = time.time()
     pg_conn = None
+    source_conn = None
 
     try:
+        source_conn, _ = _connect_source(env)
         pg_conn = psycopg2.connect(f"service={spg_service}")
         pg_conn.autocommit = False
+        # Disable FK checks for this session (seed data may arrive out of FK order)
+        with pg_conn.cursor() as pg_cur:
+            pg_cur.execute("SET session_replication_role = 'replica'")
 
-        # Truncate target if requested
+        # Truncate target if requested (CASCADE to handle FK constraints)
         if truncate_first:
             with pg_conn.cursor() as pg_cur:
-                pg_cur.execute(f"TRUNCATE TABLE {pg_fqn}")
+                pg_cur.execute(f"TRUNCATE TABLE {pg_fqn} CASCADE")
             pg_conn.commit()
 
-        # Fetch column names from source
-        src_cur = source_conn.cursor()
+        # Query SPG for identity columns and boolean columns to handle type conversion
+        with pg_conn.cursor() as meta_cur:
+            meta_cur.execute("""
+                SELECT column_name,
+                       data_type,
+                       column_default,
+                       is_identity
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """, (pg_schema, pg_table))
+            spg_meta = {row[0]: {"data_type": row[1], "default": row[2], "is_identity": row[3]} for row in meta_cur.fetchall()}
+        identity_cols = {c for c, m in spg_meta.items() if m["is_identity"] == "YES"}
+        bool_cols = {c for c, m in spg_meta.items() if m["data_type"] == "boolean"}
+
+        # Fetch column names from source (use buffered cursor for MySQL to avoid "Unread result" errors)
         if source_type == "mssql":
+            src_cur = source_conn.cursor()
             src_cur.execute(f"SELECT TOP 0 * FROM {src_fqn}")
+            col_names = [d[0].lower() for d in src_cur.description]
+            src_cur.close()
         else:
+            src_cur = source_conn.cursor(buffered=True)
             src_cur.execute(f"SELECT * FROM {src_fqn} LIMIT 0")
-        col_names = [d[0].lower() for d in src_cur.description]
+            col_names = [d[0].lower() for d in src_cur.description]
+            src_cur.close()
         cols_sql = ", ".join(f'"{c}"' for c in col_names)
         placeholders = ", ".join(["%s"] * len(col_names))
-        insert_sql = f"INSERT INTO {pg_fqn} ({cols_sql}) VALUES ({placeholders})"
+        overriding = " OVERRIDING SYSTEM VALUE" if identity_cols and identity_cols.intersection(col_names) else ""
+        insert_sql = f"INSERT INTO {pg_fqn} ({cols_sql}){overriding} VALUES ({placeholders})"
 
         # Stream data in batches
         src_cur = source_conn.cursor()
@@ -220,12 +256,14 @@ def _copy_table(
             batch = src_cur.fetchmany(batch_size)
             if not batch:
                 break
-            converted = [_convert_row(row) for row in batch]
+            converted = [_convert_row_mysql(row, col_names, bool_cols) if source_type != "mssql" else _convert_row(row) for row in batch]
             with pg_conn.cursor() as pg_cur:
                 pg_cur.executemany(insert_sql, converted)
             pg_conn.commit()
             total_rows += len(batch)
 
+        src_cur.close()
+        source_conn.close()
         elapsed = time.time() - t0
         print(f"  OK  {src_fqn:<45} {total_rows:>8,} rows  {elapsed:.1f}s")
         return {
@@ -248,6 +286,9 @@ def _copy_table(
             "elapsed_s": round(elapsed, 2),
         }
     finally:
+        if source_conn:
+            try: source_conn.close()
+            except Exception: pass
         if pg_conn:
             pg_conn.close()
 
@@ -269,7 +310,7 @@ def copy_source_data(
     Returns {results: [...], summary: {total, copied, failed, total_rows}}
     """
     env = _load_source_env(work_dir)
-    source_conn, source_type = _connect_source(env)
+    _, source_type = _connect_source(env)  # validate credentials; workers open their own conns
 
     # Determine which tables to copy
     if tables:
@@ -288,10 +329,12 @@ def copy_source_data(
                 "Run extract_ddl.py first."
             )
         objs = json.loads(ddl_path.read_text())
+        if isinstance(objs, dict):
+            objs = objs.get("objects", [])
         table_list = [
             (o.get("schema", "dbo"), o["name"])
             for o in objs
-            if o.get("type") == "table"
+            if o.get("type") in ("table", "TABLE")
         ]
 
     if not table_list:
@@ -312,7 +355,7 @@ def copy_source_data(
     def _worker(args):
         schema, table = args
         return _copy_table(
-            source_conn, spg_service, schema, table,
+            env, spg_service, schema, table,
             batch_size, truncate_first, source_type
         )
 
@@ -326,8 +369,6 @@ def copy_source_data(
             futures = {pool.submit(_worker, args): args for args in table_list}
             for future in as_completed(futures):
                 results.append(future.result())
-
-    source_conn.close()
 
     copied = sum(1 for r in results if r["error"] is None)
     failed = len(results) - copied
