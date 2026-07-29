@@ -1,0 +1,265 @@
+# alternate_flow_rules.yaml — Prereq restore rules for migration validation.
+#
+# Each rule maps a prereq_key to an ordered list of restore steps.
+# Column names listed as CANDIDATES — the first one that exists in the actual
+# schema is used. Runtime introspection means no hardcoded column names.
+#
+# To add a new prereq type: add a block here. Zero Python changes required.
+#
+# Step types:
+#   promote_status_row  — ensure at least one "active" row exists in a status table
+#   ensure_log_row      — ensure an open log entry exists for the active status row
+#   ensure_staging_row  — ensure at least one row exists in a staging/control table
+
+rules:
+
+  # ── Active job state ────────────────────────────────────────────────────────
+  # Required by: all stg.p_MicrosLoad_* export procedures and
+  #              stg.f_MicrosLoad_GetJobStatusId / f_MicrosLoad_GetCurrentJobLogId
+  # Failure mode: scalar function returns NULL → MSSQL error 245
+  active_job_state:
+    description: >
+      Ensure stg.MicrosLoadStatus has an active row (JobActiveFlag=1)
+      and that stg.MicrosLoadLog has an open entry for it.
+    steps:
+      - type: promote_status_row
+        mssql:
+          table: ["stg", "MicrosLoadStatus"]
+          active_flag_col: ["JobActiveFlag", "IsActive", "ActiveFlag", "IsActiveFlag"]
+          pk_col:          ["MicrosLoadStatusId", "StatusId", "Id"]
+          new_row_defaults:          # used only when no rows exist at all
+            CreatedBy: "prereq_guard"
+        spg:
+          table: ["stg", "microsloadstatus"]
+          active_flag_col: ["jobactiveflag", "isactive", "activeflag", "isactiveflag"]
+          pk_col:          ["microsloadstatusid", "statusid", "id"]
+          new_row_defaults:
+            createdby: "prereq_guard"
+
+      - type: ensure_log_row
+        mssql:
+          table: ["stg", "MicrosLoadLog"]
+          fk_to_status:   ["MicrosLoadStatusId", "StatusId", "JobStatusId"]
+          open_start_col: ["LogDate", "StartDate", "CreatedDate", "BeginDate"]
+          open_end_col:   ["EndDate", "ClosedDate", "CompletedDate", "LogEndDate"]
+          fixed_values:
+            LogEntry:  "guard-reopen"
+            CreatedBy: "prereq_guard"
+        spg:
+          table: ["stg", "microsloadlog"]
+          fk_to_status:   ["microsloadstatusid", "statusid", "jobstatusid"]
+          open_start_col: ["logdate", "startdate", "createddate", "begindate"]
+          open_end_col:   ["enddate", "closeddate", "completeddate", "logenddate"]
+          fixed_values:
+            logentry:  "guard-reopen"
+            createdby: "prereq_guard"
+
+  # ── Staging / control table prereqs ─────────────────────────────────────────
+  definition_staging:
+    description: "Ensure at least one row in MicrosLoad_DefinitionStaging"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "MicrosLoad_DefinitionStaging"]
+        spg:
+          table: ["stg", "microsload_definitionstaging"]
+
+  menuitem_definition_stg:
+    description: "Ensure at least one row in MenuItemDefinition_stg"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "MenuItemDefinition_stg"]
+        spg:
+          table: ["stg", "menuitemdefinition_stg"]
+
+  price_staging:
+    description: "Ensure at least one row in MicrosLoad_PriceStaging"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "MicrosLoad_PriceStaging"]
+        spg:
+          table: ["stg", "microsload_pricestaging"]
+
+  menuitem_price_stg:
+    description: "Ensure at least one row in MenuItemPrice_stg"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "MenuItemPrice_stg"]
+        spg:
+          table: ["stg", "menuitemprice_stg"]
+
+  printers_stg:
+    description: "Ensure at least one row in Printers_stg"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "Printers_stg"]
+          fixed_values:
+            Name:        "WitnessPrinter"
+            CreatedDate: null    # resolved to GETDATE() by type inference
+        spg:
+          table: ["stg", "printers_stg"]
+          fixed_values:
+            name:        "WitnessPrinter"
+            createddate: null
+
+  print_templates_stg:
+    description: "Ensure at least one row in PrintTemplates_stg"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "PrintTemplates_stg"]
+          fixed_values:
+            Name:         "WitnessTemplate"
+            TemplateType: "1"
+            PrintType:    "1"
+            IsHidden:     "0"
+            IsDeleted:    "0"
+        spg:
+          table: ["stg", "printtemplates_stg"]
+          fixed_values:
+            name:         "WitnessTemplate"
+            templatetype: "1"
+            printtype:    "1"
+            ishidden:     "false"
+            isdeleted:    "false"
+
+  prima_recipies_stg:
+    description: "Ensure at least one row in PrimaRecipies_stg"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "PrimaRecipies_stg"]
+          fixed_values:
+            PrimaLocationId: "1"
+            ServiceAreaId:   "1"
+            RecipeId:        "WITNESS-001"
+            MasterSystemId:  "1"
+        spg:
+          table: ["stg", "primarecipies_stg"]
+          fixed_values:
+            primalocationid: "1"
+            serviceareaid:   "1"
+            recipeid:        "WITNESS-001"
+            mastersystemid:  "1"
+
+  electronic_tag_stg:
+    description: "Ensure at least one row in ElectronicTag_stg"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "ElectronicTag_stg"]
+          fixed_values:
+            AssignPrCode: "WIT001"
+            PrCode:       "WITPR001"
+            TagMac:       "AA:BB:CC:DD:EE:FF"
+        spg:
+          table: ["stg", "electronictag_stg"]
+          fixed_values:
+            assignprcode: "WIT001"
+            prcode:       "WITPR001"
+            tagmac:       "AA:BB:CC:DD:EE:FF"
+
+  zebra_printers_stg:
+    description: "Ensure at least one row in ZebraPrinters_stg"
+    steps:
+      - type: ensure_staging_row
+        mssql:
+          table: ["stg", "ZebraPrinters_stg"]
+          fixed_values:
+            PrinterId: "WIT-ZEBRA-001"
+        spg:
+          table: ["stg", "zebraprinters_stg"]
+          fixed_values:
+            printerid: "WIT-ZEBRA-001"
+
+
+# ── Reclassification Rules ───────────────────────────────────────────────────
+#
+# When compare_proc_outputs.py sees BOTH_FAILED, it evaluates these rules
+# against the combined MSSQL + SPG error text.
+#
+# If any rule matches, the verdict is reclassified from BOTH_FAILED to
+# FAIL_MISSING_PREREQ and excluded from the converter-quality pass rate.
+#
+# Rules are evaluated in order. First match wins.
+# To add a new pattern: add an entry here. Zero Python changes required.
+#
+# Fields:
+#   match_any    — list of substrings (case-insensitive); verdict reclassified
+#                  if ANY of these appear in the combined MSSQL+SPG error text
+#   match_all    — list of substrings; ALL must appear (AND logic)
+#   prereq_key   — the alternate_flow_rules key that resolves this state
+#   reason       — human-readable explanation written to the issues field
+#
+reclassification_rules:
+
+  - name: active_job_state_null_column
+    match_any:
+      - "error 515"
+      - "cannot insert the value null into column"
+      - "null value in column"
+      - "jobactiveflag"
+      - "logentry"
+      - "microsloadstatusid"
+    prereq_key: active_job_state
+    reason: >
+      Both sides failed due to a missing active job state row.
+      stg.MicrosLoadStatus must have a row with JobActiveFlag=1 and
+      stg.MicrosLoadLog must have an open entry for it.
+      This is a prerequisite-state issue, not a conversion defect.
+
+  - name: cast_error_signal_pattern
+    match_any:
+      - "conversion failed when converting the varchar value"
+      - "unable to determine microsload"
+    prereq_key: active_job_state
+    reason: >
+      Function uses CAST(error_text AS INT) as an error-signaling pattern.
+      Only succeeds in production when called with a valid active job state.
+      Both sides fail identically — not a conversion defect.
+
+  - name: sequential_dependency
+    match_all:
+      - "majorgroupid"
+    match_any:
+      - "poststeps"
+      - "hierarchyexport_poststeps"
+      - "cannot insert the value null"
+      - "null value in column"
+    prereq_key: active_job_state
+    reason: >
+      This procedure is step 2 of a two-step sequence.
+      stg.p_MicrosLoad_HierarchyExport must run first to populate
+      api.Hierarchy.MajorGroupId. Both sides fail for the same reason —
+      not a conversion defect.
+
+  - name: electronic_tag_state
+    match_any:
+      - "electronic tag - export"
+      - "electronic tag export failed"
+    prereq_key: electronic_tag_stg
+    reason: >
+      Both sides raised the same business error — ElectronicTag_stg
+      has no qualifying rows. Prerequisite staging data is missing.
+      Not a conversion defect.
+
+  - name: procedure_family_batch_both_fail
+    procedure_families:
+      - batch
+      - wrapper
+    match_any:
+      - "error 515"
+      - "cannot insert the value null"
+      - "null value in column"
+      - "has no records"
+      - "no active"
+      - "no open"
+    prereq_key: active_job_state
+    reason: >
+      Batch/wrapper procedure failed on both sides due to missing
+      prerequisite business state. Both sides failed identically —
+      treat as FAIL_MISSING_PREREQ, not a conversion defect.
