@@ -172,9 +172,23 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
 
     # -- witness validation (Phase 6.5) ------------------------------------
     witness_chains = _load_json(ws / "witness" / "validation_chains.json")
+    # MySQL multi-db fallback: merge per-db chains_report_{db}.json files
+    if not witness_chains:
+        per_db_files = sorted((ws / "witness").glob("chains_report_*.json")) \
+                       if (ws / "witness").exists() else []
+        if per_db_files:
+            merged_results: dict = {}
+            merged_summary: dict = {}
+            for _f in per_db_files:
+                _d = _load_json(_f)
+                merged_results.update(_d.get("validation_results", {}))
+                for _k, _v in _d.get("summary", {}).items():
+                    merged_summary[_k] = merged_summary.get(_k, 0) + int(_v or 0)
+            witness_chains = {"validation_results": merged_results,
+                              "summary": merged_summary}
     witness_results = witness_chains.get("validation_results", {})
     witness_summary = witness_chains.get("summary", {})
-    witness_ran     = bool(witness_results)
+    witness_ran     = bool(witness_results or witness_summary)
 
     # -- parity testing (Phase 6.6) ----------------------------------------
     parity_report_md = ""
@@ -183,9 +197,61 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         parity_report_md = parity_file.read_text(encoding="utf-8")[:8000]
     parity_ran = parity_file.exists()
 
-    # Structured parity results (written by full_validation.py)
+    # Structured parity results (written by full_validation.py / mysql_structural_parity.py)
     parity_results = _load_json(ws / "parity" / "parity_results.json")
     parity_structured = bool(parity_results)
+
+    # MySQL fallback: read parity_structural.json and convert to renderable format
+    if not parity_results:
+        structural = _load_json(ws / "parity" / "parity_structural.json")
+        if structural:
+            grand_pass = grand_fail = grand_missing = 0
+            schema_rows: dict = {}
+            for db, d in structural.items():
+                tbl    = d.get("tables",   {})
+                rout   = d.get("routines", {})
+                views  = d.get("views",    {})
+                pass_  = (tbl.get("match_count", 0)
+                          + rout.get("matched", 0)
+                          + views.get("spg_count", 0))
+                miss   = (len(tbl.get("only_source", []))
+                          + len(rout.get("only_source", []))
+                          + len(views.get("only_source", [])))
+                col_mm = len(tbl.get("col_mismatches", []))
+                # col_mismatches where src=0 are Docker CREATE-TABLE-AS-SELECT
+                # artifacts, not real migration failures — exclude from fail count
+                real_col_mm = [m for m in tbl.get("col_mismatches", [])
+                               if isinstance(m, dict) and m.get("src", -1) != 0]
+                grand_pass   += pass_
+                grand_fail   += miss + len(real_col_mm)
+                grand_missing += miss
+                schema_rows[db] = {
+                    "pass":    pass_,
+                    "fail":    miss + len(real_col_mm),
+                    "missing": miss,
+                    "spg_only": len(tbl.get("only_spg", [])),
+                    "tables_src":      tbl.get("source_count", 0),
+                    "tables_spg":      tbl.get("spg_count", 0),
+                    "tables_match":    tbl.get("match_count", 0),
+                    "routines_src":    rout.get("source_count", 0),
+                    "routines_spg":    rout.get("spg_count", 0),
+                    "routines_match":  rout.get("matched", 0),
+                    "routines_missing":rout.get("only_source", []),
+                    "col_mismatches":  real_col_mm,
+                    "views_src":       views.get("source_count", 0),
+                    "views_spg":       views.get("spg_count", 0),
+                    "excluded_objects": [],
+                    "objects": [],
+                }
+            parity_results = {
+                "source": "parity_structural.json",
+                "grand":  {"pass": grand_pass, "fail": grand_fail,
+                           "missing": grand_missing, "spg_only": 0},
+                "schemas": schema_rows,
+                "_is_structural": True,   # flag for renderer
+            }
+            parity_structured = True
+            parity_ran = True
 
     # Equivalence filter (user's legacy group include/skip choices)
     equiv_filter = _load_json(ws / "parity" / "equivalence_filter.json")
@@ -491,7 +557,80 @@ def _build_equivalence_tab(data: dict) -> str:
     </div>
   </div>"""
 
-    # Per-schema sections with object tables
+    # ── Structural (MySQL) parity — per-db table/routine/view breakdown ──
+    if parity_results.get("_is_structural"):
+        db_rows = ""
+        for db, s in sorted(schemas.items()):
+            t_src  = s.get("tables_src", 0)
+            t_spg  = s.get("tables_spg", 0)
+            t_match= s.get("tables_match", 0)
+            r_src  = s.get("routines_src", 0)
+            r_spg  = s.get("routines_spg", 0)
+            r_match= s.get("routines_match", 0)
+            r_miss = s.get("routines_missing", [])
+            v_src  = s.get("views_src", 0)
+            v_spg  = s.get("views_spg", 0)
+            col_mm = s.get("col_mismatches", [])
+            tbl_ok = "ok" if t_match == t_src else "fail"
+            rut_ok = "ok" if r_match == r_src else "fail"
+            miss_tip = (f" title='Missing: {chr(10).join(r_miss[:10])}'"
+                        if r_miss else "")
+            db_rows += (
+                f"<tr>"
+                f"<td class='mono'>{db}</td>"
+                f"<td class='num {tbl_ok}'>{t_match:,} / {t_src:,}</td>"
+                f"<td class='num small'>{len(col_mm)}</td>"
+                f"<td class='num {rut_ok}'{miss_tip}>{r_match:,} / {r_src:,}</td>"
+                f"<td class='num'>{v_spg:,} / {v_src:,}</td>"
+                f"</tr>"
+            )
+            # Missing routine detail rows
+            for mr in r_miss[:20]:
+                db_rows += (f"<tr style='background:light-dark(#fef2f2,#450a0a)'>"
+                            f"<td class='mono small' style='padding-left:24px;color:var(--muted)'>{db}</td>"
+                            f"<td colspan='2' class='small' style='color:var(--red)'>⊘ Missing: {mr}</td>"
+                            f"<td colspan='2' class='small muted'>Not deployed to SPG</td></tr>")
+            for cm in col_mm[:5]:
+                t = cm.get("table","?")
+                db_rows += (f"<tr style='background:light-dark(#fffbeb,#44270a)'>"
+                            f"<td class='mono small' style='padding-left:24px;color:var(--muted)'>{db}</td>"
+                            f"<td colspan='2' class='small' style='color:var(--amber)'>⚠ {t}: col count src={cm.get('src')} spg={cm.get('spg')}</td>"
+                            f"<td colspan='2' class='small muted'>Column count differs</td></tr>")
+
+        structural_table = f"""
+  <div class="section">
+    <h2>Structural Parity — Per-Schema Breakdown</h2>
+    <p class="small" style="color:var(--muted);margin-bottom:14px">
+      Compares table, routine (function/procedure), and view counts between the source database
+      and SPG across all migrated schemas. Column mismatches where source=0 are
+      <em>CREATE TABLE AS SELECT</em> artifacts in the Docker source — not migration errors.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Schema</th>
+          <th style="text-align:right" title="Tables present in both source and SPG">Tables matched</th>
+          <th style="text-align:right" title="Column count mismatches (sample). src=0 = CREATE TABLE AS SELECT artifact.">Col. Δ</th>
+          <th style="text-align:right" title="Functions + procedures matched">Routines matched</th>
+          <th style="text-align:right" title="Views present in SPG vs source">Views</th>
+        </tr></thead>
+        <tbody>{db_rows}</tbody>
+      </table>
+    </div>
+  </div>"""
+        return f"""
+  {exclusion_banner}
+  <div class="section">
+    <h2>Equivalence Test Summary (Phase 6.6)</h2>
+    <p class="small" style="color:var(--muted);margin-bottom:14px">
+      Structural parity: object existence and column counts compared between
+      source and SPG target across all migrated schemas.
+    </p>
+    <div class="summary-row">{cards}</div>
+  </div>
+  {structural_table}"""
+
+    # ── Per-schema sections with object tables (MSSQL deep-execution path) ──
     schema_sections = ""
     for schema_name, s in sorted(schemas.items()):
         results  = s.get("results", [])

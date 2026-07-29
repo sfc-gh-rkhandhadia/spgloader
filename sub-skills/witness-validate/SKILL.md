@@ -22,6 +22,10 @@ From `spgloader/SKILL.md` after Phase 6 (schema validation) completes.
 
 ## Step 1 — Ask user
 
+> **This phase is part of the standard migration workflow and MUST always be presented to the user.**
+> Never skip silently — the Witness and Equivalence Test tabs in the migration report will show
+> "Not Run" if this phase is omitted. Always ask; let the user decide.
+
 Load connection info first:
 
 ```bash
@@ -42,32 +46,42 @@ SPG_PASSWORD=$(awk "/\[$SPG_HOST\]/{found=1} found && /password/{print \$NF; exi
               grep "$SPG_HOST:*:$SPG_DATABASE:$SPG_USER:" ~/.pgpass | cut -d: -f5)
 ```
 
-Then ask:
+Then ask (**always ask — never auto-skip**):
 
 ```
 ask_user_question:
   header: "Witness Validation"
-  question: "Phase 6 schema validation is complete. Do you want to run witness
-             validation (confirm views/procs return rows) and parity testing?"
+  question: "Phase 6 schema validation is complete. Witness validation
+             (Phase 6.5) and Equivalence Testing (Phase 6.6) are the
+             next steps. Skipping will leave those tabs empty in the
+             migration report. How would you like to proceed?"
+  defaultAnswer: "Yes — full (seed + validate + parity)"
   options:
-    - label: "Yes — full (seed + validate + parity)"
-      description: "Generate 3-row synthetic dataset, confirm MSSQL views/procs
-                    return rows, then run same queries on SPG and diff results.
+    - label: "Yes — full (seed + validate + parity)"                    [RECOMMENDED]
+      description: "Generate 3-row synthetic dataset, confirm source
+                    views/procs return rows, then run same queries on SPG
+                    and diff results. Witness + Equivalence tabs will be
+                    fully populated in the report.
                     [Only available when source is Docker or SPCS]"
       # Only show this option if SOURCE_ENV == "docker" or SOURCE_ENV == "spcs"
 
     - label: "Yes — validate + parity only (no seeding)"
       description: "Validate views/procs against existing data in source DB,
-                    then parity-test on SPG. Safe for customer's own instance."
+                    then parity-test on SPG. Safe for customer's own instance.
+                    Witness + Equivalence tabs will be populated."
 
-    - label: "No — skip"
-      description: "Skip to final report"
+    - label: "No — skip (not recommended)"
+      description: "Skip Phases 6.5 and 6.6. The Witness and Equivalence Test
+                    tabs will show 'Not Run' in the migration report.
+                    Only choose this if you intend to run them separately."
 ```
 
-**If SOURCE_ENV is `existing` or `none`:** only show "validate + parity only" and "skip".
-**If SOURCE_ENV is `docker` or `spcs`:** show all three options.
+**If SOURCE_ENV is `existing` or `none`:** show "validate + parity only" as the [RECOMMENDED] default and "skip" as the last option.
+**If SOURCE_ENV is `docker` or `spcs`:** show all three options with "full" as [RECOMMENDED].
 
-If user chooses "No — skip": jump to Step 8 (update report, done).
+**NEVER auto-skip.** If the user does not answer, default to "Yes — full" (or "validate + parity only" for existing instances).
+
+If user explicitly chooses "No — skip": jump to Step 8 (update report, done).
 
 Store choice as:
 - `DO_SEED` = true | false
@@ -285,6 +299,31 @@ Source-Side Witness Validation
 
 For any ❌ FAILED objects, show the error message inline.
 
+**Multi-database MySQL note:** For MySQL migrations with multiple source databases, run
+`validate_chains.py` once per database, writing to `chains_report_{db}.json`, then merge
+all results into the canonical `validation_chains.json` the report expects:
+
+```bash
+uv run --project <SKILL_DIR> python - << 'PYEOF'
+import json, os, pathlib
+
+ws = pathlib.Path(os.environ["SPGLOADER_WORK_DIR"])
+merged = {"validation_results": {}, "summary": {}}
+for f in sorted((ws / "witness").glob("chains_report_*.json")):
+    d = json.loads(f.read_text())
+    merged["validation_results"].update(d.get("validation_results", {}))
+    for k, v in d.get("summary", {}).items():
+        merged["summary"][k] = merged["summary"].get(k, 0) + int(v or 0)
+out = ws / "witness" / "validation_chains.json"
+out.write_text(json.dumps(merged, indent=2))
+n = len(list((ws / "witness").glob("chains_report_*.json")))
+print(f"Merged {n} db chain reports → {out}")
+PYEOF
+```
+
+For single-database migrations, `validate_chains.py` writes directly to
+`validation_chains.json` — no merge needed.
+
 ---
 
 ## Step 7.5 — Legacy group filter for equivalence test
@@ -341,8 +380,11 @@ EQUIV_FILTER="$SPGLOADER_WORK_DIR/parity/equivalence_filter.json"
 
 ## Step 8 — Parity testing (SPG-side)
 
-Runs the same queries that succeeded on MSSQL side against SPG and diffs the results.
+Runs the same queries that succeeded on source side against SPG and diffs the results.
 
+**Route by SOURCE_TYPE:**
+
+**MSSQL / T-SQL:**
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/full_validation.py \
   --inventory    "$SPGLOADER_WORK_DIR/witness/object_inventory.json" \
@@ -358,6 +400,22 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/full_validation.p
   --output-dir   "$SPGLOADER_WORK_DIR/parity/" \
   --exclude-fqns-file "$SPGLOADER_WORK_DIR/parity/equivalence_filter.json"
 ```
+
+**MySQL / MariaDB:**
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/mysql_structural_parity.py \
+  --source-type  "${SOURCE_TYPE:-mysql}" \
+  --source-host  "$SOURCE_HOST" \
+  --source-port  "${SOURCE_PORT:-3306}" \
+  --source-user  "${SOURCE_USER:-root}" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --databases    "$SOURCE_DATABASE" \
+  --spg-service  "$TARGET_SPG_SERVICE" \
+  --output       "$SPGLOADER_WORK_DIR/parity/parity_results.json"
+```
+
+For **multi-database MySQL** (multiple schemas in one instance), pass all database names
+comma-separated: `--databases "evdas,ms,ms_literature,sapphire,spotfire_reporting,udr"`.
 
 Show summary:
 ```
