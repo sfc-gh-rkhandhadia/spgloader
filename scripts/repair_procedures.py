@@ -99,6 +99,7 @@ _DEFAULT_CONFIG = {
     "snowflake_connection": "",
     "warehouse": "COMPUTE_WH",
     "prompt_template": "procedure-repair-prompt.md",
+    "mysql_prompt_template": "procedure-repair-mysql-prompt.md",
     "oracle_prompt_template": "procedure-repair-oracle-prompt.md",
     "debug_llm_output": False,
 }
@@ -152,6 +153,20 @@ def _extract_plpgsql_from_response(response: str) -> str | None:
     if bare_m:
         return bare_m.group(1).strip()
     return None
+
+
+def _inject_search_path(sql: str, file_name: str) -> str:
+    """Prepend SET search_path when the filename encodes a target schema.
+
+    evdas__proc_name.sql  →  SET search_path TO "evdas", public;\n<sql>
+    proc_name.sql         →  <sql> unchanged
+    """
+    stem = Path(file_name).stem
+    if "__" in stem:
+        prefix = stem.split("__")[0].strip()
+        if prefix:
+            return f'SET search_path TO "{prefix}", public;\n{sql}'
+    return sql
 
 
 def _try_deploy(conn, sql: str, name: str) -> str | None:
@@ -357,7 +372,7 @@ def _phase2_llm(
                     (review_dir / f"{file_name}.iter{iteration}.sql").write_text(
                         repaired_sql, encoding="utf-8")
 
-                deploy_err = _try_deploy(_spg, repaired_sql, proc_name)
+                deploy_err = _try_deploy(_spg, _inject_search_path(repaired_sql, file_name), proc_name)
                 if deploy_err is None:
                     proc_file.write_text(repaired_sql, encoding="utf-8")
                     print(f"FIXED on iteration {iteration}")
@@ -509,6 +524,7 @@ def repair_procedures(
             still_failed_after_rules.append(item)
             continue
         sql = f.read_text(encoding="utf-8", errors="replace")
+        sql = _inject_search_path(sql, item["file"])
         err = _try_deploy(spg_conn, sql, item["procedure"])
         if err is None:
             fixed_rules.append(item["procedure"])
@@ -539,8 +555,10 @@ def repair_procedures(
     # Select prompt template based on source type
     if source_type == "oracle":
         tpl_name = config.get("oracle_prompt_template", "procedure-repair-oracle-prompt.md")
+    elif source_type in ("mysql", "mariadb"):
+        tpl_name = config.get("mysql_prompt_template", "procedure-repair-mysql-prompt.md")
     else:
-        tpl_name = config["prompt_template"]
+        tpl_name = config.get("prompt_template", "procedure-repair-prompt.md")
     prompt_template = _load_prompt_template(skill_dir, tpl_name)
     print(f"  Prompt template : {tpl_name}")
 

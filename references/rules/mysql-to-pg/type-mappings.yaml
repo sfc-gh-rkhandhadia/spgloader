@@ -1,0 +1,202 @@
+# type-mappings.yaml  (mysql-to-pg)
+# ---------------------------------------------------------------------------
+# MySQL / MariaDB → PostgreSQL data type substitution rules.
+#
+# Applied by convert_objects.py and deploy_tables_spg.py.
+# Execution order: pre_downcase rules run first (before bracket-stripping and
+# lowercasing), post_downcase rules run after.
+#
+# Fields:
+#   pattern      : Python regex (single-quoted).
+#   replacement  : Replacement string. Supports backreferences (\1, \2).
+#   ewi_code     : EWI annotation code (default: SPG-EWI-0001).
+#   context      : 'pre_downcase' (default) | 'post_downcase' | 'both'.
+#   note         : Optional explanation.
+# ---------------------------------------------------------------------------
+
+substitutions:
+
+  # ── MySQL text types ──────────────────────────────────────────────────────
+
+  - pattern:     'LONGTEXT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    note:        'MySQL LONGTEXT (up to 4 GB) → PostgreSQL TEXT (unlimited)'
+
+  - pattern:     'MEDIUMTEXT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    note:        'MySQL MEDIUMTEXT (up to 16 MB) → TEXT'
+
+  - pattern:     'TINYTEXT\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    note:        'MySQL TINYTEXT (up to 255 bytes) → TEXT'
+
+  - pattern:     'longtext\b'
+    replacement: 'text'
+    context:     post_downcase
+
+  - pattern:     'mediumtext\b'
+    replacement: 'text'
+    context:     post_downcase
+
+  - pattern:     'tinytext\b'
+    replacement: 'text'
+    context:     post_downcase
+
+  # ── MySQL blob types ──────────────────────────────────────────────────────
+
+  - pattern:     'LONGBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     'MEDIUMBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     'TINYBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     '\bBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+    note:        'Must appear AFTER LONGBLOB/MEDIUMBLOB/TINYBLOB to avoid partial match'
+
+  - pattern:     'longblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+
+  - pattern:     'mediumblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+
+  - pattern:     'tinyblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+
+  - pattern:     '\bblob\b'
+    replacement: 'bytea'
+    context:     post_downcase
+
+  # ── MySQL integer display widths (strip N from INT(N)) ────────────────────
+  # PostgreSQL does not support display width qualifiers on integer types.
+
+  - pattern:     '\b(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT|BOOLEAN)\s*\(\d+\)'
+    replacement: '\1'
+    context:     pre_downcase
+    note:        'MySQL INT(11) display width has no meaning in PG — strip it'
+
+  - pattern:     '\b(tinyint|smallint|mediumint|int|integer|bigint|boolean)\s*\(\d+\)'
+    replacement: '\1'
+    context:     post_downcase
+
+  # ── MySQL integer type aliases ─────────────────────────────────────────────
+
+  - pattern:     'TINYINT\b'
+    replacement: 'SMALLINT'
+    context:     pre_downcase
+    note:        'No TINYINT in PG; SMALLINT (2-byte) is the closest match'
+
+  - pattern:     'MEDIUMINT\b'
+    replacement: 'INTEGER'
+    context:     pre_downcase
+    note:        'No MEDIUMINT in PG; INTEGER (4-byte) is the closest match'
+
+  - pattern:     'tinyint\b'
+    replacement: 'smallint'
+    context:     post_downcase
+
+  - pattern:     'mediumint\b'
+    replacement: 'integer'
+    context:     post_downcase
+
+  # ── MySQL CHARSET / COLLATE in column/RETURNS definitions ─────────────────
+  # PostgreSQL column collation syntax differs; strip MySQL charset/collate clauses.
+
+  - pattern:     '\bCHARSET\s+\w+(?:\s+COLLATE\s+\w+)?'
+    replacement: ''
+    context:     pre_downcase
+    note:        'Strip MySQL CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci'
+
+  - pattern:     '\bCOLLATE\s+\w+'
+    replacement: ''
+    context:     pre_downcase
+    note:        'Strip orphan COLLATE clauses not caught by the combined pattern'
+
+  # ── MySQL date/time types ──────────────────────────────────────────────────
+
+  - pattern:     '\bDATETIME\b'
+    replacement: 'TIMESTAMP'
+    context:     pre_downcase
+
+  - pattern:     '\bdatetime\b'
+    replacement: 'timestamp'
+    context:     post_downcase
+
+  # ── MySQL JSON type ────────────────────────────────────────────────────────
+  # PG has native JSON/JSONB; MySQL JSON maps to JSONB for indexing support.
+
+  - pattern:     '\bJSON\b'
+    replacement: 'JSONB'
+    context:     pre_downcase
+    note:        'MySQL JSON → PostgreSQL JSONB for GIN index support'
+
+  - pattern:     '\bjson\b'
+    replacement: 'jsonb'
+    context:     post_downcase
+
+  # ── MySQL ENUM / SET types ─────────────────────────────────────────────────
+
+  - pattern:     '\bENUM\s*\([^)]+\)'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    ewi_code:    SPG-EWI-0001
+    note:        'ENUM has no direct PG equivalent; use TEXT + CHECK or a lookup table'
+
+  - pattern:     '\bSET\s*\([^)]+\)'
+    replacement: 'TEXT[]'
+    context:     pre_downcase
+    ewi_code:    SPG-EWI-0001
+    note:        'MySQL SET → TEXT[] (array of values); CHECK constraint may be needed'
+
+  # ── MySQL unsigned integers ────────────────────────────────────────────────
+
+  - pattern:     '\bINT\s+UNSIGNED\b'
+    replacement: 'BIGINT'
+    context:     pre_downcase
+    note:        'MySQL INT UNSIGNED (0–4B) → BIGINT to avoid overflow'
+
+  - pattern:     '\bSMALLINT\s+UNSIGNED\b'
+    replacement: 'INTEGER'
+    context:     pre_downcase
+
+  - pattern:     '\bTINYINT\s+UNSIGNED\b'
+    replacement: 'SMALLINT'
+    context:     pre_downcase
+
+  - pattern:     '\b\w+INT\s+UNSIGNED\b'
+    replacement: 'BIGINT'
+    context:     pre_downcase
+    note:        'Catch-all for remaining UNSIGNED integer variants'
+
+  # ── MySQL spatial types ────────────────────────────────────────────────────
+
+  - pattern:     '\bGEOMETRY\b'
+    replacement: 'GEOMETRY'
+    context:     pre_downcase
+    ewi_code:    SPG-WARN-001
+    note:        'MySQL GEOMETRY → PostGIS GEOMETRY (requires postgis extension)'
+
+  - pattern:     '\bPOINT\b'
+    replacement: 'POINT'
+    context:     pre_downcase
+    ewi_code:    SPG-WARN-001
+
+  # ── MySQL YEAR type ────────────────────────────────────────────────────────
+
+  - pattern:     '\bYEAR\b'
+    replacement: 'SMALLINT'
+    context:     pre_downcase
+    note:        'MySQL YEAR(4) → SMALLINT'

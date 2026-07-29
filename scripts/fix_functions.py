@@ -29,7 +29,7 @@ SKILL_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_DIR / "lib"))
 from spgloader.rules import get_loader as _get_rules
 
-_rules = _get_rules(SKILL_DIR)
+_rules = _get_rules(SKILL_DIR, "mssql")  # default MSSQL; override via --source-type
 
 
 # ---------------------------------------------------------------------------
@@ -435,14 +435,23 @@ def main():
     parser.add_argument("--mapping",
                         default=str(SKILL_DIR / "references" / "fix-mappings" / "view-fixes.yaml"),
                         help="Path to project view-fixes.yaml (for schema_prefix)")
-    parser.add_argument("--plpgsql",
-                        default=str(SKILL_DIR / "references" / "rules" / "mssql-to-pg" / "plpgsql-fixes.yaml"),
-                        help="Path to plpgsql-fixes.yaml rule file")
+    parser.add_argument("--source-type", default="mssql",
+                        choices=["mssql", "mysql", "mariadb", "oracle"],
+                        help="Source DB type — selects the correct plpgsql-fixes.yaml (default: mssql)")
+    parser.add_argument("--plpgsql", default=None,
+                        help="Override path to plpgsql-fixes.yaml (default: derived from --source-type)")
     args = parser.parse_args()
+
+    # Derive plpgsql-fixes path from source_type unless explicitly overridden
+    if args.plpgsql:
+        plpgsql_path = Path(args.plpgsql).expanduser()
+    else:
+        src_dir = "mysql-to-pg" if args.source_type in ("mysql", "mariadb") else \
+                  "oracle-to-pg" if args.source_type == "oracle" else "mssql-to-pg"
+        plpgsql_path = SKILL_DIR / "references" / "rules" / src_dir / "plpgsql-fixes.yaml"
 
     work_dir = Path(args.work_dir).expanduser()
     mapping_path = Path(args.mapping).expanduser()
-    plpgsql_path = Path(args.plpgsql).expanduser()
 
     import yaml
     mapping = yaml.safe_load(mapping_path.read_text()) if mapping_path.exists() else {}

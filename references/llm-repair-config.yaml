@@ -22,7 +22,7 @@ max_iterations: 2
 temperature: 0.1
 
 # Maximum tokens the LLM may return per procedure.
-max_tokens: 4096
+max_tokens: 16384
 
 # Number of parallel repair workers.
 # Each worker opens its own Snowflake + SPG connection and repairs
@@ -46,6 +46,10 @@ warehouse: "COMPUTE_WH"
 # Prompt template file relative to the skill's references/prompts/ directory.
 # Used for MSSQL / MySQL sources.
 prompt_template: "procedure-repair-prompt.md"
+
+# MySQL / MariaDB source-specific repair prompt.
+# Covers DECLARE hoisting, EXIT HANDLER placement, loop labels, and MySQL→PG patterns.
+mysql_prompt_template: "procedure-repair-mysql-prompt.md"
 
 # Prompt template used when --source-type oracle is specified.
 oracle_prompt_template: "procedure-repair-oracle-prompt.md"

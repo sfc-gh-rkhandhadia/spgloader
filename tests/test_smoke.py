@@ -30,12 +30,12 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 # ---------------------------------------------------------------------------
 
 class TestRuleLoader:
-    """All 7 rule YAML files load without error."""
+    """All 7 rule YAML files load without error (MSSQL default)."""
 
     @pytest.fixture(autouse=True)
     def loader(self):
         from spgloader.rules import RuleLoader
-        self.loader = RuleLoader(SKILL_ROOT)
+        self.loader = RuleLoader(SKILL_ROOT)  # default source_type="mssql"
 
     def test_type_mappings_loads(self):
         rules = self.loader.type_mappings()
@@ -73,6 +73,59 @@ class TestRuleLoader:
     def test_plpgsql_fixes_loads(self):
         fixes = self.loader.load("plpgsql-fixes")
         assert isinstance(fixes, (dict, list))
+
+
+class TestRuleLoaderMultiSource:
+    """Per-source-type rule isolation: MySQL rules don't bleed into MSSQL."""
+
+    def test_mysql_type_mappings_load(self):
+        from spgloader.rules import get_loader
+        mysql = get_loader(SKILL_ROOT, "mysql")
+        rules = mysql.type_mappings()
+        assert isinstance(rules, list)
+        assert len(rules) > 0
+        # MySQL-specific types must be present
+        patterns = [r["pattern"] for r in rules]
+        assert any("LONGTEXT" in p for p in patterns), "MySQL LONGTEXT mapping missing"
+
+    def test_mssql_isolation_no_mysql_types(self):
+        from spgloader.rules import get_loader
+        mssql = get_loader(SKILL_ROOT, "mssql")
+        patterns = [r["pattern"] for r in mssql.type_mappings()]
+        assert not any("LONGTEXT" in p for p in patterns), \
+            "MySQL LONGTEXT must NOT appear in MSSQL type-mappings"
+
+    def test_shared_ewi_accessible_from_mysql(self):
+        from spgloader.rules import get_loader
+        mysql = get_loader(SKILL_ROOT, "mysql")
+        codes = mysql.ewi_codes()
+        assert isinstance(codes, dict)
+        assert len(codes) > 0, "EWI codes not accessible from MySQL loader"
+
+    def test_mariadb_maps_to_mysql_rules(self):
+        from spgloader.rules import get_loader
+        mariadb = get_loader(SKILL_ROOT, "mariadb")
+        mysql = get_loader(SKILL_ROOT, "mysql")
+        # MariaDB should load same type rules as MySQL
+        assert mariadb.type_mappings() == mysql.type_mappings()
+
+    def test_mysql_function_substitutions(self):
+        from spgloader.rules import get_loader
+        mysql = get_loader(SKILL_ROOT, "mysql")
+        rules = mysql.function_substitutions()
+        assert isinstance(rules, list)
+        assert len(rules) > 0
+        patterns = [r["pattern"] for r in rules]
+        assert any("IFNULL" in p for p in patterns), "MySQL IFNULL→COALESCE missing"
+
+    def test_oracle_stub_loads(self):
+        from spgloader.rules import get_loader
+        oracle = get_loader(SKILL_ROOT, "oracle")
+        rules = oracle.type_mappings()
+        assert isinstance(rules, list)
+        assert len(rules) > 0
+        patterns = [r["pattern"] for r in rules]
+        assert any("NUMBER" in p for p in patterns), "Oracle NUMBER type mapping missing"
 
 
 # ---------------------------------------------------------------------------

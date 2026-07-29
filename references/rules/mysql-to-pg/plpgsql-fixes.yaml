@@ -1,0 +1,191 @@
+# plpgsql-fixes.yaml  (mysql-to-pg)
+# ---------------------------------------------------------------------------
+# MySQL / MariaDB → PostgreSQL PL/pgSQL body transformation rules.
+#
+# Applied by scripts/fix_functions.py to converted function/procedure files.
+# Rules with enabled: false are handled structurally in Python code
+# (convert_objects.py or fix_functions.py) and documented here for reference.
+#
+# The most important MySQL→PL/pgSQL structural differences:
+#
+#   1. DECLARE inside BEGIN — MySQL allows DECLARE anywhere inside BEGIN;
+#      PL/pgSQL requires DECLARE before BEGIN. Python code hoists them.
+#
+#   2. EXIT HANDLER → EXCEPTION WHEN OTHERS THEN must appear at the END
+#      of a BEGIN block, not inline mid-body. Python code restructures.
+#
+#   3. Cursor labels (loop_label: LOOP...END LOOP) — PL/pgSQL does not
+#      support named loop labels; remove the label prefix.
+#
+#   4. Triggers — MySQL trigger syntax needs full rewrite to PL/pgSQL
+#      trigger function + CREATE TRIGGER statement. Python handles.
+#
+# Fields (same schema as mssql-to-pg/plpgsql-fixes.yaml):
+#   name         : Short identifier used in fix reports.
+#   description  : Human-readable explanation.
+#   pattern      : Python regex (single-quoted).
+#   replacement  : Replacement string. Backreferences: \1, \2, etc.
+#   flags        : List of re flags (default: [IGNORECASE]).
+#   enabled      : false = handled in Python code, documented here only.
+#   note         : Optional extra context.
+# ---------------------------------------------------------------------------
+
+body_transforms:
+
+  # ── MySQL DECLARE DEFAULT → PL/pgSQL := ───────────────────────────────────
+
+  - name:        declare_default_assign
+    description: "DECLARE x TYPE DEFAULT val → x type := val  (post-hoist normalisation)"
+    pattern:     '\bDECLARE\s+(\w+)\s+(\S+(?:\s+\S+)?)\s+DEFAULT\s+(.+?)\s*;'
+    replacement: '\1 \2 := \3;'
+    flags:       [IGNORECASE]
+
+  - name:        declare_no_default
+    description: "DECLARE x TYPE; → x type;  (remove DECLARE keyword from body)"
+    # Applied after hoist — cleans up any remaining bare DECLARE in body
+    pattern:     '\bDECLARE\s+(\w+)\s+([\w()\[\]]+)\s*;'
+    replacement: '\1 \2;'
+    flags:       [IGNORECASE]
+
+  # ── MySQL loop label syntax ────────────────────────────────────────────────
+  # MySQL: label: LOOP ... END LOOP label;
+  # PL/pgSQL: LOOP ... END LOOP;  (labels not supported)
+
+  - name:        strip_loop_label_start
+    description: "Remove MySQL loop labels: label: LOOP → LOOP"
+    pattern:     '^\s*\w+\s*:\s*(LOOP|WHILE|REPEAT)\b'
+    replacement: '\1'
+    flags:       [IGNORECASE, MULTILINE]
+
+  - name:        strip_loop_label_end
+    description: "Remove MySQL END LOOP label; → END LOOP;"
+    pattern:     '\bEND\s+(LOOP|WHILE|REPEAT)\s+\w+\s*;'
+    replacement: 'END \1;'
+    flags:       [IGNORECASE]
+
+  # ── MySQL LEAVE label → EXIT ───────────────────────────────────────────────
+
+  - name:        leave_to_exit
+    description: "MySQL LEAVE label → EXIT (PL/pgSQL loop exit)"
+    pattern:     '\bLEAVE\s+\w+\s*;'
+    replacement: 'EXIT;'
+    flags:       [IGNORECASE]
+
+  # ── MySQL ITERATE label → CONTINUE ────────────────────────────────────────
+
+  - name:        iterate_to_continue
+    description: "MySQL ITERATE label → CONTINUE"
+    pattern:     '\bITERATE\s+\w+\s*;'
+    replacement: 'CONTINUE;'
+    flags:       [IGNORECASE]
+
+  # ── MySQL session variables (no PG equivalent) ────────────────────────────
+
+  - name:        strip_unique_checks
+    description: "UNIQUE_CHECKS := N → comment (MySQL session var, no PG equivalent)"
+    pattern:     '\bUNIQUE_CHECKS\s*:?=\s*\d+\s*;?'
+    replacement: '-- UNIQUE_CHECKS (MySQL only)'
+    flags:       [IGNORECASE]
+
+  - name:        strip_foreign_key_checks
+    description: "FOREIGN_KEY_CHECKS := N → comment"
+    pattern:     '\bFOREIGN_KEY_CHECKS\s*:?=\s*\d+\s*;?'
+    replacement: '-- FOREIGN_KEY_CHECKS (MySQL only)'
+    flags:       [IGNORECASE]
+
+  - name:        strip_sql_mode
+    description: "SQL_MODE := ... → comment"
+    pattern:     '\bSQL_MODE\s*:?=\s*[^;]+;?'
+    replacement: '-- SQL_MODE (MySQL only)'
+    flags:       [IGNORECASE]
+
+  - name:        strip_autocommit
+    description: "AUTOCOMMIT := ... → comment"
+    pattern:     '\bAUTOCOMMIT\s*:?=\s*\d+\s*;?'
+    replacement: '-- AUTOCOMMIT (MySQL only)'
+    flags:       [IGNORECASE]
+
+  # ── MySQL LAST_INSERT_ID() update → PG lastval() ──────────────────────────
+
+  - name:        last_insert_id_update
+    description: "UPDATE t SET col :=LAST_INSERT_ID(col+N) → last_insert_id() removal"
+    pattern:     ':=\s*last_insert_id\s*\([^)]*\)'
+    replacement: ':= lastval()'
+    flags:       [IGNORECASE]
+
+  # ── MySQL double-quoted strings → single-quoted ────────────────────────────
+  # MySQL allows "" for strings; PG uses '' for strings and "" for identifiers.
+
+  - name:        double_quoted_empty_string
+    description: 'DECLARE x TYPE DEFAULT "" → DEFAULT '''''
+    pattern:     '\bDEFAULT\s+""'
+    replacement: "DEFAULT ''"
+    flags:       [IGNORECASE]
+
+  # ── MySQL proc label:begin → just BEGIN ────────────────────────────────────
+
+  - name:        strip_proc_label
+    description: "proc_label: BEGIN → BEGIN  (named procedure block labels)"
+    pattern:     '^(\s*)\w+\s*:\s*begin\b'
+    replacement: '\1BEGIN'
+    flags:       [IGNORECASE, MULTILINE]
+
+  # ── DIAGNOSTICS cleanup ────────────────────────────────────────────────────
+  # MySQL-specific diagnostics fields not available in PG GET DIAGNOSTICS.
+
+  - name:        remove_mysql_errno
+    description: "Remove MYSQL_ERRNO from GET DIAGNOSTICS (not a PG diagnostics field)"
+    pattern:     ',?\s*\w+\s*=\s*MYSQL_ERRNO\b'
+    replacement: ''
+    flags:       [IGNORECASE]
+
+  - name:        fix_get_diagnostics_condition
+    description: "GET DIAGNOSTICS CONDITION 1 var = RETURNED_SQLSTATE → GET STACKED DIAGNOSTICS"
+    # GET CURRENT DIAGNOSTICS in PG does not support RETURNED_SQLSTATE (that's STACKED)
+    pattern:     '\bGET\s+(?:CURRENT\s+)?DIAGNOSTICS\s+CONDITION\s+1\s+(\w+)\s*=\s*RETURNED_SQLSTATE'
+    replacement: 'GET STACKED DIAGNOSTICS \1 = RETURNED_SQLSTATE'
+    flags:       [IGNORECASE]
+
+  - name:        fix_get_diagnostics_message
+    description: "GET DIAGNOSTICS CONDITION 1 var = MESSAGE_TEXT → GET STACKED DIAGNOSTICS"
+    pattern:     '\bGET\s+(?:CURRENT\s+)?DIAGNOSTICS\s+CONDITION\s+1\s+(\w+)\s*=\s*MESSAGE_TEXT'
+    replacement: 'GET STACKED DIAGNOSTICS \1 = MESSAGE_TEXT'
+    flags:       [IGNORECASE]
+
+  # ── Variable assignment normalisation ─────────────────────────────────────
+
+  - name:        set_variable_assign
+    description: "SET var = expr → var := expr (residual MySQL SET assignments)"
+    pattern:     '\bSET\s+(\w+)\s*='
+    replacement: '\1 :='
+    flags:       [IGNORECASE]
+
+  - name:        select_assign_single_from
+    description: "SELECT var = expr FROM table → SELECT expr INTO var FROM table"
+    pattern:     '\bSELECT\s+(\w+)\s*=\s*([^,\n]+?)\s+FROM\b'
+    replacement: 'SELECT \2 INTO \1 FROM'
+    flags:       [IGNORECASE]
+
+  # ── Structural transforms (Python-handled, documented here) ───────────────
+
+  - name:        declare_hoist
+    description: >
+      Hoist DECLARE statements from inside BEGIN to the DECLARE section before BEGIN.
+      MySQL allows DECLARE anywhere in BEGIN; PL/pgSQL requires DECLARE before BEGIN.
+      Python structural transform in convert_objects.py — regex alone cannot handle
+      nested block depth correctly.
+    enabled:     false
+
+  - name:        exception_block_placement
+    description: >
+      MySQL EXIT HANDLER maps to PL/pgSQL EXCEPTION WHEN OTHERS THEN, but the
+      EXCEPTION clause must appear at the very end of a BEGIN block, not inline.
+      Python structural transform moves it to the correct position.
+    enabled:     false
+
+  - name:        trigger_function_split
+    description: >
+      MySQL CREATE TRIGGER with body → PL/pgSQL trigger function + CREATE TRIGGER.
+      Already handled in convert_objects.py convert_trigger() for most patterns;
+      fallback cases with bare EVENT ON table (no BEFORE/AFTER) need manual review.
+    enabled:     false

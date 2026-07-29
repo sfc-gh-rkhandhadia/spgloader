@@ -25,7 +25,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_DIR / "lib"))
 from spgloader.rules import get_loader as _get_rules
-_rules = _get_rules(SKILL_DIR)
+_rules = _get_rules(SKILL_DIR, "mssql")  # default MSSQL; override via --source-type
 
 # ---------------------------------------------------------------------------
 # Helpers

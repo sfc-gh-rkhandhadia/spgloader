@@ -1,0 +1,185 @@
+# function-substitutions.yaml  (mysql-to-pg)
+# ---------------------------------------------------------------------------
+# MySQL / MariaDB → PostgreSQL built-in function substitution rules.
+#
+# Applied by convert_objects.py apply_type_mappings() and function_substitutions().
+# Context 'both' means apply in both pre- and post-downcase passes.
+#
+# Fields:
+#   pattern      : Python regex.
+#   replacement  : Replacement string. Backreferences: \1, \2.
+#   ewi_code     : EWI annotation code (default: SPG-EWI-0002).
+#   flags        : List of re flags (default: [IGNORECASE]).
+#   context      : 'pre_downcase' | 'post_downcase' | 'both' (default: both).
+#   note         : Optional explanation.
+# ---------------------------------------------------------------------------
+
+substitutions:
+
+  # ── NULL-handling functions ───────────────────────────────────────────────
+
+  - pattern:     '\bIFNULL\s*\('
+    replacement: 'COALESCE('
+    note:        'MySQL IFNULL(a,b) ≡ COALESCE(a,b)'
+
+  - pattern:     '\bNULLIF\s*\('
+    replacement: 'NULLIF('
+    ewi_code:    ~
+
+  - pattern:     '\bIF\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)'
+    replacement: 'CASE WHEN \1 THEN \2 ELSE \3 END'
+    note:        'MySQL IF(cond, true_val, false_val) → CASE WHEN'
+    flags:       [IGNORECASE, DOTALL]
+
+  # ── String functions ──────────────────────────────────────────────────────
+
+  - pattern:     '\bGROUP_CONCAT\s*\(([^)]+)\)'
+    replacement: 'string_agg(\1, ",")'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL GROUP_CONCAT → PostgreSQL string_agg; ORDER BY inside may need adjustment'
+
+  - pattern:     '\bCONCAT_WS\s*\('
+    replacement: 'concat_ws('
+    ewi_code:    ~
+    note:        'concat_ws is available natively in PG with same semantics'
+
+  - pattern:     '\bFIND_IN_SET\s*\(([^,]+),\s*([^)]+)\)'
+    replacement: 'POSITION(\1 IN \2) > 0'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL FIND_IN_SET(val, csv) → approximate; works for simple CSV strings'
+
+  - pattern:     '\bSUBSTRING_INDEX\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)'
+    replacement: 'split_part(\1, \2, \3)'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL SUBSTRING_INDEX → split_part (negative count not directly supported)'
+
+  - pattern:     '\bINSTR\s*\(([^,]+),\s*([^)]+)\)'
+    replacement: 'POSITION(\2 IN \1)'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL INSTR(str, substr) → POSITION(substr IN str)'
+
+  - pattern:     '\bLPAD\s*\('
+    replacement: 'LPAD('
+    ewi_code:    ~
+    note:        'LPAD is identical in MySQL and PG'
+
+  - pattern:     '\bRPAD\s*\('
+    replacement: 'RPAD('
+    ewi_code:    ~
+
+  - pattern:     '\bMID\s*\('
+    replacement: 'SUBSTRING('
+    note:        'MySQL MID(str,pos,len) → SUBSTRING(str,pos,len)'
+
+  # ── Date/time functions ───────────────────────────────────────────────────
+
+  - pattern:     '\bNOW\s*\(\s*\)'
+    replacement: 'NOW()'
+    ewi_code:    ~
+    note:        'NOW() is identical in MySQL and PG'
+
+  - pattern:     '\bCURDATE\s*\(\s*\)'
+    replacement: 'CURRENT_DATE'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bCURTIME\s*\(\s*\)'
+    replacement: 'CURRENT_TIME'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bSYSDATE\s*\(\s*\)'
+    replacement: 'NOW()'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bUNIX_TIMESTAMP\s*\(\s*\)'
+    replacement: 'EXTRACT(EPOCH FROM NOW())::BIGINT'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bFROM_UNIXTIME\s*\(([^)]+)\)'
+    replacement: "TO_TIMESTAMP(\\1)"
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bDATE_FORMAT\s*\(([^,]+),\s*([^)]+)\)'
+    replacement: 'TO_CHAR(\1, \2)'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL DATE_FORMAT format strings differ from PG TO_CHAR — verify format codes'
+
+  - pattern:     '\bSTR_TO_DATE\s*\(([^,]+),\s*([^)]+)\)'
+    replacement: 'TO_DATE(\1, \2)'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bDATE_ADD\s*\(([^,]+),\s*INTERVAL\s+([^)]+)\)'
+    replacement: '\1 + INTERVAL \2'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bDATE_SUB\s*\(([^,]+),\s*INTERVAL\s+([^)]+)\)'
+    replacement: '\1 - INTERVAL \2'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bDATEDIFF\s*\(([^,]+),\s*([^)]+)\)'
+    replacement: 'EXTRACT(DAY FROM \1 - \2)::INTEGER'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL DATEDIFF returns integer days; PG equivalent via EXTRACT'
+
+  - pattern:     '\bYEAR\s*\(([^)]+)\)'
+    replacement: 'EXTRACT(YEAR FROM \1)'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bMONTH\s*\(([^)]+)\)'
+    replacement: 'EXTRACT(MONTH FROM \1)'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bDAY\s*\(([^)]+)\)'
+    replacement: 'EXTRACT(DAY FROM \1)'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bHOUR\s*\(([^)]+)\)'
+    replacement: 'EXTRACT(HOUR FROM \1)'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bMINUTE\s*\(([^)]+)\)'
+    replacement: 'EXTRACT(MINUTE FROM \1)'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bSECOND\s*\(([^)]+)\)'
+    replacement: 'EXTRACT(SECOND FROM \1)'
+    ewi_code:    SPG-EWI-0002
+
+  # ── Aggregate functions ────────────────────────────────────────────────────
+
+  - pattern:     '\bBIT_AND\s*\('
+    replacement: 'BIT_AND('
+    ewi_code:    ~
+    note:        'BIT_AND is available natively in PG'
+
+  - pattern:     '\bBIT_OR\s*\('
+    replacement: 'BIT_OR('
+    ewi_code:    ~
+
+  # ── UUID / random functions ────────────────────────────────────────────────
+
+  - pattern:     '\bUUID\s*\(\s*\)'
+    replacement: 'gen_random_uuid()'
+    ewi_code:    SPG-EWI-0002
+
+  - pattern:     '\bRAND\s*\(\s*\)'
+    replacement: 'RANDOM()'
+    ewi_code:    SPG-EWI-0002
+
+  # ── Control-flow functions ─────────────────────────────────────────────────
+
+  - pattern:     '\bIFNULL\s*\('
+    replacement: 'COALESCE('
+    ewi_code:    ~
+    note:        'Duplicate catch for mixed-case variants'
+
+  - pattern:     '\bLAST_INSERT_ID\s*\(\s*\)'
+    replacement: 'lastval()'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL LAST_INSERT_ID() → PG lastval() (last auto-increment value in session)'
+
+  # ── Bitwise XOR ───────────────────────────────────────────────────────────
+
+  - pattern:     '\bXOR\b'
+    replacement: '#'
+    ewi_code:    SPG-EWI-0002
+    note:        'MySQL bitwise XOR keyword → PG # operator'

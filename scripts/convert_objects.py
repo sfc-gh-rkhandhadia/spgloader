@@ -22,22 +22,36 @@ sys.path.insert(0, str(SKILL_DIR / "lib"))
 from spgloader.conversion.ewi import annotate_sql
 from spgloader.rules import get_loader
 
-_rules = get_loader(SKILL_DIR)
+# Per-source-type rule loader cache — resolved lazily in _get_rules()
+_rule_cache: dict = {}
+
+
+def _get_rules(source_type: str = "mssql"):
+    """Return a source-type-specific RuleLoader, cached by source_type."""
+    st = source_type.lower()
+    if st not in _rule_cache:
+        _rule_cache[st] = get_loader(SKILL_DIR, st)
+    return _rule_cache[st]
+
+
+# Default MSSQL loader for backward compatibility (module-level usage in helpers)
+_rules = get_loader(SKILL_DIR, "mssql")
 
 
 # ===========================================================================
 # MSSQL / T-SQL conversion helpers  (unchanged from previous version)
 # ===========================================================================
 
-def apply_type_mappings(ddl: str) -> tuple[str, list[str]]:
-    """Apply MSSQL type mappings and function substitutions from YAML rule files.
+def apply_type_mappings(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
+    """Apply source-type-specific type mappings and function substitutions.
 
     Returns (converted_ddl, [ewiCodes]).
     """
+    rules = _get_rules(source_type)
     codes_emit: list[str] = []
 
     any_type = False
-    for rule in _rules.type_mappings("pre_downcase"):
+    for rule in rules.type_mappings("pre_downcase"):
         new_ddl, n = re.subn(rule["pattern"], rule["replacement"], ddl, flags=re.IGNORECASE)
         if n > 0:
             ddl = new_ddl
@@ -46,8 +60,8 @@ def apply_type_mappings(ddl: str) -> tuple[str, list[str]]:
         codes_emit.append("SPG-EWI-0001")
 
     any_func = False
-    for rule in _rules.function_substitutions():
-        flags = _rules._build_flags(rule.get("flags", ["IGNORECASE"]))
+    for rule in rules.function_substitutions():
+        flags = rules._build_flags(rule.get("flags", ["IGNORECASE"]))
         replacement = rule.get("replacement") or ""
         new_ddl, n = re.subn(rule["pattern"], replacement, ddl, flags=flags)
         if n > 0:
@@ -97,21 +111,21 @@ def fix_view_alias_syntax(ddl: str) -> str:
     return ddl
 
 
-def convert_view(ddl: str) -> tuple[str, list[str]]:
-    """Convert a T-SQL view to PostgreSQL CREATE OR REPLACE VIEW."""
+def convert_view(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
+    """Convert a T-SQL / MySQL view to PostgreSQL CREATE OR REPLACE VIEW."""
     codes = []
     ddl = re.sub(r"WITH\s+SCHEMABINDING\s*", "", ddl, flags=re.IGNORECASE)
     ddl = re.sub(r"CREATE\s+VIEW", "CREATE OR REPLACE VIEW", ddl, flags=re.IGNORECASE)
     ddl = strip_brackets(ddl)
     ddl = downcase_identifiers(ddl)
-    ddl, tc = apply_type_mappings(ddl)
+    ddl, tc = apply_type_mappings(ddl, source_type)
     codes.extend(tc)
     ddl = fix_view_alias_syntax(ddl)
     ddl = ddl.strip().rstrip(";").rstrip()
     return ddl + ";", codes
 
 
-def convert_procedure(ddl: str) -> tuple[str, list[str]]:
+def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
     """Convert a T-SQL / MySQL stored procedure to a PL/pgSQL function."""
     codes = ["SPG-EWI-0004"]
     # Strip MySQL-specific DEFINER clause (no-op for MSSQL DDL)
@@ -127,7 +141,7 @@ def convert_procedure(ddl: str) -> tuple[str, list[str]]:
         r'\1', ddl, flags=re.IGNORECASE,
     )
     ddl = strip_brackets(ddl)
-    ddl, tc = apply_type_mappings(ddl)
+    ddl, tc = apply_type_mappings(ddl, source_type)
     codes.extend(tc)
     ddl = downcase_identifiers(ddl)
 
@@ -277,7 +291,7 @@ $$;"""
     return result, codes
 
 
-def convert_function(ddl: str) -> tuple[str, list[str]]:
+def convert_function(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
     """Convert a T-SQL / MySQL scalar or table-valued function to PL/pgSQL."""
     codes = ["SPG-EWI-0004"]
     # Strip MySQL-specific DEFINER clause (no-op for MSSQL DDL)
@@ -301,7 +315,7 @@ def convert_function(ddl: str) -> tuple[str, list[str]]:
     ddl = re.sub(r':=\s*last_insert_id\([^)]*\)', 'last_insert_id()', ddl)
     ddl = strip_brackets(ddl)
     ddl = downcase_identifiers(ddl)
-    ddl, tc = apply_type_mappings(ddl)
+    ddl, tc = apply_type_mappings(ddl, source_type)
     codes.extend(tc)
 
     m = re.search(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([^\s(]+)", ddl, re.IGNORECASE)
@@ -378,7 +392,7 @@ $$;"""
     def _extract_declare(m):
         var_name = m.group(1).lower()
         var_type = m.group(2).strip()
-        for rule in _rules.type_mappings("declare"):
+        for rule in _get_rules(source_type).type_mappings("declare"):
             var_type = re.sub(rule["pattern"], rule["replacement"], var_type, flags=re.IGNORECASE)
         declare_lines.append(f"    {var_name} {var_type};")
         return ""
@@ -407,7 +421,7 @@ $$;"""
     return result, codes
 
 
-def convert_trigger(ddl: str) -> tuple[str, list[str]]:
+def convert_trigger(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
     """Convert a T-SQL / MySQL trigger to a PL/pgSQL trigger function + CREATE TRIGGER."""
     codes = ["SPG-EWI-0005"]
     # Strip MySQL DEFINER clause and backtick quoting
@@ -425,7 +439,7 @@ def convert_trigger(ddl: str) -> tuple[str, list[str]]:
     )
     ddl = strip_brackets(ddl)
     ddl = downcase_identifiers(ddl)
-    ddl, tc = apply_type_mappings(ddl)
+    ddl, tc = apply_type_mappings(ddl, source_type)
     codes.extend(tc)
 
     m = re.search(
@@ -1007,13 +1021,13 @@ def main():
         else:
             # MSSQL / MySQL / MariaDB — existing T-SQL path
             if obj_type == "view":
-                converted, codes = convert_view(ddl)
+                converted, codes = convert_view(ddl, source_type)
             elif obj_type == "procedure":
-                converted, codes = convert_procedure(ddl)
+                converted, codes = convert_procedure(ddl, source_type)
             elif obj_type == "function":
-                converted, codes = convert_function(ddl)
+                converted, codes = convert_function(ddl, source_type)
             elif obj_type == "trigger":
-                converted, codes = convert_trigger(ddl)
+                converted, codes = convert_trigger(ddl, source_type)
             else:
                 converted, codes = ddl, []
 

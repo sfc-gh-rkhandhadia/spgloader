@@ -1,0 +1,135 @@
+# type-mappings.yaml  (oracle-to-pg)
+# ---------------------------------------------------------------------------
+# Oracle → PostgreSQL data type substitution rules.
+#
+# Applied by convert_objects.py for --source-type oracle migrations.
+# Oracle-specific types are also handled structurally in convert_oracle_procedure()
+# and convert_oracle_function() in convert_objects.py.
+#
+# Fields: same schema as mssql-to-pg/type-mappings.yaml
+# ---------------------------------------------------------------------------
+
+substitutions:
+
+  # ── Oracle numeric types ───────────────────────────────────────────────────
+
+  - pattern:     '\bNUMBER\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)'
+    replacement: 'NUMERIC(\1,\2)'
+    context:     pre_downcase
+
+  - pattern:     '\bNUMBER\s*\(\s*(\d+)\s*\)'
+    replacement: 'NUMERIC(\1)'
+    context:     pre_downcase
+
+  - pattern:     '\bNUMBER\b'
+    replacement: 'NUMERIC'
+    context:     pre_downcase
+    note:        'Oracle NUMBER without precision → NUMERIC (arbitrary precision)'
+
+  - pattern:     '\bINTEGER\b'
+    replacement: 'INTEGER'
+    context:     pre_downcase
+    ewi_code:    ~
+
+  - pattern:     '\bBINARY_FLOAT\b'
+    replacement: 'REAL'
+    context:     pre_downcase
+
+  - pattern:     '\bBINARY_DOUBLE\b'
+    replacement: 'DOUBLE PRECISION'
+    context:     pre_downcase
+
+  # ── Oracle string types ────────────────────────────────────────────────────
+
+  - pattern:     '\bVARCHAR2\s*\((\d+)\s*(?:BYTE|CHAR)?\s*\)'
+    replacement: 'VARCHAR(\1)'
+    context:     pre_downcase
+
+  - pattern:     '\bVARCHAR2\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+
+  - pattern:     '\bNVARCHAR2\s*\((\d+)\s*\)'
+    replacement: 'VARCHAR(\1)'
+    context:     pre_downcase
+
+  - pattern:     '\bNVARCHAR2\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+
+  - pattern:     '\bNCHAR\s*\((\d+)\s*\)'
+    replacement: 'CHAR(\1)'
+    context:     pre_downcase
+
+  - pattern:     '\bCLOB\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+
+  - pattern:     '\bNCLOB\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+
+  - pattern:     '\bLONG\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+
+  # ── Oracle blob types ──────────────────────────────────────────────────────
+
+  - pattern:     '\bBLOB\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     '\bRAW\s*\(\d+\)'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  - pattern:     '\bLONG\s+RAW\b'
+    replacement: 'BYTEA'
+    context:     pre_downcase
+
+  # ── Oracle date/time types ─────────────────────────────────────────────────
+
+  - pattern:     '\bDATE\b'
+    replacement: 'TIMESTAMP'
+    context:     pre_downcase
+    note:        'Oracle DATE includes time component; map to TIMESTAMP'
+
+  - pattern:     '\bTIMESTAMP\s*\(\d+\)\s*WITH\s+TIME\s+ZONE\b'
+    replacement: 'TIMESTAMPTZ'
+    context:     pre_downcase
+
+  - pattern:     '\bTIMESTAMP\s*\(\d+\)\s*WITH\s+LOCAL\s+TIME\s+ZONE\b'
+    replacement: 'TIMESTAMPTZ'
+    context:     pre_downcase
+
+  - pattern:     '\bTIMESTAMP\s*\(\d+\)\b'
+    replacement: 'TIMESTAMP'
+    context:     pre_downcase
+
+  - pattern:     '\bINTERVAL\s+YEAR\s+TO\s+MONTH\b'
+    replacement: 'INTERVAL'
+    context:     pre_downcase
+    ewi_code:    SPG-EWI-0001
+
+  - pattern:     '\bINTERVAL\s+DAY\s+TO\s+SECOND\b'
+    replacement: 'INTERVAL'
+    context:     pre_downcase
+
+  # ── Oracle ROWID / UROWID ──────────────────────────────────────────────────
+
+  - pattern:     '\bUROWID\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    ewi_code:    SPG-EWI-0001
+
+  - pattern:     '\bROWID\b'
+    replacement: 'TEXT'
+    context:     pre_downcase
+    ewi_code:    SPG-EWI-0001
+
+  # ── Oracle XMLTYPE ─────────────────────────────────────────────────────────
+
+  - pattern:     '\bXMLTYPE\b'
+    replacement: 'XML'
+    context:     pre_downcase
+    ewi_code:    SPG-EWI-0001

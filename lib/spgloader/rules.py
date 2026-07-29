@@ -1,24 +1,24 @@
 """
 rules.py — Centralised YAML rule-file loader for spgloader scripts.
 
-All conversion patterns (type mappings, function substitutions, DDL cleanup,
-EWI codes, etc.) live in YAML rule files under:
-  references/rules/mssql-to-pg/
+Rule files live under per-source-type directories:
+  references/rules/mssql-to-pg/    ← T-SQL → PostgreSQL rules
+  references/rules/mysql-to-pg/    ← MySQL/MariaDB → PostgreSQL rules
+  references/rules/oracle-to-pg/   ← PL/SQL → PostgreSQL rules
+  references/rules/shared/         ← dialect-agnostic rules (ewi-codes, pg-keywords)
 
-Scripts call RuleLoader.get(name) to retrieve a parsed rule document.
+RuleLoader.load(name) looks in the source-type directory first, then falls back
+to shared/ so shared rules are accessible from any source type without duplication.
+
 Loaded documents are cached for the lifetime of the process.
 
-Usage example:
-    from spgloader.rules import RuleLoader
+Usage:
+    from spgloader.rules import get_loader
     from pathlib import Path
 
-    loader = RuleLoader(Path(__file__).parent.parent.parent)  # skill root
-    type_rules = loader.type_mappings()      # list of dicts
+    loader = get_loader(skill_root, source_type="mysql")
+    type_rules = loader.type_mappings()
     func_rules  = loader.function_substitutions()
-    cleanup     = loader.ddl_cleanup()
-    date_units  = loader.date_units()
-    keywords    = loader.pg_reserved_keywords()
-    ewi         = loader.ewi_codes()
 """
 from __future__ import annotations
 
@@ -32,15 +32,35 @@ except ImportError as exc:
     raise ImportError("pyyaml is required: pip install pyyaml") from exc
 
 
+# Map source_type strings → rule sub-directory names
+_SOURCE_DIRS: dict[str, str] = {
+    "mssql":    "mssql-to-pg",
+    "mysql":    "mysql-to-pg",
+    "mariadb":  "mysql-to-pg",
+    "oracle":   "oracle-to-pg",
+}
+_SHARED_DIR = "shared"
+
+
 class RuleLoaderError(Exception):
     """Raised when a rule file is missing or malformed."""
 
 
 class RuleLoader:
-    """Load and cache YAML rule files from references/rules/mssql-to-pg/."""
+    """Load and cache YAML rule files from the per-source-type rules directory.
 
-    def __init__(self, skill_root: Path):
-        self._rules_dir = skill_root / "references" / "rules" / "mssql-to-pg"
+    Resolution order for load(name):
+      1. references/rules/<source_type_dir>/<name>.yaml
+      2. references/rules/shared/<name>.yaml
+      3. RuleLoaderError if neither exists
+    """
+
+    def __init__(self, skill_root: Path, source_type: str = "mssql"):
+        src_dir = _SOURCE_DIRS.get(source_type.lower(), "mssql-to-pg")
+        rules_base = skill_root / "references" / "rules"
+        self._rules_dir = rules_base / src_dir
+        self._shared_dir = rules_base / _SHARED_DIR
+        self._source_type = source_type.lower()
         self._cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -48,7 +68,7 @@ class RuleLoader:
     # ------------------------------------------------------------------
 
     def load(self, name: str) -> Any:
-        """Load {name}.yaml from the rules directory. Results are cached.
+        """Load {name}.yaml — source-type dir first, shared/ fallback.
 
         Args:
             name: filename without extension (e.g. 'type-mappings').
@@ -59,11 +79,17 @@ class RuleLoader:
         if name in self._cache:
             return self._cache[name]
 
-        path = self._rules_dir / f"{name}.yaml"
-        if not path.exists():
+        # Search order: source-type dir → shared/
+        candidates = [
+            self._rules_dir / f"{name}.yaml",
+            self._shared_dir / f"{name}.yaml",
+        ]
+        path: Path | None = next((p for p in candidates if p.exists()), None)
+        if path is None:
+            searched = "\n  ".join(str(p) for p in candidates)
             raise RuleLoaderError(
-                f"Rule file not found: {path}\n"
-                f"Expected at: {self._rules_dir / name}.yaml"
+                f"Rule file not found: {name}.yaml\n"
+                f"  Searched:\n  {searched}"
             )
 
         try:
@@ -94,37 +120,42 @@ class RuleLoader:
 
     def function_substitutions(self, context: str | None = None) -> list[dict]:
         """Return function/syntax substitution rules."""
-        rules = self.load("function-substitutions").get("substitutions", [])
+        try:
+            rules = self.load("function-substitutions").get("substitutions", [])
+        except RuleLoaderError:
+            return []  # not all source types define function substitutions
         if context is None:
             return rules
         return [r for r in rules if r.get("context", "both") in (context, "both")]
 
     def ddl_cleanup(self, phase: str | None = None) -> list[dict]:
-        """Return SSMS DDL artifact cleanup patterns.
-
-        Args:
-            phase: 'pre_bracket', 'post_bracket', or None (all).
-        """
-        patterns = self.load("ddl-cleanup").get("patterns", [])
+        """Return SSMS DDL artifact cleanup patterns (MSSQL only)."""
+        try:
+            patterns = self.load("ddl-cleanup").get("patterns", [])
+        except RuleLoaderError:
+            return []
         if phase is None:
             return patterns
         return [p for p in patterns if p.get("phase", "pre_bracket") == phase]
 
     def date_units(self) -> dict:
-        """Return the full date-units document (all three maps)."""
-        return self.load("date-units")
+        """Return the full date-units document (MSSQL only)."""
+        try:
+            return self.load("date-units")
+        except RuleLoaderError:
+            return {}
 
     def datepart_units(self) -> dict[str, str]:
         """T-SQL DATEPART unit abbreviation → PG EXTRACT keyword."""
-        return self.load("date-units").get("datepart_units", {})
+        return self.date_units().get("datepart_units", {})
 
     def dateadd_units(self) -> dict[str, str]:
         """T-SQL DATEADD unit abbreviation → PG INTERVAL unit word."""
-        return self.load("date-units").get("dateadd_units", {})
+        return self.date_units().get("dateadd_units", {})
 
     def datediff_divisors(self) -> dict[str, str]:
         """T-SQL DATEDIFF unit → epoch-seconds divisor expression."""
-        return self.load("date-units").get("datediff_divisors", {})
+        return self.date_units().get("datediff_divisors", {})
 
     def pg_reserved_keywords(self) -> list[str]:
         """PostgreSQL reserved keywords that need double-quoting."""
@@ -137,6 +168,13 @@ class RuleLoader:
     def ewi_codes(self) -> dict[str, dict]:
         """Full EWI code catalog as {code: {severity, title, description, ...}}."""
         return self.load("ewi-codes").get("codes", {})
+
+    def plpgsql_fixes(self) -> list[dict]:
+        """Source-type-specific PL/pgSQL body transformation rules."""
+        try:
+            return self.load("plpgsql-fixes").get("body_transforms", [])
+        except RuleLoaderError:
+            return []
 
     # ------------------------------------------------------------------
     # Regex application helpers
@@ -202,19 +240,21 @@ class RuleLoader:
 # Module-level singleton factory
 # ------------------------------------------------------------------
 
-_loaders: dict[Path, RuleLoader] = {}
+_loaders: dict[tuple, RuleLoader] = {}
 
 
-def get_loader(skill_root: Path | None = None) -> RuleLoader:
-    """Get (or create) a cached RuleLoader for the given skill root.
+def get_loader(skill_root: Path | None = None, source_type: str = "mssql") -> RuleLoader:
+    """Get (or create) a cached RuleLoader for the given skill root and source type.
 
-    If skill_root is None, auto-detects from this file's location
-    (assumes: lib/spgloader/rules.py → skill_root = lib/../..)
+    Args:
+        skill_root:   Path to the spgloader skill directory. Auto-detected if None.
+        source_type:  'mssql' | 'mysql' | 'mariadb' | 'oracle' (default: 'mssql').
     """
     if skill_root is None:
         skill_root = Path(__file__).parent.parent.parent
 
     skill_root = skill_root.resolve()
-    if skill_root not in _loaders:
-        _loaders[skill_root] = RuleLoader(skill_root)
-    return _loaders[skill_root]
+    key = (skill_root, source_type.lower())
+    if key not in _loaders:
+        _loaders[key] = RuleLoader(skill_root, source_type)
+    return _loaders[key]
