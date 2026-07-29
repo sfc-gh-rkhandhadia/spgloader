@@ -948,6 +948,13 @@ def render_html(data: dict) -> str:
   /* ── Tabs ── */
   .tabs{{background:var(--surface);border-bottom:2px solid var(--border);
     padding:0 32px;display:flex;gap:0}}
+  /* Tab tooltips: appear below the tab bar, not above */
+  .tabs [data-tip]::after{{
+    bottom:auto;top:calc(100% + 6px);
+    left:50%;transform:translateX(-20%);
+    max-width:300px;font-size:11px;line-height:1.5;
+    text-align:left;
+  }}
   .tab-btn{{padding:12px 20px;cursor:pointer;border:none;background:none;
     color:var(--muted);font-size:13px;font-weight:500;
     border-bottom:2px solid transparent;margin-bottom:-2px;transition:.15s}}
@@ -1088,13 +1095,20 @@ def render_html(data: dict) -> str:
 
 <!-- Tab bar -->
 <div class="tabs" id="tabBar">
-  <button class="tab-btn active" onclick="showTab('overview')">Overview</button>
-  <button class="tab-btn" onclick="showTab('deployment')">Deployment</button>
-  <button class="tab-btn" onclick="showTab('objects')">Objects</button>
-  <button class="tab-btn" onclick="showTab('validation')">Validation</button>
-  <button class="tab-btn" onclick="showTab('assessment')">Assessment</button>
-  <button class="tab-btn" onclick="showTab('witness')">Witness</button>
-  <button class="tab-btn" onclick="showTab('equivalence')">Equivalence Test</button>
+  <button class="tab-btn active" onclick="showTab('overview')"
+    data-tip="High-level migration summary: tables, indexes, views, functions, procedures deployed — and how many were fixed by rules or LLM repair.">Overview</button>
+  <button class="tab-btn" onclick="showTab('deployment')"
+    data-tip="Per-schema table deployment details: row counts, indexes, foreign keys, and duration. Also shows views, functions, and procedures deployment outcomes.">Deployment</button>
+  <button class="tab-btn" onclick="showTab('objects')"
+    data-tip="Full list of every converted view, function, and stored procedure — showing whether each was deployed, fixed by rules, fixed by LLM, or still failing.">Objects</button>
+  <button class="tab-btn" onclick="showTab('validation')"
+    data-tip="Schema validation checks run after deployment: table counts, column counts, primary keys, AUTO_INCREMENT columns, foreign keys, and indexes compared between source and SPG.">Validation</button>
+  <button class="tab-btn" onclick="showTab('assessment')"
+    data-tip="Pre-migration SPG Compatibility Assessment: flags any source objects that use features with no PostgreSQL equivalent (CLR, linked servers, temporal tables, etc.) before deployment begins.">Assessment</button>
+  <button class="tab-btn" onclick="showTab('witness')"
+    data-tip="Phase 6.5 — Synthetic 3-row seed data is inserted into the source DB, then every deployed view, function, and procedure is called to confirm it executes and returns data on the source side.">Witness</button>
+  <button class="tab-btn" onclick="showTab('equivalence')"
+    data-tip="Phase 6.6 — Structural parity between source and SPG: table counts, column counts, and routines compared schema by schema. Confirms the migration is structurally complete and ready for sign-off.">Equivalence Test</button>
 </div>
 
 <div class="content">
