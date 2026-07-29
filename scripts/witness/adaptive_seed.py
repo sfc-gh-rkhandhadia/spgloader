@@ -1752,3 +1752,238 @@ def verify_and_fix_join_consistency(conn: Any, objects: dict) -> list[dict]:
             )
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# MySQL adaptive parameter inference (parse_proc_params_mysql,
+# infer_param_value_mysql, adaptive_validate_proc_mysql)
+# ---------------------------------------------------------------------------
+
+# Matches MySQL/MariaDB IN/OUT/INOUT parameter declarations:
+#   IN param_name TYPE[(size)] [DEFAULT value | CHARSET ...]
+# Also matches zero-prefix forms: `param_name` TYPE
+_RE_MYSQL_PARAM = re.compile(
+    r"(?:(?P<mode>IN|OUT|INOUT)\s+)?"
+    r"`?(?P<name>\w+)`?"
+    r"\s+(?P<type>\w+)(?:\s*\([^)]*\))?"
+    r"(?:[^,\n]*?(?:DEFAULT\s+(?P<default>'[^']*'|\"[^\"]*\"|[^\s,)]+)))?",
+    re.IGNORECASE,
+)
+
+_MYSQL_PARAM_BLOCK_END = re.compile(
+    r"\)\s*(?:READS|MODIFIES|CONTAINS|NO\s+SQL|NOT\s+DETERMINISTIC"
+    r"|DETERMINISTIC|COMMENT|LANGUAGE|BEGIN|$)",
+    re.IGNORECASE,
+)
+
+
+def parse_proc_params_mysql(sql: str) -> list[dict]:
+    """Extract IN/OUT/INOUT parameter declarations from a MySQL stored
+    procedure or function DDL.
+
+    Returns a list of {name, type, mode, default} dicts in declaration order.
+    Only IN parameters are returned (OUT/INOUT params don't need input values).
+    """
+    # Strip DEFINER and backtick quoting for cleaner parsing
+    sql = re.sub(r"CREATE\s+DEFINER\s*=\s*`[^`]*`@`[^`]*`\s+", "CREATE ", sql, flags=re.I)
+
+    # Find the parameter block: content between the first '(' after proc/function name
+    # and the matching ')'
+    m_create = re.search(
+        r"(?:PROCEDURE|FUNCTION)\s+`?\w+`?(?:\s*\.\s*`?\w+`?)?\s*\(",
+        sql, re.I,
+    )
+    if not m_create:
+        return []
+
+    start = m_create.end() - 1  # position of opening '('
+    depth, i, param_block = 0, start, ""
+    while i < len(sql):
+        if sql[i] == "(":
+            depth += 1
+        elif sql[i] == ")":
+            depth -= 1
+            if depth == 0:
+                param_block = sql[start + 1 : i]
+                break
+        i += 1
+    else:
+        param_block = sql[start + 1:]
+
+    params: list[dict] = []
+    for m in _RE_MYSQL_PARAM.finditer(param_block):
+        mode = (m.group("mode") or "IN").upper()
+        if mode in ("OUT",):
+            continue  # output-only params don't need input values
+        name = m.group("name").strip("`")
+        ptype = m.group("type").upper().split("(")[0].strip()
+        if ptype in ("READS", "MODIFIES", "CONTAINS", "NO", "NOT",
+                     "DETERMINISTIC", "COMMENT", "LANGUAGE", "BEGIN",
+                     "IN", "OUT", "INOUT", "CHARSET", "COLLATE"):
+            continue  # not a real type — parser matched a keyword
+        default_raw = (m.group("default") or "").strip().strip("'\"")
+        params.append({
+            "name":    name,
+            "type":    ptype,
+            "mode":    mode,
+            "default": default_raw or None,
+        })
+    return params
+
+
+def infer_param_value_mysql(param: dict, conn: Any, objects: dict) -> Any:
+    """Return a usable value for a MySQL stored procedure / function parameter.
+
+    Priority:
+      1. Explicit DDL DEFAULT value in signature
+      2. Query seeded tables for a real value where the column name
+         matches the parameter name (e.g. i_migration_id → migration_id column)
+      3. Type-based fallback (INT→1, VARCHAR→'TEST', DATETIME→'2024-01-01', …)
+    """
+    name    = param["name"]
+    ptype   = param["type"]
+    default = param.get("default")
+
+    # 1. DDL default
+    if default is not None and default != "":
+        try:
+            if any(t in ptype for t in ("INT", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT")):
+                return int(float(default))
+            if any(t in ptype for t in ("DECIMAL", "FLOAT", "DOUBLE", "NUMERIC")):
+                return float(default)
+        except (ValueError, TypeError):
+            pass
+        return default
+
+    # 2. Sample a real seeded value by matching param name to a column
+    #    Strip common prefixes like i_, p_, v_, in_ for better matching
+    name_stripped = re.sub(r"^(?:i_|p_|v_|in_|out_|param_)", "", name, flags=re.I).lower()
+    for fqn, obj in objects.items():
+        if obj.get("type", "").upper() != "TABLE":
+            continue
+        for col in obj.get("columns", []):
+            col_lower = col["name"].lower()
+            if col_lower == name.lower() or col_lower == name_stripped:
+                schema, tbl = fqn.split(".", 1) if "." in fqn else ("", fqn)
+                try:
+                    cur = conn.cursor()
+                    if schema:
+                        cur.execute(
+                            f"SELECT `{col['name']}` FROM `{schema}`.`{tbl}` "
+                            f"WHERE `{col['name']}` IS NOT NULL LIMIT 1"
+                        )
+                    else:
+                        cur.execute(
+                            f"SELECT `{col['name']}` FROM `{tbl}` "
+                            f"WHERE `{col['name']}` IS NOT NULL LIMIT 1"
+                        )
+                    row = cur.fetchone()
+                    cur.close()
+                    if row and row[0] is not None:
+                        return row[0]
+                except Exception:
+                    pass
+
+    # 3. Type-based fallback
+    if any(t in ptype for t in ("INT", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT")):
+        return 1
+    if any(t in ptype for t in ("DECIMAL", "FLOAT", "DOUBLE", "NUMERIC")):
+        return 1.0
+    if ptype in ("BIT", "BOOL", "BOOLEAN"):
+        return 0
+    if ptype == "DATE":
+        return "2024-01-01"
+    if ptype in ("DATETIME", "TIMESTAMP"):
+        return "2024-01-01 10:00:00"
+    if ptype == "TIME":
+        return "10:00:00"
+    if ptype == "YEAR":
+        return 2024
+    return "TEST_VALUE"
+
+
+def adaptive_validate_proc_mysql(conn: Any, obj: dict, objects: dict) -> dict | None:
+    """Parse MySQL proc/function params, infer real values from seeded tables,
+    retry the CALL/SELECT with those values, and return a validation result dict.
+
+    Returns None if parameter parsing produces no params (caller should keep
+    the existing PARTIAL result in that case).
+    """
+    sql    = obj.get("ddl", "")
+    schema = obj["schema"]
+    name   = obj["name"]
+    ftype  = obj.get("type", "PROCEDURE").upper()
+
+    params = parse_proc_params_mysql(sql)
+    if not params:
+        return None  # can't infer — caller keeps existing result
+
+    param_vals = [infer_param_value_mysql(p, conn, objects) for p in params]
+    placeholders = ", ".join("%s" for _ in param_vals)
+    pinfo = ", ".join(
+        f"{p['name']}={v!r}" for p, v in zip(params, param_vals)
+    )
+
+    try:
+        cur = conn.cursor()
+        if ftype == "FUNCTION":
+            query = f"SELECT `{schema}`.`{name}`({placeholders})"
+        else:
+            query = f"CALL `{schema}`.`{name}`({placeholders})"
+
+        if param_vals:
+            cur.execute(query, tuple(param_vals))
+        else:
+            cur.execute(query)
+
+        try:
+            row = cur.fetchone()
+        except Exception:
+            # InterfaceError: No result set — DML-only proc, executed OK
+            cur.close()
+            return {
+                "status": "partially_validated",
+                "note": f"DML-only proc executed with inferred params ({pinfo})",
+            }
+        cur.close()
+
+        if ftype == "FUNCTION":
+            val = row[0] if row else None
+            if val is not None:
+                return {
+                    "status": "validated",
+                    "note": f"Scalar fn returned {str(val)[:60]!r} with params ({pinfo})",
+                }
+            return {
+                "status": "partially_validated",
+                "note": f"Scalar fn returned NULL with params ({pinfo}) — conditions not met",
+            }
+        else:
+            if row is not None:
+                return {
+                    "status": "validated",
+                    "note": f"Executed with inferred params ({pinfo}), returns ≥1 row",
+                }
+            return {
+                "status": "partially_validated",
+                "note": f"Executed with inferred params ({pinfo}), 0 rows — DML or data-dependent",
+            }
+
+    except Exception as exc:
+        msg = str(exc)
+        if any(k in msg.lower() for k in ("doesn't exist", "unknown procedure", "unknown function")):
+            return {"status": "failed", "note": f"Object not found: {msg[:200]}"}
+        # DEFINER user doesn't exist in Docker test environment — proc IS deployed correctly
+        if "definer" in msg.lower() and ("does not exist" in msg.lower() or "1449" in msg):
+            return {
+                "status": "partially_validated",
+                "note": (
+                    f"Proc/fn deployed correctly; DEFINER=admin@% not present in Docker test "
+                    f"environment (inferred params: {pinfo}). Will validate against SPG in Phase 6.6."
+                ),
+            }
+        # Param inference produced wrong types or values — report clearly
+        return {
+            "status": "partially_validated",
+            "note": f"Inferred params ({pinfo}), runtime error: {msg[:200]}",
+        }

@@ -244,6 +244,15 @@ def _check_scalar_fn(conn: "_SourceConn", obj: dict, objects: dict | None = None
         except Exception as exc:
             msg = str(exc)
             if any(k in msg.lower() for k in ("incorrect number of arguments", "argument", "parameter")):
+                # Try adaptive MySQL parameter inference before giving up
+                if objects:
+                    try:
+                        from adaptive_seed import adaptive_validate_proc_mysql
+                        result = adaptive_validate_proc_mysql(conn, obj, objects)
+                        if result:
+                            return result
+                    except Exception:
+                        pass
                 return {"status": PARTIAL, "note": f"Requires parameters: {msg[:150]}"}
             return {"status": FAILED, "note": msg[:250]}
 
@@ -389,7 +398,33 @@ def _check_proc(conn: "_SourceConn", obj: dict, objects: dict | None = None, con
         except Exception as exc:
             msg = str(exc)
             if any(k in msg.lower() for k in ("incorrect number of arguments", "argument", "parameter")):
+                # Try adaptive MySQL parameter inference
+                if objects:
+                    try:
+                        from adaptive_seed import adaptive_validate_proc_mysql
+                        result = adaptive_validate_proc_mysql(conn, obj, objects)
+                        if result:
+                            return result
+                    except Exception:
+                        pass
                 return {"status": PARTIAL, "note": f"Requires parameters: {msg[:150]}"}
+            # DEFINER user doesn't exist in Docker — proc is deployed, not a migration error
+            if "definer" in msg.lower() and ("does not exist" in msg.lower() or "1449" in msg):
+                if objects:
+                    try:
+                        from adaptive_seed import adaptive_validate_proc_mysql
+                        result = adaptive_validate_proc_mysql(conn, obj, objects)
+                        if result:
+                            return result
+                    except Exception:
+                        pass
+                return {
+                    "status": PARTIAL,
+                    "note": (
+                        "Deployed correctly; DEFINER=admin@% not present in Docker "
+                        "test environment — validate against SPG in Phase 6.6."
+                    ),
+                }
             if "doesn't exist" in msg.lower() or "unknown procedure" in msg.lower():
                 return {"status": FAILED, "note": f"Procedure not found on source: {msg[:200]}"}
             if "out of sync" in msg.lower():
