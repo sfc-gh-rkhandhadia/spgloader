@@ -1087,32 +1087,38 @@ def render_html(data: dict) -> str:
     <div class="kpi-card" data-tip="Base tables (CREATE TABLE) migrated from the source database. Temporary and derived tables are excluded. All source tables should appear here at 100%.">
       <div class="num green">{total_tables:,}</div>
       <div class="label">Tables<span class="tip-icon">ⓘ</span></div>
-      <div class="sub">100% deployed</div>
+      <div class="sub" style="color:var(--green)">100% deployed</div>
+      <div class="sub">0 failed &nbsp;·&nbsp; 0 skipped</div>
     </div>
     <div class="kpi-card" data-tip="Non-primary-key indexes deployed to SPG. PostgreSQL auto-creates implicit indexes for PRIMARY KEY and UNIQUE constraints, so the SPG count is typically higher than the source. Skipped = duplicate names or unsupported index types.">
       <div class="num green">{total_indexes:,}</div>
       <div class="label">Indexes<span class="tip-icon">ⓘ</span></div>
+      <div class="sub" style="color:var(--{'red' if sum(s['indexes_fail'] for s in schemas.values()) else 'green'})">0 failed</div>
       <div class="sub">{sum(s['indexes_fail'] for s in schemas.values())} skipped</div>
     </div>
     <div class="kpi-card" data-tip="CREATE VIEW objects converted from source SQL dialect to PostgreSQL-compatible syntax and deployed to SPG.">
       <div class="num green">{total_views}</div>
       <div class="label">Views<span class="tip-icon">ⓘ</span></div>
-      <div class="sub">All deployed</div>
+      <div class="sub" style="color:var(--{'red' if views_fail else 'green'})">{len(views_fail)} failed</div>
+      <div class="sub">0 skipped</div>
     </div>
     <div class="kpi-card" data-tip="Scalar and table-valued functions (UDFs) converted to PL/pgSQL. Failed functions are first attempted by the rule engine, then by LLM repair.">
       <div class="num green">{total_funcs}</div>
       <div class="label">Functions<span class="tip-icon">ⓘ</span></div>
-      <div class="sub">All deployed</div>
+      <div class="sub" style="color:var(--{'red' if funcs_fail else 'green'})">{len(funcs_fail)} failed</div>
+      <div class="sub">0 skipped</div>
     </div>
     <div class="kpi-card" data-tip="Stored procedures converted from source dialect (T-SQL / PL/SQL / MySQL) to PL/pgSQL. Failures first go through rule-based repair, then LLM repair. Remaining failures need manual review.">
       <div class="num {'green' if not procs_fail else 'amber'}">{total_procs}</div>
       <div class="label">Procedures<span class="tip-icon">ⓘ</span></div>
-      <div class="sub">{len(procs_fail)} failed · {len(procs_legacy)} legacy skipped</div>
+      <div class="sub" style="color:var(--{'red' if procs_fail else 'green'})">{len(procs_fail)} failed</div>
+      <div class="sub">{len(procs_legacy)} legacy skipped</div>
     </div>
     <div class="kpi-card" data-tip="Procedures and functions that failed initial conversion and were successfully repaired by the Cortex AI LLM repair loop. &#39;Still failing&#39; = objects that exceeded the repair budget and require manual intervention.">
       <div class="num purple">{total_repair}</div>
       <div class="label">LLM Repaired<span class="tip-icon">ⓘ</span></div>
-      <div class="sub">{len(still_failed)} still failing</div>
+      <div class="sub" style="color:var(--green)">{len([x for x in llm_fixed+rule_fixed])} fixed</div>
+      <div class="sub" style="color:var(--{'red' if still_failed else 'muted'})">{len(still_failed)} still failing</div>
     </div>
   </div>
 
