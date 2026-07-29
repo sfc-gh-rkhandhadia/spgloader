@@ -43,7 +43,7 @@ sys.path.insert(0, str(SKILL_DIR / "lib"))
 # ---------------------------------------------------------------------------
 
 class _StatusReporter:
-    """Background thread that prints repair progress every 60 seconds."""
+    """Background thread that prints repair progress every `interval` seconds (default 20s)."""
 
     def __init__(self, total: int, interval: int = 60):
         self.total = total
@@ -95,6 +95,7 @@ _DEFAULT_CONFIG = {
     "temperature": 0.1,
     "max_tokens": 4096,
     "workers": 4,
+    "progress_interval": 20,
     "snowflake_connection": "",
     "warehouse": "COMPUTE_WH",
     "prompt_template": "procedure-repair-prompt.md",
@@ -383,8 +384,9 @@ def _phase2_llm(
     # Capture spg_service for use in _repair_one closures
     spg_service = config.get("_spg_service", "")
 
-    # Start 1-minute status reporter
-    reporter = _StatusReporter(total=len(failed_items))
+    # Start status reporter — interval from config, fallback 20s
+    _progress_interval = config.get("progress_interval", 20)
+    reporter = _StatusReporter(total=len(failed_items), interval=_progress_interval)
     reporter.start()
 
     try:

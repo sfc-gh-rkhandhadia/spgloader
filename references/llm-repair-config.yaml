@@ -30,6 +30,12 @@ max_tokens: 4096
 # 1 = sequential (slow), 8 = good balance for interactive sessions.
 workers: 8
 
+# How often (in seconds) to print the in-progress status line:
+#   [Status 1:20]  Fixed: 22  Failed so far: 1  Remaining: 74/97
+# Lower values give tighter feedback; higher values reduce noise.
+# With workers >= 4, 15-20s is a good balance.
+progress_interval: 20
+
 # Snowflake connection name from ~/.snowflake/connections.toml.
 # Leave empty to use the default connection.
 snowflake_connection: "sfsenorthamerica-rkhandhadia-aws1-pat"
