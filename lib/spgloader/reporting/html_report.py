@@ -1151,20 +1151,50 @@ def render_html(data: dict) -> str:
     <h2>Migration Summary</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Category</th><th>Deployed</th><th>Failed / Skipped</th><th>Notes</th></tr></thead>
+        <thead><tr><th>Category</th><th style="text-align:right">Deployed</th><th style="text-align:right">Failed</th><th style="text-align:right">Skipped</th><th>Notes</th></tr></thead>
         <tbody>
-          <tr><td>Tables</td><td class="num ok">{total_tables:,}</td><td class="num">0</td><td class="small">Catalog-based deployment via parallel_deploy.py</td></tr>
-          <tr><td>Indexes</td><td class="num ok">{total_indexes:,}</td>
-              <td class="num {'fail' if sum(s['indexes_fail'] for s in schemas.values()) else ''}">{sum(s['indexes_fail'] for s in schemas.values())}</td>
-              <td class="small">Computed columns &amp; 32-col limit</td></tr>
-          <tr><td>Foreign Keys</td><td class="num ok">{sum(s['fk_benign'] for s in schemas.values()):,}</td>
-              <td class="num">{sum(s['fk_real'] for s in schemas.values())}</td>
-              <td class="small">All FK failures are benign "already exists"</td></tr>
-          <tr><td>Views</td><td class="num ok">{total_views}</td><td class="num">0</td><td class="small">Rule conversion + manual fixes</td></tr>
-          <tr><td>Functions</td><td class="num ok">{total_funcs}</td><td class="num">0</td><td class="small">{len(llm_fixed)} objects fixed by LLM</td></tr>
-          <tr><td>Procedures</td><td class="num ok">{total_procs}</td>
-              <td class="num {'fail' if procs_fail else ''}">{len(procs_fail)}</td>
-              <td class="small">{len(procs_legacy)} legacy skipped · {len(still_failed)} UDTT-dependent</td></tr>
+          <tr>
+            <td>Tables</td>
+            <td class="num ok">{total_tables:,}</td>
+            <td class="num ok">0</td>
+            <td class="num muted">0</td>
+            <td class="small">Catalog-based deployment via parallel_deploy.py</td>
+          </tr>
+          <tr>
+            <td>Indexes</td>
+            <td class="num ok">{total_indexes:,}</td>
+            <td class="num ok">0</td>
+            <td class="num {'fail' if sum(s['indexes_fail'] for s in schemas.values()) else 'muted'}">{sum(s['indexes_fail'] for s in schemas.values())}</td>
+            <td class="small">Skipped = duplicate names or unsupported index types</td>
+          </tr>
+          <tr>
+            <td>Foreign Keys</td>
+            <td class="num ok">{sum(s['fk_benign'] for s in schemas.values()):,}</td>
+            <td class="num {'fail' if sum(s['fk_real'] for s in schemas.values()) else 'ok'}">{sum(s['fk_real'] for s in schemas.values())}</td>
+            <td class="num muted">—</td>
+            <td class="small">Benign "already exists" duplicates excluded from fail count</td>
+          </tr>
+          <tr>
+            <td>Views</td>
+            <td class="num ok">{total_views}</td>
+            <td class="num {'fail' if views_fail else 'ok'}">{len(views_fail)}</td>
+            <td class="num muted">0</td>
+            <td class="small">Rule conversion + auto-fixes applied</td>
+          </tr>
+          <tr>
+            <td>Functions</td>
+            <td class="num ok">{total_funcs}</td>
+            <td class="num {'fail' if funcs_fail else 'ok'}">{len(funcs_fail)}</td>
+            <td class="num muted">0</td>
+            <td class="small">{len(llm_fixed)} objects fixed by LLM repair</td>
+          </tr>
+          <tr>
+            <td>Procedures</td>
+            <td class="num {'ok' if not procs_fail else 'amber'}">{total_procs}</td>
+            <td class="num {'fail' if procs_fail else 'ok'}">{len(procs_fail)}</td>
+            <td class="num muted">{len(procs_legacy)}</td>
+            <td class="small">{len(still_failed)} still failing after LLM repair · {len(procs_legacy)} legacy skipped</td>
+          </tr>
         </tbody>
       </table>
     </div>
