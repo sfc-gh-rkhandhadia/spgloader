@@ -101,20 +101,47 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_functions.py \
 The script **defaults to non-interactive mode** — it never prompts via stdin.
 All decisions come from `deprecated_review.json` (Phase 3.6).
 
+**Schema routing (MySQL / MariaDB / Oracle sources):**
+
+When the source has multiple databases mapped to PostgreSQL schemas, procedure files
+are named `schema__procname.sql` (e.g. `evdas__proc_evdas_de_populate_stg.sql`).
+`deploy_procedures.py` auto-detects this prefix and injects `SET search_path TO schema, public;`
+before each procedure so it lands in the correct schema.
+
+Before deploying, inform the user of the schema routing strategy and confirm:
+
+```
+ask_user_question:
+  header: "Schema routing"
+  question: "Procedures will be deployed using the source schema (detected from
+             filenames: evdas → evdas, sapphire → sapphire, etc.).
+             The schema is injected via search_path — no SQL rewriting needed.
+             Would you like to deploy to the source schemas or force everything to public?"
+  options:
+    - label: "Deploy to source schemas (recommended)"
+      description: "schema__name.sql prefix → SET search_path TO schema, public"
+    - label: "Deploy to public"
+      description: "Legacy behaviour — all procedures land in public schema"
+```
+
+Store user choice as `SCHEMA_MODE` — `auto` (source) or `public`.
+
 **Normal run (non-interactive, default):**
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_procedures.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
-  --spg-service "$TARGET_SPG_SERVICE"
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --schema-mode "$SCHEMA_MODE"   # "auto" or "public" from user choice above
 # --no-interactive is the default; explicit flag is also accepted
 ```
 If undecided legacy groups exist, they are skipped silently and logged.
 
-**Interactive run — use this when you want the user to decide:**
+**Interactive run — use this when you want the user to decide on legacy groups:**
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_procedures.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
   --spg-service "$TARGET_SPG_SERVICE" \
+  --schema-mode "$SCHEMA_MODE" \
   --interactive
 ```
 

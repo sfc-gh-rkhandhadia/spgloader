@@ -4,6 +4,18 @@ deploy_procedures.py — Deploy stored procedure SQL files to SPG.
 
 Reads wave_4_procedures_triggers/*.sql, deploys each one, and writes a report.
 
+Schema routing:
+  Files named with the schema__procname.sql convention (produced by convert_objects.py
+  for MySQL/MariaDB/Oracle) carry the target PostgreSQL schema in the filename prefix.
+  The script injects  SET search_path TO <schema>, public;  before each procedure so
+  it lands in the correct schema instead of public.
+
+  Override with --schema-mode:
+    auto   (default) — infer from filename; fall back to public if no prefix
+    source — force source-schema routing even for files without a prefix (uses
+             source_conn.env + ddl_objects.json to map procedure → schema)
+    public — force all procedures into public (old behaviour)
+
 Legacy procedure detection:
   This script NEVER prompts for user input via stdin.
   All legacy/deprecated decisions must be made BEFORE calling this script:
@@ -136,6 +148,47 @@ def _load_deprecated_skip_set(work_dir: Path) -> set[str]:
 EXIT_PENDING_DECISIONS = 2
 
 
+# ---------------------------------------------------------------------------
+# Schema routing helpers
+# ---------------------------------------------------------------------------
+
+def _schema_from_filename(f: "Path") -> str | None:
+    """Return the target PostgreSQL schema inferred from the filename.
+
+    Convention: files created by convert_objects.py for multi-schema sources
+    (MySQL, MariaDB, Oracle) use  schema__procname.sql  (double-underscore).
+    Returns the schema prefix, or None when the convention is not present.
+    """
+    stem = f.stem  # e.g. 'evdas__proc_evdas_de_populate_stg'
+    if "__" in stem:
+        prefix = stem.split("__")[0].strip()
+        if prefix:  # guard against leading __ files
+            return prefix
+    return None
+
+
+def _build_fqn_schema_map(work_dir: "Path") -> dict[str, str]:
+    """Build {proc_name_lower: schema} from ddl_objects.json for fallback lookup."""
+    try:
+        ddl_path = work_dir / "ddl_objects.json"
+        if not ddl_path.exists():
+            return {}
+        import json
+        objects = json.loads(ddl_path.read_text(encoding="utf-8"))
+        if isinstance(objects, dict):
+            objects = objects.get("objects", [])
+        result = {}
+        for obj in objects:
+            if obj.get("type") in ("procedure", "function", "PROCEDURE", "FUNCTION"):
+                schema = obj.get("schema", "")
+                name = obj.get("name", "")
+                if schema and name:
+                    result[name.lower()] = schema.lower()
+        return result
+    except Exception:
+        return {}
+
+
 def deploy_procedures(
     work_dir: Path,
     spg_service: str,
@@ -144,6 +197,7 @@ def deploy_procedures(
     exclude_legacy: bool = False,
     interactive: bool = False,
     skill_dir: Path | None = None,
+    schema_mode: str = "auto",  # "auto" | "source" | "public"
 ) -> dict:
     """Deploy procedures from wave_4_procedures_triggers/ to SPG.
 
@@ -157,6 +211,13 @@ def deploy_procedures(
     interactive=True (skill omits --no-interactive):
       Undecided legacy groups trigger exit code 2 + legacy_groups_pending.json
       so the skill can prompt via ask_user_question and re-run.
+
+    schema_mode="auto" (default):
+      Infer target schema from filename prefix (schema__name.sql).  Files
+      without the double-underscore convention land in public unchanged.
+
+    schema_mode="public":
+      Force all procedures into public (legacy behaviour).
     """
     import psycopg2
 
@@ -179,11 +240,25 @@ def deploy_procedures(
     rules = _load_legacy_rules(skill_dir)
 
     # ── 1. Parse all procedures and classify them ─────────────────────────
-    procs: list[dict] = []   # {file, sql, name, label}
+    # Build schema fallback map from ddl_objects.json (used when filename has no prefix)
+    fqn_schema_map = _build_fqn_schema_map(work_dir) if schema_mode != "public" else {}
+
+    procs: list[dict] = []   # {file, sql, name, label, target_schema}
     for f in proc_files:
         sql = f.read_text(encoding="utf-8", errors="replace").strip()
         name = _extract_proc_name(sql) or f.stem
         sname = _short_name(name)
+
+        # Determine target schema for this procedure
+        if schema_mode == "public":
+            target_schema = None
+        else:
+            # Try filename prefix first (most reliable)
+            target_schema = _schema_from_filename(f)
+            if target_schema is None:
+                # Fall back to ddl_objects.json lookup
+                target_schema = fqn_schema_map.get(sname.lower())
+
         # Check Phase 3.6 deprecated decision first
         fqn_lower = name.lower()
         short_lower = sname.lower()
@@ -193,7 +268,7 @@ def deploy_procedures(
         )
         label = None if deprecated else _classify_procedure(sname, rules)
         procs.append({"file": f, "sql": sql, "name": name, "label": label,
-                      "deprecated_skip": deprecated})
+                      "deprecated_skip": deprecated, "target_schema": target_schema})
 
     # ── 2. Handle legacy groups ───────────────────────────────────────────
     # Collect unique legacy labels for procedures NOT already decided by Phase 3.6
@@ -327,18 +402,34 @@ def deploy_procedures(
         return {"succeeded": [], "failed": [], "skipped_legacy": skipped_legacy}
 
     # ── 4. Deploy ─────────────────────────────────────────────────────────
+    # Log schema routing summary
+    schemas_used = {p["target_schema"] for p in to_deploy if p.get("target_schema")}
+    if schemas_used:
+        print(f"  Schema routing: {sorted(schemas_used)} (via search_path injection)")
+    else:
+        print("  Schema routing: public (no schema prefix detected)")
+
     print(f"\nDeploying {len(to_deploy)} procedures...")
     conn = psycopg2.connect(f"service={spg_service}")
     conn.autocommit = False
     results = {"succeeded": [], "failed": [], "skipped_legacy": skipped_legacy}
 
     for p in to_deploy:
+        # Build the SQL to execute: optionally prepend search_path so the
+        # procedure lands in the correct schema instead of public.
+        target_schema = p.get("target_schema")
+        if target_schema:
+            deploy_sql = f'SET search_path TO "{target_schema}", public;\n{p["sql"]}'
+        else:
+            deploy_sql = p["sql"]
+
         try:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(p["sql"])
+                    cur.execute(deploy_sql)
             results["succeeded"].append(p["name"])
-            print(f"  OK    {p['name']}")
+            schema_tag = f" [{target_schema}]" if target_schema else ""
+            print(f"  OK    {p['name']}{schema_tag}")
         except Exception as e:
             conn.rollback()
             err = str(e).replace("\n", " ").strip()
@@ -352,14 +443,17 @@ def deploy_procedures(
                 )
                 if m:
                     trig_name, tbl_name = m.group(1), m.group(2)
+                    # Use the schema-qualified table name for the DROP
+                    tbl_ref = (f'"{target_schema}".{tbl_name}'
+                               if target_schema else f'dbo.{tbl_name}')
                     try:
                         with conn:
                             with conn.cursor() as cur:
                                 cur.execute(
                                     f'DROP TRIGGER IF EXISTS {trig_name} '
-                                    f'ON dbo.{tbl_name} CASCADE'
+                                    f'ON {tbl_ref} CASCADE'
                                 )
-                                cur.execute(p["sql"])
+                                cur.execute(deploy_sql)
                         results["succeeded"].append(p["name"])
                         print(f"  OK    {p['name']}  (dropped + recreated trigger)")
                         continue
@@ -406,6 +500,17 @@ def main() -> None:
                         help="With --repair: Cortex model override (e.g. mistral-large2)")
     parser.add_argument("--repair-iterations", type=int, default=None,
                         help="With --repair: max LLM iterations per procedure")
+    parser.add_argument(
+        "--schema-mode",
+        default="auto",
+        choices=["auto", "source", "public"],
+        help=(
+            "Schema routing mode. "
+            "auto (default): infer from filename schema__name.sql prefix. "
+            "public: force all procedures into public (legacy). "
+            "source: same as auto but required for backward compat."
+        ),
+    )
     args = parser.parse_args()
 
     if args.include_legacy and args.exclude_legacy:
@@ -423,6 +528,7 @@ def main() -> None:
         exclude_legacy=args.exclude_legacy,
         interactive=args.interactive,  # False by default; True only when skill passes --interactive
         skill_dir=skill_dir,
+        schema_mode=args.schema_mode,
     )
 
     if args.dry_run:

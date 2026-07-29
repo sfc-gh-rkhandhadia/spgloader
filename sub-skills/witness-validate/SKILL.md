@@ -214,19 +214,20 @@ PYEOF
 
 Read the source password:
 ```bash
-MSSQL_SA_PASSWORD="${!SOURCE_PASSWORD_ENV}"
-# e.g. if SOURCE_PASSWORD_ENV=MSSQL_SA_PASSWORD, then: ${MSSQL_SA_PASSWORD}
+SOURCE_PASSWORD="${!SOURCE_PASSWORD_ENV}"
+# Dereferences whatever env var name SOURCE_PASSWORD_ENV points to (works for both MSSQL and MySQL)
 ```
 
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/witness/seed_data.py \
+  --source-type   "${SOURCE_TYPE:-mssql}" \
   --inventory     "$SPGLOADER_WORK_DIR/witness/object_inventory.json" \
   --dep-graph     "$SPGLOADER_WORK_DIR/witness/dep_graph.json" \
   --deploy-report "$SPGLOADER_WORK_DIR/witness/mssql_deploy_report.json" \
   --server        "$SOURCE_HOST" \
-  --port          "${SOURCE_PORT:-1433}" \
-  --user          sa \
-  --password      "$MSSQL_SA_PASSWORD" \
+  --port          "$SOURCE_PORT" \
+  --user          "${SOURCE_USER:-sa}" \
+  --password      "$SOURCE_PASSWORD" \
   --database      "$SOURCE_DATABASE" \
   --row-volume    3 \
   --output        "$SPGLOADER_WORK_DIR/witness/seed_report.json"
@@ -258,14 +259,15 @@ PYEOF
 
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/witness/validate_chains.py \
+  --source-type   "${SOURCE_TYPE:-mssql}" \
   --inventory     "$SPGLOADER_WORK_DIR/witness/object_inventory.json" \
   --seed-report   "$SPGLOADER_WORK_DIR/witness/seed_report.json" \
   --deploy-report "$SPGLOADER_WORK_DIR/witness/mssql_deploy_report.json" \
   --dep-graph     "$SPGLOADER_WORK_DIR/witness/dep_graph.json" \
   --server        "$SOURCE_HOST" \
-  --port          "${SOURCE_PORT:-1433}" \
-  --user          sa \
-  --password      "$MSSQL_SA_PASSWORD" \
+  --port          "$SOURCE_PORT" \
+  --user          "${SOURCE_USER:-sa}" \
+  --password      "$SOURCE_PASSWORD" \
   --database      "$SOURCE_DATABASE" \
   --output        "$SPGLOADER_WORK_DIR/witness/validation_chains.json"
 ```

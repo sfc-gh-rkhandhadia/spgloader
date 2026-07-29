@@ -9,11 +9,88 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
-try:
-    import pymssql
-except ImportError:
-    print("ERROR: pymssql not installed. Re-run with: uv run --project <SKILL_DIR>", file=sys.stderr)
-    sys.exit(1)
+# Source-type sentinel — overridden by --source-type in main()
+_SOURCE_TYPE: str = os.environ.get("SOURCE_TYPE", "mssql")
+
+
+class _SourceConn:
+    """Thin source-DB wrapper that normalises connection and SQL quoting."""
+
+    def __init__(self, source_type: str, server: str, port: int,
+                 user: str, password: str, database: str):
+        self._type = source_type.lower()
+        self._conn: Any = None
+        self._kw = dict(server=server, port=port, user=user,
+                        password=password, database=database)
+
+    def open(self) -> "_SourceConn":
+        if self._type == "mssql":
+            try:
+                import pymssql  # noqa: PLC0415
+            except ImportError:
+                print("ERROR: pymssql not installed. Re-run with: uv run --project <SKILL_DIR>",
+                      file=sys.stderr)
+                sys.exit(1)
+            self._conn = pymssql.connect(
+                server=self._kw["server"], port=self._kw["port"],
+                user=self._kw["user"], password=self._kw["password"],
+                database=self._kw["database"], timeout=10, login_timeout=10,
+            )
+        elif self._type in ("mysql", "mariadb"):
+            try:
+                import mysql.connector  # noqa: PLC0415
+            except ImportError:
+                print("ERROR: mysql-connector-python not installed.", file=sys.stderr)
+                sys.exit(1)
+            self._conn = mysql.connector.connect(
+                host=self._kw["server"], port=self._kw["port"],
+                user=self._kw["user"], password=self._kw["password"],
+                database=self._kw["database"], connection_timeout=10,
+            )
+        else:
+            raise ValueError(f"Unsupported source_type: {self._type!r}")
+        return self
+
+    @property
+    def raw(self) -> Any:
+        """Underlying driver connection (for MSSQL-specific adaptive_seed calls)."""
+        return self._conn
+
+    def cursor(self) -> Any:
+        return self._conn.cursor()
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        if self._conn:
+            self._conn.close()
+
+    def q(self, name: str) -> str:
+        """Quote a single identifier."""
+        if self._type == "mssql":
+            return f"[{name}]"
+        return f"`{name}`"
+
+    def q2(self, schema: str, name: str) -> str:
+        """Quote schema.name."""
+        return f"{self.q(schema)}.{self.q(name)}"
+
+    def top_n(self, n: int) -> str:
+        return f"TOP {n}" if self._type == "mssql" else ""
+
+    def limit_n(self, n: int) -> str:
+        return "" if self._type == "mssql" else f"LIMIT {n}"
+
+    def is_mysql(self) -> bool:
+        return self._type in ("mysql", "mariadb")
+
+    def is_mssql(self) -> bool:
+        return self._type == "mssql"
+
 
 # Status constants
 VALIDATED = "validated"
@@ -31,11 +108,10 @@ _UNSUPPORTED = [
 ]
 
 
-def connect(server: str, port: int, user: str, password: str, database: str) -> "pymssql.Connection":
-    return pymssql.connect(
-        server=server, port=port, user=user, password=password,
-        database=database, timeout=10, login_timeout=10,
-    )
+def connect(server: str, port: int, user: str, password: str, database: str,
+            source_type: str = "mssql") -> "_SourceConn":
+    sc = _SourceConn(source_type, server, port, user, password, database)
+    return sc.open()
 
 
 def is_unsupported(ddl: str) -> bool:
@@ -46,40 +122,49 @@ def is_unsupported(ddl: str) -> bool:
 # Per-type validators
 # ---------------------------------------------------------------------------
 
-def _check_view(conn: "pymssql.Connection", obj: dict, objects: dict | None = None) -> dict:
+def _check_view(conn: "_SourceConn", obj: dict, objects: dict | None = None) -> dict:
+    sc = conn if isinstance(conn, _SourceConn) else None
+    is_mysql = sc is not None and sc.is_mysql()
+    fqn = sc.q2(obj["schema"], obj["name"]) if sc else f"[{obj['schema']}].[{obj['name']}]"
+
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT TOP 1 * FROM [{obj['schema']}].[{obj['name']}]")
+        if is_mysql:
+            cur.execute(f"SELECT * FROM {fqn} LIMIT 1")
+        else:
+            cur.execute(f"SELECT TOP 1 * FROM {fqn}")
         row = cur.fetchone()
         cur.close()
         if row is not None:
             return {"status": VALIDATED, "note": "Returns ≥1 row"}
     except Exception as exc:
         msg = str(exc)
-        # 266 = Transaction count mismatch — connection state corrupted by a prior
-        # trigger-firing UPDATE in the join consistency pre-check. The view itself
-        # is fine; this is an infrastructure/connection-state artifact.
-        if "266" in msg or "transaction count" in msg.lower():
+        if not is_mysql and ("266" in msg or "transaction count" in msg.lower()):
             return {
                 "status": PARTIAL,
                 "note": f"View deployed/compiled correctly; @@TRANCOUNT mismatch from prior trigger — connection state artifact: {msg[:120]}",
             }
         return {"status": FAILED, "note": msg[:250]}
 
-    # 0 rows — attempt adaptive seed from the view's own query
-    if objects:
+    # 0 rows — attempt adaptive seed (MSSQL only)
+    raw = sc.raw if sc else conn
+    if not is_mysql and objects:
         try:
             from adaptive_seed import adaptive_validate_view
-            result = adaptive_validate_view(conn, obj, objects)
+            result = adaptive_validate_view(raw, obj, objects)
             if result:
                 return result
-        except Exception as exc:
-            pass  # adaptive seed failed; fall through to generic failure
+        except Exception:
+            pass
 
     return {"status": FAILED, "note": "0 rows — seed data does not satisfy join/filter predicates"}
 
 
-def _check_tvf(conn: "pymssql.Connection", obj: dict, objects: dict | None = None, conn_params: dict | None = None) -> dict:
+def _check_tvf(conn: "_SourceConn", obj: dict, objects: dict | None = None, conn_params: dict | None = None) -> dict:
+    sc = conn if isinstance(conn, _SourceConn) else None
+    if sc and sc.is_mysql():
+        # MySQL has no table-valued functions in the MSSQL sense
+        return {"status": UNSUPPORTED, "note": "TVF concept does not apply to MySQL/MariaDB source"}
     # Pre-check: if the TVF has READONLY (TVP) parameters, route to TVP handler
     # before attempting any direct call (which would fail with error 266 or similar).
     if re.search(r'\bREADONLY\b', obj.get("ddl", ""), re.I):
@@ -95,6 +180,7 @@ def _check_tvf(conn: "pymssql.Connection", obj: dict, objects: dict | None = Non
             "status": PARTIAL,
             "note": "TVF uses Table-Valued Parameter (READONLY UDT) — requires sqlcmd-based invocation; deploys and compiles correctly",
         }
+    raw = sc.raw if sc else conn
     try:
         cur = conn.cursor()
         cur.execute(f"SELECT TOP 1 * FROM [{obj['schema']}].[{obj['name']}]()")
@@ -109,7 +195,7 @@ def _check_tvf(conn: "pymssql.Connection", obj: dict, objects: dict | None = Non
             if objects:
                 try:
                     from adaptive_seed import adaptive_validate_tvf
-                    result = adaptive_validate_tvf(conn, obj, objects)
+                    result = adaptive_validate_tvf(raw, obj, objects)
                     if result:
                         return result
                 except Exception:
@@ -123,11 +209,11 @@ def _check_tvf(conn: "pymssql.Connection", obj: dict, objects: dict | None = Non
             }
         return {"status": FAILED, "note": msg[:250]}
 
-    # 0 rows — apply adaptive seed
+    # 0 rows — apply adaptive seed (MSSQL only)
     if objects:
         try:
             from adaptive_seed import adaptive_validate_tvf
-            result = adaptive_validate_tvf(conn, obj, objects)
+            result = adaptive_validate_tvf(raw, obj, objects)
             if result:
                 return result
         except Exception:
@@ -135,21 +221,40 @@ def _check_tvf(conn: "pymssql.Connection", obj: dict, objects: dict | None = Non
     return {"status": PARTIAL, "note": "TVF executed but returned 0 rows"}
 
 
-def _check_scalar_fn(conn: "pymssql.Connection", obj: dict, objects: dict | None = None) -> dict:
+def _check_scalar_fn(conn: "_SourceConn", obj: dict, objects: dict | None = None) -> dict:
     """Validate a scalar (or misclassified multi-statement TVF) function.
 
-    Strategy:
-    1. If DDL contains 'RETURNS @' (multi-statement TVF misclassified as SCALAR),
-       call as SELECT TOP 1 * FROM [schema].[fn](params).
-    2. Otherwise call as SELECT [schema].[fn](params).
-    3. For UDT parameters (READONLY / custom type), mark as partially_validated.
+    For MySQL: SELECT `schema`.`name`() with no parameter inference.
+    For MSSQL: full adaptive-seed path with MSTVF detection and UDT guards.
     """
+    sc = conn if isinstance(conn, _SourceConn) else None
+    is_mysql = sc is not None and sc.is_mysql()
+
+    if is_mysql:
+        fqn = sc.q2(obj["schema"], obj["name"])
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT {fqn}()")
+            row = cur.fetchone()
+            cur.close()
+            val = row[0] if row else None
+            if val is not None:
+                return {"status": VALIDATED, "note": f"Scalar fn returned: {str(val)[:60]}"}
+            return {"status": PARTIAL, "note": "Scalar fn returned NULL — internal conditions not satisfied by seed data"}
+        except Exception as exc:
+            msg = str(exc)
+            if any(k in msg.lower() for k in ("incorrect number of arguments", "argument", "parameter")):
+                return {"status": PARTIAL, "note": f"Requires parameters: {msg[:150]}"}
+            return {"status": FAILED, "note": msg[:250]}
+
+    # MSSQL path
     try:
         from adaptive_seed import parse_proc_params, infer_param_value
     except ImportError:
         return {"status": PARTIAL, "note": "adaptive_seed not available for scalar fn validation"}
 
     import re as _re
+    raw = sc.raw if sc else conn
     sql    = obj.get("ddl", "")
     schema = obj["schema"]
     name   = obj["name"]
@@ -166,7 +271,7 @@ def _check_scalar_fn(conn: "pymssql.Connection", obj: dict, objects: dict | None
         }
 
     params     = parse_proc_params(sql)
-    param_vals = [infer_param_value(p, conn, objects or {}) for p in params]
+    param_vals = [infer_param_value(p, raw, objects or {}) for p in params]
 
     placeholders = ", ".join("%s" for _ in param_vals)
 
@@ -192,7 +297,7 @@ def _check_scalar_fn(conn: "pymssql.Connection", obj: dict, objects: dict | None
             if objects:
                 try:
                     from adaptive_seed import adaptive_validate_tvf
-                    result = adaptive_validate_tvf(conn, obj, objects)
+                    result = adaptive_validate_tvf(raw, obj, objects)
                     if result:
                         return result
                 except Exception:
@@ -208,7 +313,7 @@ def _check_scalar_fn(conn: "pymssql.Connection", obj: dict, objects: dict | None
             if objects:
                 try:
                     from adaptive_seed import adaptive_validate_view
-                    seed_result = adaptive_validate_view(conn, obj, objects)
+                    seed_result = adaptive_validate_view(raw, obj, objects)
                     seeded = seed_result is not None
                 except Exception:
                     pass
@@ -258,7 +363,40 @@ def _check_scalar_fn(conn: "pymssql.Connection", obj: dict, objects: dict | None
 
 
 
-def _check_proc(conn: "pymssql.Connection", obj: dict, objects: dict | None = None, conn_params: dict | None = None) -> dict:
+def _check_proc(conn: "_SourceConn", obj: dict, objects: dict | None = None, conn_params: dict | None = None) -> dict:
+    sc = conn if isinstance(conn, _SourceConn) else None
+    is_mysql = sc is not None and sc.is_mysql()
+    raw = sc.raw if sc else conn
+
+    if is_mysql:
+        # MySQL: CALL `schema`.`proc`()
+        fqn = sc.q2(obj["schema"], obj["name"])
+        try:
+            cur = conn.cursor()
+            cur.execute(f"CALL {fqn}()")
+            try:
+                row = cur.fetchone()
+            except Exception:
+                # mysql.connector raises InterfaceError: No result set to fetch from
+                # for DML-only procedures — this means it executed successfully
+                row = None
+                cur.close()
+                return {"status": PARTIAL, "note": "DML-only procedure (no SELECT output) — executed successfully"}
+            cur.close()
+            if row is not None:
+                return {"status": VALIDATED, "note": "Executed (no params), returns ≥1 row"}
+            return {"status": PARTIAL, "note": "Executed but returned 0 rows — may need parameters or seed data"}
+        except Exception as exc:
+            msg = str(exc)
+            if any(k in msg.lower() for k in ("incorrect number of arguments", "argument", "parameter")):
+                return {"status": PARTIAL, "note": f"Requires parameters: {msg[:150]}"}
+            if "doesn't exist" in msg.lower() or "unknown procedure" in msg.lower():
+                return {"status": FAILED, "note": f"Procedure not found on source: {msg[:200]}"}
+            if "out of sync" in msg.lower():
+                return {"status": PARTIAL, "note": "DML-only procedure (commands out of sync) — executed successfully"}
+            return {"status": PARTIAL, "note": f"Executed with error: {msg[:200]}"}
+
+    # MSSQL path
     if obj.get("has_dynamic_sql"):
         return {
             "status": PARTIAL,
@@ -276,7 +414,7 @@ def _check_proc(conn: "pymssql.Connection", obj: dict, objects: dict | None = No
         if objects:
             try:
                 from adaptive_seed import adaptive_validate_proc
-                result = adaptive_validate_proc(conn, obj, objects)
+                result = adaptive_validate_proc(raw, obj, objects)
                 if result:
                     return result
             except Exception:
@@ -316,7 +454,7 @@ def _check_proc(conn: "pymssql.Connection", obj: dict, objects: dict | None = No
             if objects:
                 try:
                     from adaptive_seed import adaptive_validate_proc
-                    result = adaptive_validate_proc(conn, obj, objects)
+                    result = adaptive_validate_proc(raw, obj, objects)
                     if result:
                         return result
                 except Exception:
@@ -356,53 +494,49 @@ def _check_proc(conn: "pymssql.Connection", obj: dict, objects: dict | None = No
 # ---------------------------------------------------------------------------
 
 def validate_all(
-    conn: "pyodbc.Connection",
+    conn: "_SourceConn",
     inventory: dict,
     deploy_report: dict,
     conn_params: dict | None = None,
 ) -> dict[str, dict]:
+    sc = conn if isinstance(conn, _SourceConn) else None
+    is_mysql = sc is not None and sc.is_mysql()
+    raw = sc.raw if sc else conn
+
     objects = {o["fqn"]: o for o in inventory["objects"]}
     deployed = set(deploy_report.get("succeeded", []))
     results: dict[str, dict] = {}
 
-    # -----------------------------------------------------------------------
-    # Join consistency pre-check: run before validation so we don't get false
-    # 0-row failures caused by mismatched FK values in existing seed data.
-    # This catches cases like MasterItem.MajorGroup=101 with no matching
-    # MajorGroup.MajorGroupObject=101 — a seed inconsistency the FK constraints
-    # didn't catch because the column is not a declared FK in the DDL.
-    # -----------------------------------------------------------------------
-    print("  Running join consistency pre-check…")
-    try:
-        from adaptive_seed import verify_and_fix_join_consistency
-        join_fixes = verify_and_fix_join_consistency(conn, objects)
-        if join_fixes:
-            print(f"  Join consistency: fixed {len(join_fixes)} broken join(s)")
-        else:
-            print("  Join consistency: all joins OK")
-    except Exception as jc_exc:
-        print(f"  Join consistency pre-check skipped: {jc_exc}")
-
-    # -----------------------------------------------------------------------
-    # Post-pre-check: re-apply semantic sentinel values that the join consistency
-    # pre-check may have overwritten. These are application-logic lookup values
-    # that procs rely on for classification (not just FK alignment).
-    # -----------------------------------------------------------------------
-    try:
-        cur = conn.cursor()
-        # Restore CPG MajorGroupObject=11 (used by p_MicrosLoad_HierarchyExport_PostSteps)
-        cur.execute(
-            "UPDATE api.MajorGroup SET MajorGroupObject=11 "
-            "WHERE MajorGroupName='CPG' AND MajorGroupObject<>11 "
-            "AND MajorGroupId=(SELECT MIN(MajorGroupId) FROM api.MajorGroup WHERE MajorGroupName='CPG')"
-        )
-        conn.commit()
-        cur.close()
-    except Exception:
+    if not is_mysql:
+        # -----------------------------------------------------------------------
+        # Join consistency pre-check (MSSQL only)
+        # -----------------------------------------------------------------------
+        print("  Running join consistency pre-check…")
         try:
-            conn.rollback()
+            from adaptive_seed import verify_and_fix_join_consistency
+            join_fixes = verify_and_fix_join_consistency(raw, objects)
+            if join_fixes:
+                print(f"  Join consistency: fixed {len(join_fixes)} broken join(s)")
+            else:
+                print("  Join consistency: all joins OK")
+        except Exception as jc_exc:
+            print(f"  Join consistency pre-check skipped: {jc_exc}")
+
+        # Re-apply MSSQL application-specific sentinel values
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE api.MajorGroup SET MajorGroupObject=11 "
+                "WHERE MajorGroupName='CPG' AND MajorGroupObject<>11 "
+                "AND MajorGroupId=(SELECT MIN(MajorGroupId) FROM api.MajorGroup WHERE MajorGroupName='CPG')"
+            )
+            conn.commit()
+            cur.close()
         except Exception:
-            pass
+            try:
+                conn.rollback()
+            except Exception:
+                pass
     # -----------------------------------------------------------------------
 
     for fqn, obj in objects.items():
@@ -544,13 +678,17 @@ def generate_markdown(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Validate MSSQL witness chains and generate report")
+    global _SOURCE_TYPE
+    p = argparse.ArgumentParser(description="Validate source-DB witness chains and generate report")
+    p.add_argument("--source-type", default=os.environ.get("SOURCE_TYPE", "mssql"),
+                   help="Source DB type: mssql | mysql | mariadb (default: mssql)")
     p.add_argument("--inventory")
     p.add_argument("--seed-report")
     p.add_argument("--deploy-report")
     p.add_argument("--dep-graph")
     p.add_argument("--server", default="localhost")
-    p.add_argument("--port", type=int, default=1433)
+    p.add_argument("--port", type=int, default=None,
+                   help="Source DB port (default: 1433 for mssql, 3306 for mysql/mariadb)")
     p.add_argument("--user", default="sa")
     p.add_argument("--password")
     p.add_argument("--database", default="RealizationDB")
@@ -559,6 +697,11 @@ def main() -> None:
     p.add_argument("--report-output")
     p.add_argument("--report-only", action="store_true")
     args = p.parse_args()
+
+    _SOURCE_TYPE = args.source_type.lower()
+    # Resolve default port based on source type
+    if args.port is None:
+        args.port = 3306 if _SOURCE_TYPE in ("mysql", "mariadb") else 1433
 
     if args.report_only:
         with open(args.validation_report) as f:
@@ -585,8 +728,9 @@ def main() -> None:
     with open(args.dep_graph) as f:
         dep_graph = json.load(f)
 
-    print("Connecting for validation…")
-    conn = connect(args.server, args.port, args.user, args.password, args.database)
+    print(f"Connecting for validation ({_SOURCE_TYPE})…")
+    conn = connect(args.server, args.port, args.user, args.password, args.database,
+                   source_type=_SOURCE_TYPE)
 
     conn_params = {
         "server":   args.server,

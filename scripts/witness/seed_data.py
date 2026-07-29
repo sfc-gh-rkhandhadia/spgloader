@@ -21,12 +21,6 @@ from datetime import date, timedelta
 from typing import Any
 
 try:
-    import pymssql
-except ImportError:
-    print("ERROR: pymssql not installed.", file=sys.stderr)
-    sys.exit(1)
-
-try:
     from faker import Faker
     _fake = Faker()
     Faker.seed(42)
@@ -36,14 +30,116 @@ except ImportError:
 random.seed(42)
 
 # ---------------------------------------------------------------------------
-# Connection
+# Source connector (MSSQL | MySQL | MariaDB)
 # ---------------------------------------------------------------------------
 
-def connect(server: str, port: int, user: str, password: str, database: str) -> "pymssql.Connection":
-    return pymssql.connect(
-        server=server, port=port, user=user, password=password,
-        database=database, timeout=10, login_timeout=10,
-    )
+_SOURCE_TYPE: str = "mssql"  # overridden by --source-type in main()
+
+
+class _SourceConn:
+    """Thin source-DB wrapper that normalises connection and SQL quoting."""
+
+    def __init__(self, source_type: str, server: str, port: int,
+                 user: str, password: str, database: str):
+        self._type = source_type.lower()
+        self._kw = dict(server=server, port=port, user=user,
+                        password=password, database=database)
+        self._raw: Any = None
+
+    # ── connection management ─────────────────────────────────────────────
+    def open(self) -> "_SourceConn":
+        if self._type == "mssql":
+            import pymssql  # type: ignore
+            self._raw = pymssql.connect(
+                server=self._kw["server"], port=self._kw["port"],
+                user=self._kw["user"], password=self._kw["password"],
+                database=self._kw["database"], timeout=10, login_timeout=10,
+            )
+        elif self._type in ("mysql", "mariadb"):
+            import mysql.connector  # type: ignore
+            self._raw = mysql.connector.connect(
+                host=self._kw["server"], port=self._kw["port"],
+                user=self._kw["user"], password=self._kw["password"],
+                database=self._kw["database"], connection_timeout=10,
+            )
+        else:
+            raise ValueError(f"seed_data.py does not support source_type={self._type!r}")
+        return self
+
+    def close(self) -> None:
+        if self._raw:
+            try:
+                self._raw.close()
+            except Exception:
+                pass
+
+    def cursor(self, as_dict: bool = False):
+        """Return a cursor; as_dict=True gives dict rows (MSSQL only for now)."""
+        if self._type == "mssql":
+            return self._raw.cursor(as_dict=as_dict)
+        return self._raw.cursor()
+
+    def commit(self) -> None:    self._raw.commit()
+    def rollback(self) -> None:  self._raw.rollback()
+
+    # ── SQL helpers ───────────────────────────────────────────────────────
+    def q(self, name: str) -> str:
+        """Quote an identifier (table/column name)."""
+        if self._type == "mssql":
+            return f"[{name}]"
+        return f"`{name}`"  # MySQL / MariaDB
+
+    def q2(self, schema: str, table: str) -> str:
+        """Return a schema-qualified quoted table reference."""
+        return f"{self.q(schema)}.{self.q(table)}"
+
+    def top_n(self, n: int) -> str:
+        """SELECT top-N syntax fragment."""
+        if self._type == "mssql":
+            return f"TOP {n}"
+        return ""  # MySQL/MariaDB uses LIMIT at the end
+
+    def limit_n(self, n: int) -> str:
+        if self._type == "mssql":
+            return ""
+        return f"LIMIT {n}"
+
+    def reset_auto_increment(self, schema: str, table: str, cur) -> None:
+        """Reset IDENTITY/AUTO_INCREMENT so the first insert gets ID = 1."""
+        tbl = self.q2(schema, table)
+        if self._type == "mssql":
+            cur.execute(f"DBCC CHECKIDENT ('{schema}.{table}', RESEED, 0)")
+        else:
+            cur.execute(f"ALTER TABLE {tbl} AUTO_INCREMENT = 1")
+
+    def col_lengths_query(self) -> str | None:
+        """Return a SQL query for column char-lengths, or None to skip clamping."""
+        if self._type == "mssql":
+            return """
+                SELECT c.name, c.max_length, tp.name
+                FROM sys.columns c
+                JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+                JOIN sys.tables t  ON c.object_id    = t.object_id
+                JOIN sys.schemas s ON t.schema_id    = s.schema_id
+                WHERE s.name = %s AND t.name = %s
+            """
+        # MySQL: information_schema gives CHARACTER_MAXIMUM_LENGTH directly
+        return """
+            SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH, DATA_TYPE
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+        """
+
+
+# Module-level connection helper (populated by main after parsing --source-type)
+_conn_factory: "_SourceConn | None" = None
+
+
+def connect(server: str, port: int, user: str, password: str, database: str):
+    """Open and return a source DB connection (type set via --source-type)."""
+    global _conn_factory
+    _conn_factory = _SourceConn(_SOURCE_TYPE, server, port, user, password, database)
+    return _conn_factory.open()
 
 
 # ---------------------------------------------------------------------------
@@ -55,40 +151,40 @@ def connect(server: str, port: int, user: str, password: str, database: str) -> 
 _COL_LENGTH_CACHE: dict[tuple, dict[str, int | None]] = {}
 
 
-def fetch_col_lengths(conn: "pymssql.Connection", schema: str, table: str) -> dict[str, int | None]:
-    """Return {col_name_lower: max_char_length | None} for every column in the table.
+def fetch_col_lengths(conn, schema: str, table: str) -> dict[str, int | None]:
+    """Return {col_name_lower: max_char_length | None} for every column.
 
-    Derives the maximum *character* length from sys.columns.max_length:
-      - char / varchar          : max_length bytes == max_length chars
-      - nchar / nvarchar        : max_length bytes == max_length // 2 chars
-      - any type with max_length = -1 (MAX types): None (unlimited)
-      - all other types         : None (not a string — clamping irrelevant)
-    Results are cached so we never hit sys.columns twice for the same table.
+    MSSQL: uses sys.columns (max_length in bytes; nvarchar divides by 2).
+    MySQL/MariaDB: uses information_schema.COLUMNS (CHARACTER_MAXIMUM_LENGTH).
+    Results cached to avoid repeated catalog hits.
     """
     key = (schema.lower(), table.lower())
     if key in _COL_LENGTH_CACHE:
         return _COL_LENGTH_CACHE[key]
 
+    sc = _conn_factory
+    if sc is None:
+        return {}
+    query = sc.col_lengths_query()
+    if query is None:
+        return {}
+
     cur = conn.cursor()
-    cur.execute("""
-        SELECT c.name, c.max_length, tp.name
-        FROM sys.columns c
-        JOIN sys.types tp ON c.user_type_id = tp.user_type_id
-        JOIN sys.tables t  ON c.object_id    = t.object_id
-        JOIN sys.schemas s ON t.schema_id    = s.schema_id
-        WHERE s.name = %s AND t.name = %s
-    """, (schema, table))
+    cur.execute(query, (schema, table))
     result: dict[str, int | None] = {}
-    for col_name, max_len, type_name in cur.fetchall():
-        tn = type_name.lower()
-        if max_len == -1:
-            result[col_name.lower()] = None          # MAX type, no limit
-        elif tn in ("nchar", "nvarchar", "ntext"):
-            result[col_name.lower()] = max_len // 2  # bytes → chars
-        elif tn in ("char", "varchar", "text"):
-            result[col_name.lower()] = max_len       # bytes == chars for single-byte types
-        else:
-            result[col_name.lower()] = None          # non-string type, clamping irrelevant
+    for row in cur.fetchall():
+        col_name, max_len, type_name = row[0], row[1], (row[2] or "").lower()
+        if sc._type == "mssql":
+            if max_len == -1:
+                result[col_name.lower()] = None
+            elif type_name in ("nchar", "nvarchar", "ntext"):
+                result[col_name.lower()] = max_len // 2
+            elif type_name in ("char", "varchar", "text"):
+                result[col_name.lower()] = max_len
+            else:
+                result[col_name.lower()] = None
+        else:  # MySQL / MariaDB — CHARACTER_MAXIMUM_LENGTH is already in chars
+            result[col_name.lower()] = int(max_len) if max_len is not None else None
     cur.close()
     _COL_LENGTH_CACHE[key] = result
     return result
@@ -281,7 +377,7 @@ def _placeholder(dtype: str, idx: int) -> Any:
 # ---------------------------------------------------------------------------
 
 def insert_and_readback(
-    conn: "pymssql.Connection",
+    conn,
     schema: str,
     table: str,
     columns: list[dict],
@@ -290,16 +386,20 @@ def insert_and_readback(
     """Insert `rows` into the table and read back ALL column values.
 
     Returns {col_name: [val, val, …]} for every non-IDENTITY column.
-    Reading back from the DB captures IDENTITY values automatically and gives
+    Reading back from the DB captures auto-increment values automatically and gives
     us the exact values that FK children must reference.
     """
+    sc = _conn_factory
+    q = sc.q if sc else (lambda n: f"[{n}]")
+    qt = sc.q2(schema, table) if sc else f"[{schema}].[{table}]"
+
     non_identity = [c for c in columns if not c.get("identity")]
     if not non_identity or not rows:
         return {}
 
-    col_clause   = ", ".join(f"[{c['name']}]" for c in non_identity)
+    col_clause   = ", ".join(q(c["name"]) for c in non_identity)
     placeholders = ", ".join("%s" for _ in non_identity)
-    sql_ins = f"INSERT INTO [{schema}].[{table}] ({col_clause}) VALUES ({placeholders})"
+    sql_ins = f"INSERT INTO {qt} ({col_clause}) VALUES ({placeholders})"
 
     cur = conn.cursor()
     inserted = 0
@@ -309,20 +409,21 @@ def insert_and_readback(
             cur.execute(sql_ins, vals)
             inserted += 1
         except Exception as exc:
-            # Log all failures; truncation (2628) errors now indicate a genuine
-            # gap in the length-clamping logic and should be visible, not hidden.
             err = str(exc)[:120]
-            if "2627" not in err:  # still suppress unique-constraint spam on re-runs
-                print(f"    Insert warn [{schema}].[{table}]: {err}")
+            # Suppress unique-constraint duplicates (2627/1062) to keep output tidy on re-runs
+            if "2627" not in err and "1062" not in err:
+                print(f"    Insert warn {qt}: {err}")
     conn.commit()
     cur.close()
 
     if inserted == 0:
         return {}
 
-    # Read back every column (including IDENTITY) so FK children can use real values
-    all_col_clause = ", ".join(f"[{c['name']}]" for c in columns)
-    sql_sel = f"SELECT TOP 200 {all_col_clause} FROM [{schema}].[{table}]"
+    # Read back every column (including IDENTITY/AUTO_INCREMENT) so FK children use real values
+    top = sc.top_n(200) if sc else "TOP 200"
+    lim = sc.limit_n(200) if sc else ""
+    all_col_clause = ", ".join(q(c["name"]) for c in columns)
+    sql_sel = f"SELECT {top} {all_col_clause} FROM {qt} {lim}".strip()
     cur = conn.cursor()
     cur.execute(sql_sel)
     db_rows = cur.fetchall()
@@ -342,7 +443,7 @@ def insert_and_readback(
 # ---------------------------------------------------------------------------
 
 def seed_table(
-    conn: "pymssql.Connection",
+    conn,
     obj: dict,
     col_fk: dict[str, tuple],          # col_fk_map[this_fqn]
     col_value_store: dict[str, dict],   # populated parent values
@@ -454,8 +555,11 @@ def main() -> None:
     p.add_argument("--inventory",     required=True)
     p.add_argument("--dep-graph",     required=True)
     p.add_argument("--deploy-report", required=True)
+    p.add_argument("--source-type", default=os.environ.get("SOURCE_TYPE", "mssql"),
+                   help="Source DB type: mssql | mysql | mariadb (default: mssql)")
     p.add_argument("--server",  default="localhost")
-    p.add_argument("--port",    type=int, default=1433)
+    p.add_argument("--port",    type=int, default=None,
+                   help="Port (default: 1433 for mssql, 3306 for mysql/mariadb)")
     p.add_argument("--user",    default="sa")
     p.add_argument("--password", required=True)
     p.add_argument("--database", default="RealizationDB")
@@ -464,6 +568,15 @@ def main() -> None:
     p.add_argument("--exclude-realistic-columns", default="")
     p.add_argument("--debug-object", default=None)
     args = p.parse_args()
+
+    global _SOURCE_TYPE
+    _SOURCE_TYPE = args.source_type.lower()
+
+    # Apply default port if not specified
+    port = args.port
+    if port is None:
+        port = 3306 if _SOURCE_TYPE in ("mysql", "mariadb") else 1433
+    args.port = port
 
     exclude_realistic = {
         c.strip().lower() for c in args.exclude_realistic_columns.split(",") if c.strip()
@@ -494,54 +607,83 @@ def main() -> None:
     print(f"FK column mappings: {fk_total} across {sum(1 for v in col_fk_map.values() if v)} tables")
 
     conn = connect(args.server, args.port, args.user, args.password, args.database)
+    sc = _conn_factory  # convenience alias
 
     # ------------------------------------------------------------------
-    # Clear existing data and reset IDENTITY counters to 0.
-    # IDENTITY counters don't reset on DELETE — if we re-seed after a previous
-    # run, IDENTITY PKs would start where they left off (e.g. 101+), breaking
-    # accidental JOIN alignment for tables without FK constraints.
+    # Clear existing data and reset auto-increment / IDENTITY counters.
     # ------------------------------------------------------------------
-    print("Clearing existing data and resetting IDENTITY counters…")
+    print("Clearing existing data and resetting auto-increment counters…")
     cur = conn.cursor()
-    # pymssql sends SET QUOTED_IDENTIFIER OFF by default, which breaks DELETE
-    # on tables with indexed views or computed columns.  Force it ON first.
-    cur.execute("SET QUOTED_IDENTIFIER ON")
-    cur.execute("EXEC sp_msforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL'")
-    conn.commit()
-    # Delete per-table individually with QUOTED_IDENTIFIER ON to avoid the
-    # sp_msforeachtable QUOTED_IDENTIFIER restriction
-    cur.execute("""
-        SELECT s.name + '.' + t.name
-        FROM sys.tables t
-        JOIN sys.schemas s ON s.schema_id = t.schema_id
-        ORDER BY s.name, t.name
-    """)
-    all_tables = [r[0] for r in cur.fetchall()]
-    for tbl in all_tables:
-        try:
-            cur.execute(f"SET QUOTED_IDENTIFIER ON; DELETE FROM [{tbl.replace('.', '].[')}]")
-            conn.commit()
-        except Exception:
-            conn.rollback()  # ignore tables that can't be cleared (views, etc.)
-    cur.execute("SET QUOTED_IDENTIFIER ON")
-    # Reset every IDENTITY column to 0 so first insert gets ID = 1
-    cur.execute("""
-        SELECT s.name + '.' + t.name
-        FROM sys.tables t
-        JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE OBJECTPROPERTY(t.object_id, 'TableHasIdentity') = 1
-    """)
-    identity_tables = [r[0] for r in cur.fetchall()]
-    for tbl in identity_tables:
-        try:
-            cur.execute(f"DBCC CHECKIDENT ('{tbl}', RESEED, 0)")
-        except Exception:
-            pass
-    conn.commit()
-    cur.execute("EXEC sp_msforeachtable 'ALTER TABLE ? WITH CHECK CHECK CONSTRAINT ALL'")
-    conn.commit()
-    cur.close()
-    print(f"  Cleared all rows; reset {len(identity_tables)} IDENTITY counters to 0")
+
+    if _SOURCE_TYPE == "mssql":
+        # pymssql sends SET QUOTED_IDENTIFIER OFF by default — force it ON.
+        cur.execute("SET QUOTED_IDENTIFIER ON")
+        cur.execute("EXEC sp_msforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL'")
+        conn.commit()
+        cur.execute("""
+            SELECT s.name + '.' + t.name
+            FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+            ORDER BY s.name, t.name
+        """)
+        all_tables = [r[0] for r in cur.fetchall()]
+        for tbl in all_tables:
+            try:
+                cur.execute(f"SET QUOTED_IDENTIFIER ON; DELETE FROM [{tbl.replace('.', '].[')}]")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+        cur.execute("SET QUOTED_IDENTIFIER ON")
+        cur.execute("""
+            SELECT s.name + '.' + t.name
+            FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE OBJECTPROPERTY(t.object_id, 'TableHasIdentity') = 1
+        """)
+        identity_tables = [r[0] for r in cur.fetchall()]
+        for tbl in identity_tables:
+            try:
+                cur.execute(f"DBCC CHECKIDENT ('{tbl}', RESEED, 0)")
+            except Exception:
+                pass
+        conn.commit()
+        cur.execute("EXEC sp_msforeachtable 'ALTER TABLE ? WITH CHECK CHECK CONSTRAINT ALL'")
+        conn.commit()
+        cur.close()
+        print(f"  Cleared all rows; reset {len(identity_tables)} IDENTITY counters to 0")
+    else:
+        # MySQL / MariaDB: disable FK checks, truncate tables, reset AUTO_INCREMENT
+        cur.execute("SET FOREIGN_KEY_CHECKS = 0")
+        cur.execute("""
+            SELECT TABLE_SCHEMA, TABLE_NAME
+            FROM information_schema.TABLES
+            WHERE TABLE_TYPE='BASE TABLE'
+              AND TABLE_SCHEMA = DATABASE()
+        """)
+        all_tables = cur.fetchall()
+        for schema_name, tname in all_tables:
+            tbl_ref = sc.q2(schema_name, tname)
+            try:
+                cur.execute(f"DELETE FROM {tbl_ref}")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+        # Reset AUTO_INCREMENT for tables that have it
+        cur.execute("""
+            SELECT TABLE_SCHEMA, TABLE_NAME
+            FROM information_schema.TABLES
+            WHERE TABLE_TYPE='BASE TABLE' AND AUTO_INCREMENT IS NOT NULL
+              AND TABLE_SCHEMA = DATABASE()
+        """)
+        auto_tables = cur.fetchall()
+        for schema_name, tname in auto_tables:
+            try:
+                sc.reset_auto_increment(schema_name, tname, cur)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+        cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+        conn.commit()
+        cur.close()
+        print(f"  Cleared all rows; reset {len(auto_tables)} AUTO_INCREMENT counters to 1")
 
     # col_value_store[fqn][col_name] = [committed values]
     # Built incrementally as we seed each table — children query parent values here
