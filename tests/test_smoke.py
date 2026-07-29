@@ -8,6 +8,7 @@ Covers:
   4. deprecated-patterns.yaml — structure valid, all 7 patterns present
   5. analyze_deprecated — scan function handles empty DDL list
   6. ddl conversion — basic table DDL round-trip via RuleLoader
+  7. parse_ddl — MySQL dialect support (raw SQL + ddl_objects passthrough)
 
 Run with:
     uv run --project /path/to/spgloader pytest tests/test_smoke.py -v
@@ -297,3 +298,295 @@ class TestAnalyzeDeprecated:
         ]
         result = self.mod.scan_objects(objects, self.patterns)
         assert "aspnet_membership" in result, f"Expected aspnet_membership match, got: {list(result.keys())}"
+
+
+# ---------------------------------------------------------------------------
+# parse_ddl — MySQL dialect
+# ---------------------------------------------------------------------------
+
+_MYSQL_TABLE_DDL = """
+CREATE TABLE `evdas`.`ev_drug` (
+  `record_id` int(11) NOT NULL AUTO_INCREMENT,
+  `drug_name` varchar(255) NOT NULL,
+  `dose_unit` text DEFAULT NULL,
+  `active` tinyint(1) DEFAULT 1,
+  PRIMARY KEY (`record_id`),
+  FOREIGN KEY (`fk_reaction_id`) REFERENCES `evdas`.`ev_reaction` (`reaction_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+"""
+
+_MYSQL_PROC_DDL = """
+DELIMITER $$
+CREATE DEFINER=`admin`@`%` PROCEDURE `evdas`.`proc_test`(IN p_id INT)
+BEGIN
+  SELECT drug_name FROM ev_drug WHERE record_id = p_id;
+END$$
+DELIMITER ;
+"""
+
+
+class TestParseDdlMySQL:
+    """parse_ddl.py MySQL dialect: raw SQL files and ddl_objects passthrough."""
+
+    @pytest.fixture(autouse=True)
+    def load_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "parse_ddl",
+            SKILL_ROOT / "scripts" / "witness" / "parse_ddl.py",
+        )
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_mysql_table_columns(self):
+        """CREATE TABLE with backtick quotes → columns populated, AUTO_INCREMENT → identity."""
+        stmts = self.mod.split_statements_mysql(_MYSQL_TABLE_DDL)
+        assert len(stmts) >= 1
+        stmt = self.mod.strip_mysql_header(stmts[0])
+        body = self.mod._extract_table_body(stmt)
+        result = self.mod.parse_table_body_mysql(body, "evdas")
+        assert len(result["columns"]) == 4
+        col_names = [c["name"] for c in result["columns"]]
+        assert "record_id" in col_names
+        assert "drug_name" in col_names
+        # AUTO_INCREMENT column marked as identity
+        identity_cols = [c["name"] for c in result["columns"] if c["identity"]]
+        assert identity_cols == ["record_id"]
+        # PK detected
+        assert result["pk_columns"] == ["record_id"]
+        # FK detected
+        assert len(result["fk_references"]) == 1
+        fk = result["fk_references"][0]
+        assert fk["ref_table"] == "ev_reaction"
+        assert fk["ref_schema"] == "evdas"
+
+    def test_mysql_raw_parse_objects(self):
+        """parse() with source_type=mysql detects TABLE, PROCEDURE, strips DEFINER."""
+        import tempfile, os
+        src = _MYSQL_TABLE_DDL + "\n" + _MYSQL_PROC_DDL
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as f:
+            f.write(src)
+            tmp = f.name
+        try:
+            inv = self.mod.parse(tmp, source_type="mysql", default_schema="evdas")
+            types = {o["type"] for o in inv["objects"]}
+            assert "TABLE" in types
+            assert "PROCEDURE" in types
+            # DEFINER must be stripped from procedure DDL
+            proc = next(o for o in inv["objects"] if o["type"] == "PROCEDURE")
+            assert "DEFINER" not in proc["ddl"]
+        finally:
+            os.unlink(tmp)
+
+    def test_ddl_objects_passthrough(self):
+        """enrich_from_ddl_objects() wraps a flat list and parses columns from DDL."""
+        import tempfile, os, json
+
+        ddl_objs = [
+            {
+                "type": "table",
+                "schema": "evdas",
+                "name": "ev_drug",
+                "fqn": "evdas.ev_drug",
+                "ddl": _MYSQL_TABLE_DDL.strip(),
+                "depends_on": [],
+            },
+            {
+                "type": "procedure",
+                "schema": "evdas",
+                "name": "proc_test",
+                "fqn": "evdas.proc_test",
+                "ddl": "CREATE PROCEDURE evdas.proc_test(IN p_id INT) BEGIN SELECT 1; END",
+                "depends_on": [],
+            },
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(ddl_objs, f)
+            tmp = f.name
+        try:
+            inv = self.mod.enrich_from_ddl_objects(tmp, "mysql", "evdas")
+            assert inv["summary"]["total"] == 2
+            assert inv["summary"]["by_type"]["TABLE"] == 1
+            # TABLE object should have columns enriched from DDL
+            tbl = next(o for o in inv["objects"] if o["type"] == "TABLE")
+            assert len(tbl.get("columns", [])) > 0, "Columns should be parsed from DDL"
+            col_names = [c["name"] for c in tbl["columns"]]
+            assert "record_id" in col_names
+            # Types normalised to uppercase
+            for o in inv["objects"]:
+                assert o["type"] == o["type"].upper()
+        finally:
+            os.unlink(tmp)
+
+    def test_backtick_re_create(self):
+        """RE_CREATE matches backtick-quoted schema.table names."""
+        m = self.mod.RE_CREATE.search(
+            "CREATE TABLE `mydb`.`my_table` ("
+        )
+        assert m is not None
+        assert m.group("schema") == "mydb"
+        assert m.group("name") == "my_table"
+
+    def test_mssql_path_unchanged(self):
+        """MSSQL path still works after MySQL additions."""
+        mssql_ddl = (
+            "CREATE TABLE [dbo].[orders] (\n"
+            "  [id] INT IDENTITY(1,1) NOT NULL,\n"
+            "  [amount] DECIMAL(10,2) NULL,\n"
+            "  PRIMARY KEY CLUSTERED ([id])\n"
+            ")\nGO\n"
+        )
+        inv = self.mod.parse.__wrapped__(mssql_ddl) if hasattr(
+            self.mod.parse, "__wrapped__"
+        ) else None
+        # Use split + parse_table_body_mssql directly
+        stmts = self.mod.split_statements_mssql(mssql_ddl)
+        assert len(stmts) == 1
+        body = self.mod._extract_table_body(stmts[0])
+        result = self.mod.parse_table_body_mssql(body)
+        assert len(result["columns"]) == 2
+        assert result["columns"][0]["identity"] is True
+        assert result["pk_columns"] == ["id"]
+
+
+# ---------------------------------------------------------------------------
+# parse_ddl — MySQL dialect
+# ---------------------------------------------------------------------------
+
+_MYSQL_TABLE_DDL = """
+CREATE TABLE `evdas`.`ev_drug` (
+  `record_id` int(11) NOT NULL AUTO_INCREMENT,
+  `drug_name` varchar(255) NOT NULL,
+  `dose_unit` text DEFAULT NULL,
+  `active` tinyint(1) DEFAULT 1,
+  PRIMARY KEY (`record_id`),
+  FOREIGN KEY (`fk_reaction_id`) REFERENCES `evdas`.`ev_reaction` (`reaction_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+"""
+
+_MYSQL_PROC_DDL = """
+DELIMITER $$
+CREATE DEFINER=`admin`@`%` PROCEDURE `evdas`.`proc_test`(IN p_id INT)
+BEGIN
+  SELECT drug_name FROM ev_drug WHERE record_id = p_id;
+END$$
+DELIMITER ;
+"""
+
+
+class TestParseDdlMySQL:
+    """parse_ddl.py MySQL dialect: raw SQL files and ddl_objects passthrough."""
+
+    @pytest.fixture(autouse=True)
+    def load_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "parse_ddl",
+            SKILL_ROOT / "scripts" / "witness" / "parse_ddl.py",
+        )
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_mysql_table_columns(self):
+        """CREATE TABLE with backtick quotes → columns populated, AUTO_INCREMENT → identity."""
+        stmts = self.mod.split_statements_mysql(_MYSQL_TABLE_DDL)
+        assert len(stmts) >= 1
+        stmt = self.mod.strip_mysql_header(stmts[0])
+        body = self.mod._extract_table_body(stmt)
+        result = self.mod.parse_table_body_mysql(body, "evdas")
+        assert len(result["columns"]) == 4
+        col_names = [c["name"] for c in result["columns"]]
+        assert "record_id" in col_names
+        assert "drug_name" in col_names
+        # AUTO_INCREMENT column marked as identity
+        identity_cols = [c["name"] for c in result["columns"] if c["identity"]]
+        assert identity_cols == ["record_id"]
+        # PK detected
+        assert result["pk_columns"] == ["record_id"]
+        # FK detected
+        assert len(result["fk_references"]) == 1
+        fk = result["fk_references"][0]
+        assert fk["ref_table"] == "ev_reaction"
+        assert fk["ref_schema"] == "evdas"
+
+    def test_mysql_raw_parse_objects(self):
+        """parse() with source_type=mysql detects TABLE, PROCEDURE, strips DEFINER."""
+        import tempfile, os
+        src = _MYSQL_TABLE_DDL + "\n" + _MYSQL_PROC_DDL
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as f:
+            f.write(src)
+            tmp = f.name
+        try:
+            inv = self.mod.parse(tmp, source_type="mysql", default_schema="evdas")
+            types = {o["type"] for o in inv["objects"]}
+            assert "TABLE" in types
+            assert "PROCEDURE" in types
+            # DEFINER must be stripped from procedure DDL
+            proc = next(o for o in inv["objects"] if o["type"] == "PROCEDURE")
+            assert "DEFINER" not in proc["ddl"]
+        finally:
+            os.unlink(tmp)
+
+    def test_ddl_objects_passthrough(self):
+        """enrich_from_ddl_objects() wraps a flat list and parses columns from DDL."""
+        import tempfile, os, json
+
+        ddl_objs = [
+            {
+                "type": "table",
+                "schema": "evdas",
+                "name": "ev_drug",
+                "fqn": "evdas.ev_drug",
+                "ddl": _MYSQL_TABLE_DDL.strip(),
+                "depends_on": [],
+            },
+            {
+                "type": "procedure",
+                "schema": "evdas",
+                "name": "proc_test",
+                "fqn": "evdas.proc_test",
+                "ddl": "CREATE PROCEDURE evdas.proc_test(IN p_id INT) BEGIN SELECT 1; END",
+                "depends_on": [],
+            },
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(ddl_objs, f)
+            tmp = f.name
+        try:
+            inv = self.mod.enrich_from_ddl_objects(tmp, "mysql", "evdas")
+            assert inv["summary"]["total"] == 2
+            assert inv["summary"]["by_type"]["TABLE"] == 1
+            # TABLE object should have columns enriched from DDL
+            tbl = next(o for o in inv["objects"] if o["type"] == "TABLE")
+            assert len(tbl.get("columns", [])) > 0, "Columns should be parsed from DDL"
+            col_names = [c["name"] for c in tbl["columns"]]
+            assert "record_id" in col_names
+            # Types normalised to uppercase
+            for o in inv["objects"]:
+                assert o["type"] == o["type"].upper()
+        finally:
+            os.unlink(tmp)
+
+    def test_backtick_re_create(self):
+        """RE_CREATE matches backtick-quoted schema.table names."""
+        m = self.mod.RE_CREATE.search("CREATE TABLE `mydb`.`my_table` (")
+        assert m is not None
+        assert m.group("schema") == "mydb"
+        assert m.group("name") == "my_table"
+
+    def test_mssql_path_unchanged(self):
+        """MSSQL bracket quoting and GO splitter still work after MySQL additions."""
+        mssql_ddl = (
+            "CREATE TABLE [dbo].[orders] (\n"
+            "  [id] INT IDENTITY(1,1) NOT NULL,\n"
+            "  [amount] DECIMAL(10,2) NULL,\n"
+            "  PRIMARY KEY CLUSTERED ([id])\n"
+            ")\nGO\n"
+        )
+        stmts = self.mod.split_statements_mssql(mssql_ddl)
+        assert len(stmts) == 1
+        body = self.mod._extract_table_body(stmts[0])
+        result = self.mod.parse_table_body_mssql(body)
+        assert len(result["columns"]) == 2
+        assert result["columns"][0]["identity"] is True
+        assert result["pk_columns"] == ["id"]
