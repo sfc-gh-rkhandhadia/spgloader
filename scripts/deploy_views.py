@@ -37,6 +37,8 @@ def _detect_source_schema(work_dir: Path) -> str:
         return "public"
     try:
         data = json.loads(ddl_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data = data.get("objects", [])
     except Exception:
         return "public"
     skip = {"", "sys", "information_schema", "guest", "public"}
