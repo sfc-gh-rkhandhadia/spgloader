@@ -20,6 +20,89 @@ Always expand `~` to the actual home directory in script paths.
 
 ## Workflow
 
+### Step 0: Choose Snowflake connection — REQUIRED FIRST
+
+**Do this before any SPG SQL.** The default IDE session may point to a different
+Snowflake account (e.g. SNOWHOUSE) that does not have SPG enabled. Using the wrong
+connection causes `SHOW POSTGRES INSTANCES` to hang or error silently.
+
+#### Step 0a: Read connections from connections.toml
+
+Read `~/.snowflake/connections.toml` directly — this is instant and works without
+network access. `tomllib` is built into Python 3.11+.
+
+```bash
+python3 -c "
+import tomllib, pathlib, sys
+
+p = pathlib.Path.home() / '.snowflake' / 'connections.toml'
+if not p.exists():
+    print('NOT_FOUND'); sys.exit(0)
+
+data = tomllib.loads(p.read_text())
+default_name = data.get('default_connection_name', '')
+
+for name, cfg in data.items():
+    if not isinstance(cfg, dict):
+        continue
+    marker = ' [default]' if name == default_name else ''
+    acct   = cfg.get('account', '')
+    role   = cfg.get('role', '')
+    user   = cfg.get('user', '')
+    # Never print password / token / private_key fields
+    print(f'{name}{marker} | account={acct} | role={role} | user={user}')
+"
+```
+
+Parse this output to build the list of connection names with their account/role.
+Identify the default connection (marked `[default]`) to use as `defaultValue`.
+
+#### Step 0b: Ask the user which connection to use
+
+Use `ask_user_question` with `type: options`, one option per connection read from
+the TOML. Each option's `label` is the connection name and `description` is
+`account=<acct> | role=<role>`.  Pre-select (`defaultAnswer`) whichever entry
+is marked `[default]`, or the first connection whose account/role suggests
+ACCOUNTADMIN on an SE/trial account if the default is obviously wrong (e.g. SNOWHOUSE).
+
+```
+header:       "Snowflake connection"
+question:     "Which Snowflake connection should be used for SPG provisioning?
+               (Must point to the account where the SPG instance will live.)"
+options:      <one per connection from Step 0a>
+defaultAnswer: <default connection name or best candidate>
+```
+
+Store the answer as `SF_SNOWFLAKE_CONNECTION`.
+
+#### Step 0c: Verify the connection is reachable
+
+```bash
+snow connection test -c "$SF_SNOWFLAKE_CONNECTION" 2>&1
+```
+
+Show the user the Account, Role, and Status from the output. Only continue if Status = OK.
+
+#### Step 0d: Test SPG feature availability on this connection
+
+```bash
+snow sql -c "$SF_SNOWFLAKE_CONNECTION" -q "SHOW POSTGRES INSTANCES;" --format json 2>&1 | head -5
+```
+
+- If it **errors** with "unsupported feature" or "syntax error near POSTGRES" → SPG is not
+  enabled on this account. Tell the user to verify regional availability and pick a different
+  connection. Do NOT proceed.
+- If it **succeeds** (even with zero rows) → feature is available. Continue.
+
+⚠️ **Never use `snowflake_sql_execute` for SPG SQL.** That tool uses the default IDE session
+which may point to a different account. All SPG commands (`SHOW/DESCRIBE/CREATE/ALTER/DROP
+POSTGRES INSTANCE`, network rules, network policies) must go through:
+```bash
+snow sql -c "$SF_SNOWFLAKE_CONNECTION" -q "<SQL>"
+```
+
+---
+
 ### If TARGET_SPG = existing
 
 #### Step 1: List saved SPG connections
@@ -76,17 +159,12 @@ uv run --project ~/sko-coco/spgloader \
 
 #### Step 5: Write target connection env
 
-Capture the active Snowflake connection name:
-```bash
-SF_CONN=$(snow connection list --format json | python3 -c \
-  "import json,sys; conns=json.load(sys.stdin); \
-   print(next((c['name'] for c in conns if c.get('is_default')), 'default'))")
-```
+Use `SF_SNOWFLAKE_CONNECTION` set in Step 0 (do not re-discover the default).
 
 Write `$SPGLOADER_WORK_DIR/target_conn.env`:
 ```
 TARGET_SPG_SERVICE=<instance_name>
-TARGET_SNOWFLAKE_CONNECTION=<sf_conn_name>
+TARGET_SNOWFLAKE_CONNECTION=$SF_SNOWFLAKE_CONNECTION
 TARGET_SNOWFLAKE_ROLE=ACCOUNTADMIN
 ```
 
@@ -164,17 +242,12 @@ of `MODE = POSTGRES_INGRESS`, which silently creates an unusable policy.
 
 #### Step 4: Write target connection env
 
-Capture the active Snowflake connection name:
-```bash
-SF_CONN=$(snow connection list --format json | python3 -c \
-  "import json,sys; conns=json.load(sys.stdin); \
-   print(next((c['name'] for c in conns if c.get('is_default')), 'default'))")
-```
+Use `SF_SNOWFLAKE_CONNECTION` set in Step 0 (do not re-discover the default).
 
 Write `$SPGLOADER_WORK_DIR/target_conn.env`:
 ```
 TARGET_SPG_SERVICE=<instance_name>
-TARGET_SNOWFLAKE_CONNECTION=<sf_conn_name>
+TARGET_SNOWFLAKE_CONNECTION=$SF_SNOWFLAKE_CONNECTION
 TARGET_SNOWFLAKE_ROLE=ACCOUNTADMIN
 ```
 

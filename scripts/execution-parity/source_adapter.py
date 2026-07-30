@@ -76,11 +76,10 @@ class SourceAdapter:
             )
         elif self.source_type == "oracle":
             import oracledb
-            dsn = oracledb.makedsn(
-                self.conf["host"],
-                self.conf["port"],
-                service_name=self.conf.get("service_name", self.conf["database"]),
-            )
+            host = self.conf["host"]
+            port = self.conf["port"]
+            svc  = self.conf.get("service_name") or self.conf["database"]
+            dsn  = f"{host}:{port}/{svc}"
             return oracledb.connect(
                 user=self.conf["user"],
                 password=self.conf["password"],
