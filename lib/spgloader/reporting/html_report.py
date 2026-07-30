@@ -86,6 +86,10 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     if not deploy_files and deploy_dir.exists():
         # spgloader MySQL/multi-db layout: deployment_<db>.json
         deploy_files = sorted(deploy_dir.glob("deployment_*.json"))
+    if not deploy_files and deploy_dir.exists():
+        # parallel_deploy.py per-db layout: <db>_deployment.json
+        deploy_files = [f for f in sorted(deploy_dir.glob("*_deployment.json"))
+                        if f.name != "deployment_summary.json"]
     if not deploy_files and summary_file.exists():
         deploy_files = [summary_file]
 
