@@ -118,7 +118,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
 
     # -- views deployment -------------------------------------------------
     vr         = _load_json(ws / "conversion" / "deploy_report.json")
-    if not vr.get("succeeded") and (ws / "conversion" / "fix_report.json").exists():
+    # Only fall back to fix_report.json when deploy_report.json is absent/empty.
+    # Do NOT fall back just because succeeded=[] — that's valid when all views failed deployment.
+    if not vr and (ws / "conversion" / "fix_report.json").exists():
         vr     = _load_json(ws / "conversion" / "fix_report.json")
     views_ok   = [_clean_name(n) for n in vr.get("succeeded", [])]
     views_fail = vr.get("failed", [])
