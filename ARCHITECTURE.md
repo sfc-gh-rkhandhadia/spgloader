@@ -93,8 +93,8 @@ spgloader/
     ├── fix-mappings/
     │   └── view-fixes.yaml                 # Generic view conversion config
     ├── prompts/
-    │   ├── procedure-repair-prompt.md      # MSSQL LLM repair prompt
-    │   └── procedure-repair-oracle-prompt.md
+    │   ├── procedure-repair-prompt.md      # MSSQL/MySQL/MariaDB LLM repair prompt
+    │   └── procedure-repair-oracle-prompt.md  # Oracle PL/SQL → PL/pgSQL repair prompt
     ├── docker-templates/
     │   ├── mssql-compose.yml
     │   ├── mysql-compose.yml
@@ -161,7 +161,8 @@ Phase 6.5  Witness validation
            → validation_chains.json
    │
 Phase 6.6  Structural parity
-           full_validation.py (MSSQL) or mysql_structural_parity.py (MySQL)
+           full_validation.py (MSSQL/Oracle) or mysql_structural_parity.py (MySQL/MariaDB)
+           source_adapter.py provides dialect-agnostic catalog access for all source types
            → parity_results.json
            ↓
            ask_user_question: execution parity? (MANDATORY STOPPING POINT)
@@ -254,16 +255,57 @@ $WORKSPACE/
 └── parity/parity_results.json
 ```
 
-### Multi-database MySQL migrations
+### Per-source schema and database handling
 
-MySQL migrations where the source has multiple databases (schemas in PG terms) are handled
-by running each phase once per database and merging the results:
+Each source type maps databases/schemas to PostgreSQL schemas differently:
 
-- `ddl_objects.json` — flat list across all databases; `schema` field = database name
-- `parallel_deploy.py` — creates one PG schema per MySQL database
-- `validate_chains.py` — run once per database, writing `chains_report_{db}.json`;
-  merged into `validation_chains.json` by the skill
-- `mysql_structural_parity.py` — takes `--databases "db1,db2,..."` comma-separated list
+#### SQL Server (MSSQL)
+
+SQL Server uses **schemas within a single database** (e.g., `dbo`, `hr`, `sales`).
+
+- The source connection specifies one database (`SOURCE_DATABASE=production_db`)
+- Each SQL Server schema maps to a PostgreSQL schema of the same name
+- `parallel_deploy.py` creates one PG schema per MSSQL schema
+- Object FQNs: `dbo.orders` → PG schema `dbo`, table `orders`
+- Multiple schemas in one database are extracted and deployed in a single pass
+
+#### MySQL / MariaDB
+
+MySQL uses **databases as the top-level namespace**, equivalent to schemas in PostgreSQL.
+
+- A single MySQL instance may contain many databases (e.g., `evdas`, `sapphire`, `ms`)
+- Each MySQL database maps to a PostgreSQL schema of the same name
+- **Multi-database migrations:** run extraction and conversion once per database, then merge:
+  - `ddl_objects.json` — flat list across all databases; `schema` field = database name
+  - `parallel_deploy.py` — creates one PG schema per MySQL database
+  - `validate_chains.py` — run once per database, writing `chains_report_{db}.json`;
+    merged into `validation_chains.json` by the skill
+  - `mysql_structural_parity.py` — takes `--databases "db1,db2,..."` comma-separated list
+  - Per-database validation files (`validation_{db}.json`) are merged at report time
+
+#### Oracle
+
+Oracle uses **schemas** (one schema per user/owner) within a single database instance.
+
+- The source connection specifies one database (`SOURCE_DATABASE=FREEPDB1`)
+- Each Oracle schema maps to a PostgreSQL schema of the same name
+- `ALL_*` catalog views give cross-schema access during extraction
+- Sequences in Oracle are first-class objects; `parallel_deploy.py` creates PG sequences from `ALL_SEQUENCES`
+- Oracle-specific type conversions: `NUMBER→NUMERIC`, `VARCHAR2→TEXT`, `DATE→TIMESTAMPTZ`,
+  `SYSDATE→NOW()`, `NVL→COALESCE`, `seq.NEXTVAL→NEXTVAL('seq')`
+- PL/SQL procedures use a separate LLM repair prompt: `procedure-repair-oracle-prompt.md`
+
+#### Structural parity routing
+
+| Source | Structural parity script |
+|---|---|
+| MSSQL | `parity/full_validation.py` — uses `sys.objects`, `sys.parameters` |
+| MySQL / MariaDB | `parity/mysql_structural_parity.py` — uses `INFORMATION_SCHEMA.ROUTINES` |
+| Oracle | `parity/full_validation.py` with `source_adapter.py` Oracle path — uses `ALL_PROCEDURES`, `ALL_ARGUMENTS` |
+
+`source_adapter.py` provides a dialect-agnostic interface over all three source catalogs so
+the execution-parity scripts (`source_proc_executor.py`, `validate_batch.py`) can run
+against any source type without modification.
 
 ---
 
