@@ -210,7 +210,20 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     witness_summary = witness_chains.get("summary", {})
     witness_ran     = bool(witness_results or witness_summary)
 
-    # -- parity testing (Phase 6.6) ----------------------------------------
+    # -- seed data (Phase 6.5) ------------------------------------------------
+    seed_report = _load_json(ws / "witness" / "seed_report.json")
+    seed_summary = seed_report.get("summary", {})
+    seed_tables  = seed_summary.get("tables_seeded", len(seed_report.get("seed_results", {})))
+    seed_zero    = seed_summary.get("tables_zero_rows", 0)
+    seed_skipped = seed_summary.get("tables_skipped", 0)
+    seed_volume  = seed_report.get("row_volume", 3)
+    seed_ran     = bool(seed_report and seed_tables > 0)
+
+    # -- SPG seed load (Phase 6.6 execution parity) ---------------------------
+    load_summary = _load_json(ws / "validation_shared" / "load_summary.json")
+    spg_rows_loaded  = load_summary.get("total_rows", 0)
+    spg_tables_loaded = load_summary.get("tables_loaded", 0)
+    spg_load_ran     = bool(load_summary)
     parity_report_md = ""
     parity_file = ws / "parity" / "parity_report.md"
     if parity_file.exists():
@@ -313,6 +326,15 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "witness_ran":      witness_ran,
         "witness_results":  witness_results,
         "witness_summary":  witness_summary,
+        # Seed data
+        "seed_ran":          seed_ran,
+        "seed_tables":       seed_tables,
+        "seed_zero":         seed_zero,
+        "seed_skipped":      seed_skipped,
+        "seed_volume":       seed_volume,
+        "spg_rows_loaded":   spg_rows_loaded,
+        "spg_tables_loaded": spg_tables_loaded,
+        "spg_load_ran":      spg_load_ran,
         # Parity (Phase 6.6)
         "parity_ran":         parity_ran,
         "parity_report_md":   parity_report_md,
@@ -777,8 +799,34 @@ def _build_witness_tab(data: dict) -> str:
 
     results  = data["witness_results"]
     summary  = data["witness_summary"]
+    seed_ran         = data.get("seed_ran", False)
+    seed_tables      = data.get("seed_tables", 0)
+    seed_zero        = data.get("seed_zero", 0)
+    seed_volume      = data.get("seed_volume", 3)
+    spg_load_ran     = data.get("spg_load_ran", False)
+    spg_rows_loaded  = data.get("spg_rows_loaded", 0)
+    spg_tables_loaded = data.get("spg_tables_loaded", 0)
 
-    # Summary cards
+    # Seed data KPI panel
+    seed_panel = ""
+    if seed_ran or spg_load_ran:
+        src_kpi = (
+            f"<div class='kpi-card'>"
+            f"<div class='num green'>{seed_tables:,}</div>"
+            f"<div class='label'>Tables Seeded (Source)</div>"
+            f"<div class='sub'>{seed_volume} rows each · {seed_zero} tables got 0 rows</div>"
+            f"</div>"
+        ) if seed_ran else ""
+        spg_kpi = (
+            f"<div class='kpi-card'>"
+            f"<div class='num green'>{spg_rows_loaded:,}</div>"
+            f"<div class='label'>Rows Loaded into SPG</div>"
+            f"<div class='sub'>across {spg_tables_loaded:,} tables</div>"
+            f"</div>"
+        ) if spg_load_ran else ""
+        seed_panel = f"""
+    <h3 style="margin-top:0;margin-bottom:10px">Seed Data</h3>
+    <div class="kpi-grid" style="margin-bottom:24px">{src_kpi}{spg_kpi}</div>"""
     cards = ""
     order = ["validated", "partially_validated", "failed", "unsupported", "skipped"]
     style_to_color = {"success": "green", "warn": "amber", "fail": "red", "muted": "muted"}
@@ -817,9 +865,10 @@ def _build_witness_tab(data: dict) -> str:
   <div class="section">
     <h2>Source-Side Witness Validation (Phase 6.5)</h2>
     <p class="small" style="color:var(--muted);margin-bottom:14px">
-      Synthetic 3-row dataset seeded into source DB. Views and procedures queried on MSSQL to confirm they execute and return rows.
+      Synthetic {seed_volume}-row dataset seeded into source DB. Views and procedures queried to confirm they execute and return rows.
       Parity testing against SPG is in the <strong>Equivalence Test</strong> tab.
     </p>
+    {seed_panel}
     <div class="summary-row">
       {cards}
     </div>
