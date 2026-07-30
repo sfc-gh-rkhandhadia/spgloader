@@ -144,20 +144,87 @@ halts until the user resolves all BLOCK findings. Phase 4 always checks
 `assessment_summary.json` for `is_blocked` before proceeding.
 
 **Phase 3.6 is automatic** — runs immediately after 3.5. If no deprecated patterns are
-detected, it completes silently. If patterns are detected, the user is shown each group
-and chooses a disposition (skip | migrate | modernize). Phase 4 reads
-`deprecated/deprecated_review.json` and excludes objects marked `skip`.
+detected, it completes silently. If patterns are detected, the user **must** be shown each
+group via `ask_user_question` and choose a disposition (skip | migrate | modernize). Phase 4
+reads `deprecated/deprecated_review.json` and excludes objects marked `skip`.
 
 ## Phase 3.6 — Deprecated Object Review
 
 See `references/migration-overview.md` for full detail.
 
+### Step 1: Run detection
+
 ```bash
+# ALWAYS use --non-interactive here — detection only, no stdin blocking
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/analyze_deprecated.py \
-  --work-dir "$SPGLOADER_WORK_DIR" [--non-interactive]
+  --work-dir "$SPGLOADER_WORK_DIR" --non-interactive
 ```
 
-If patterns are detected the user chooses skip | migrate | modernize per group.
+The `--non-interactive` flag auto-applies the default `skip` disposition. This is intentional —
+the SKILL overrides these defaults in Step 2 by asking the user.
+
+**NEVER treat this command as the final disposition decision.** Always proceed to Step 2.
+
+### Step 2: Present each detected group to the user
+
+Read the results and ask the user for EACH detected group. This is **mandatory** — even if
+the auto-disposition looks reasonable, the user must explicitly confirm.
+
+```python
+import json, pathlib
+
+review_path = pathlib.Path(f"{WORK_DIR}/deprecated/deprecated_review.json")
+review = json.loads(review_path.read_text())
+groups = review.get("groups", {})
+
+if not groups:
+    print("Phase 3.6: No deprecated patterns detected — continuing.")
+    # Jump to Phase 4 directly
+else:
+    # For each group, ask the user via ask_user_question
+    for group_key, group_data in groups.items():
+        # Present group to user (see template below)
+        # Record their choice
+        # Update review["groups"][group_key]["disposition"] = user_choice
+        pass
+
+    # Write updated dispositions back
+    review_path.write_text(json.dumps(review, indent=2))
+```
+
+Use this `ask_user_question` template for **each** detected group:
+
+```
+ask_user_question:
+  header: "<pattern_name>"
+  question: "Deprecated pattern detected: '<pattern_name>'
+
+             <N> objects matched:
+             <list first 5 FQNs, then "...and N more" if >5>
+
+             <pattern description>
+             Recommendation: <pattern recommendation>
+
+             What should happen with these objects?"
+  defaultAnswer: "Skip — exclude from migration (recommended)"
+  options:
+    - label: "Skip — exclude from migration (recommended)"
+      description: "Objects will NOT be converted or deployed to SPG.
+                    Views/procedures that only reference these objects will also be excluded."
+    - label: "Migrate — convert and deploy anyway"
+      description: "Objects will go through the full conversion pipeline.
+                    Results may be incomplete for deprecated frameworks.
+                    These objects will also appear in the Step 7.5 legacy group filter."
+    - label: "Modernize — flag for manual replacement"
+      description: "Objects are marked for replacement with a modern alternative.
+                    See deprecated_report.md for guidance on what to use instead."
+```
+
+Map answers to dispositions:
+- "Skip" → `"skip"`
+- "Migrate" → `"migrate"`
+- "Modernize" → `"modernize"`
+
 Phase 4 (`convert_objects.py`) reads `deprecated/deprecated_review.json` and skips excluded objects.
 
 ## Workspace Output Structure

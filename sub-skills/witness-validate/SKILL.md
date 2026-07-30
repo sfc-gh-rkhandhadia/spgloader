@@ -428,22 +428,33 @@ Parity Testing
 
 ---
 
-## Step 8.5 — Optional: Execution parity (behavioral execution + result-set comparison)
+## Step 8.5 — ⚠️ MANDATORY STOPPING POINT: Execution parity
+
+**Never auto-continue to Step 9 without presenting this choice to the user.**
+This prompt must always be shown immediately after Step 8 (structural parity) completes.
 
 The structural parity test (`full_validation.py`) checks parameter signatures, column
 names, and row counts. It does **not** execute functions/procedures or compare result
 set contents.
 
-For client sign-off or production readiness, ask the user:
+Execution parity goes further — it actually runs every object on both sides and hashes
+the result sets. This is the difference between "the function exists with the right signature"
+and "the function returns the same data on both MSSQL and SPG."
+
+Ask the user:
 
 ```
 ask_user_question:
-  header: "Deep Validation"
-  question: "The structural equivalence test is complete.
-             Do you want to run execution parity testing?
-             This executes every procedure and function on both the source DB
-             and SPG with identical parameters, compares result sets,
-             and generates a client-ready PowerPoint from live execution data."
+  header: "Execution Parity"
+  question: "Structural equivalence test is complete (signatures + row counts checked).
+
+             Execution parity testing goes further: it executes every procedure and
+             function on both the source DB and SPG with identical parameters, compares
+             result sets row-by-row via data hashing, writes verdicts to SPG audit tables,
+             and generates a Snowflake-branded PowerPoint sign-off deck.
+
+             Do you want to run execution parity testing?"
+  defaultAnswer: "Yes — run execution parity testing"
   options:
     - label: "Yes — run execution parity testing"
       description: "Executes all procedures/functions on both sides, compares outputs
@@ -452,7 +463,8 @@ ask_user_question:
                     Works with MSSQL, MySQL, MariaDB, and Oracle sources."
     - label: "No — structural check is sufficient"
       description: "Skip behavioral execution. The HTML report and parity_report.md
-                    are the sign-off artifacts."
+                    are the sign-off artifacts. You can always run execution parity
+                    separately by re-loading the execution-parity sub-skill."
 ```
 
 **If user chooses Yes:**

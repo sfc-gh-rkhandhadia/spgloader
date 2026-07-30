@@ -82,6 +82,86 @@ from `plpgsql-fixes.yaml` (generalizable SQL fixes: string concat `+`→`||`,
 
 ---
 
+### Step 4.5: Handle FIX-REQUIRED views
+
+`fix_views.py` marks views it cannot auto-convert with `-- FIX-REQUIRED: <reason>` at the top
+of the file. `deploy_views.py` silently skips these files — they never appear in `deploy_report.json`
+as failures, so the LLM repair loop in Step 7 never sees them.
+
+**Always check for FIX-REQUIRED files after deploy_views.py.**
+
+```python
+import json, pathlib
+
+wave_dir = pathlib.Path(f"{WORK_DIR}/conversion/postgres/wave_2_views_fixed")
+fix_required = []
+for f in sorted(wave_dir.glob("*.sql")):
+    text = f.read_text()
+    if text.lstrip().startswith("-- FIX-REQUIRED:"):
+        reason = text.split('\n')[0].replace('-- FIX-REQUIRED:', '').strip()
+        # Reconstruct FQN from filename: dbo__vw_foo.sql → dbo.vw_foo
+        fqn = f.stem.replace('__', '.', 1)
+        fix_required.append({"procedure": fqn, "file": str(f), "error": f"FIX-REQUIRED: {reason}"})
+
+if not fix_required:
+    print("Step 4.5: No FIX-REQUIRED views — all views were auto-converted.")
+else:
+    print(f"Step 4.5: {len(fix_required)} FIX-REQUIRED view(s) need repair:")
+    for v in fix_required:
+        print(f"  {v['procedure']}: {v['error']}")
+    json.dump({"failed": fix_required}, open("/tmp/fix_required_views.json", "w"), indent=2)
+```
+
+**If FIX-REQUIRED views exist, attempt LLM repair:**
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/repair_procedures.py \
+  --work-dir    "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE" \
+  --report-file "/tmp/fix_required_views.json" \
+  --wave-dir    "$SPGLOADER_WORK_DIR/conversion/postgres/wave_2_views_fixed" \
+  --workers 6
+```
+
+Then redeploy to pick up any repaired files:
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_views.py \
+  --work-dir "$SPGLOADER_WORK_DIR" \
+  --spg-service "$TARGET_SPG_SERVICE"
+```
+
+**⚠️ KNOWN LIMITATION — PIVOT views:** `repair_procedures.py` extracts PL/pgSQL from
+LLM responses (`$$...$$` blocks). Plain SQL views do not use this format, so LLM repair
+will fail with `could not extract PL/pgSQL from response` for views marked
+`FIX-REQUIRED: PIVOT`. In this case:
+
+1. Read the original source DDL file (from the SSMS export directory or `combined_ddl.sql`)
+2. Convert T-SQL `PIVOT` to PostgreSQL conditional aggregation manually:
+
+```sql
+-- T-SQL PIVOT pattern:
+SELECT * FROM (...) src
+PIVOT (MAX(Value) FOR FieldName IN ([col1], [col2], ...)) pvt
+
+-- PostgreSQL equivalent (conditional aggregation):
+SELECT
+    src.key_col1,
+    src.key_col2,
+    MAX(CASE WHEN src.FieldName = 'col1' THEN src.Value END) AS col1,
+    MAX(CASE WHEN src.FieldName = 'col2' THEN src.Value END) AS col2,
+    ...
+FROM (...) AS src
+GROUP BY src.key_col1, src.key_col2
+```
+
+3. Also strip MSSQL-specific table hints (`WITH (NOLOCK)`) and batch separators (`GO`)
+   before deploying the manually-converted file.
+
+After any manual conversion, re-run `deploy_views.py` to pick up the repaired files.
+
+---
+
 ### Step 5: Deploy functions
 
 ```bash
