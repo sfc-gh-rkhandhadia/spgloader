@@ -42,15 +42,15 @@ SPG_PASSWORD=$(awk "/\[$SPG_HOST\]/{found=1} found && /password/{print \$NF; exi
               grep "$SPG_HOST:*:$SPG_DATABASE:$SPG_USER:" ~/.pgpass | cut -d: -f5)
 ```
 
-**Witness validation and parity testing are mandatory.** Ask only which seeding mode to use:
+**Witness validation and parity testing run automatically as the next step in the migration flow.**
+Present the seeding mode prompt — do NOT add any "are you done?" gate between Phase 6 and this phase.
 
 ```
 ask_user_question:
   header: "Witness Validation"
-  question: "Phase 6 validation is complete. Proceeding to witness validation
-             (Phase 6.5) and parity testing (Phase 6.6).
+  question: "Proceeding to witness validation (Phase 6.5) and parity testing (Phase 6.6).
 
-             Choose how to run the witness phase:"
+             How should the witness phase run?"
   defaultAnswer: <see routing below>
   options:
     - label: "Full — seed synthetic data + validate + parity"        [Docker/SPCS only]
@@ -63,12 +63,18 @@ ask_user_question:
       description: "Run chain validation against existing data in the source DB,
                     then parity-test on SPG. Correct for customer instances and
                     existing environments where seeding is not safe."
+
+    - label: "Skip — go straight to final report"
+      description: "Skip witness validation and parity testing. The Witness and
+                    Equivalence Test tabs will show 'Not Run' in the migration
+                    report. Use this only if you intend to run them separately."
 ```
 
 **Routing rules (automatic, no user input needed):**
-- `SOURCE_ENV = docker` or `SOURCE_ENV = spcs` → offer both options; default to "Full"
-- `SOURCE_ENV = existing` or `SOURCE_ENV = none` → automatically use "validate + parity only"
-  (do NOT prompt; just announce: "Source is an existing instance — skipping synthetic seeding")
+- `SOURCE_ENV = docker` or `SOURCE_ENV = spcs` → offer all three options; default to "Full"
+- `SOURCE_ENV = existing` or `SOURCE_ENV = none` → offer "Validate + parity only" and "Skip"; default to "Validate + parity only"
+
+If user chooses **Skip**: jump directly to Step 10 (regenerate HTML report + display final summary).
 
 Store choice as:
 - `DO_SEED` = true | false
