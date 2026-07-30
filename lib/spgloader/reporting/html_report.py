@@ -1165,8 +1165,9 @@ def render_html(data: dict) -> str:
       <div class="chart-container"><canvas id="typeChart"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Migration Success</h3>
+      <h3>Deployment Status</h3>
       <div class="chart-container"><canvas id="successChart"></canvas></div>
+      {'<p style="text-align:center;color:var(--red);font-size:12px;margin-top:6px">&#9888; ' + str(total_fail_objs) + ' objects failed deployment</p>' if total_fail_objs else '<p style="text-align:center;color:var(--green);font-size:12px;margin-top:6px">&#10003; All objects deployed successfully</p>'}
     </div>
   </div>
 
@@ -1174,10 +1175,10 @@ def render_html(data: dict) -> str:
   <div class="print-chart-summary" style="display:none;gap:12px;flex-wrap:wrap;margin-bottom:24px;padding:16px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
     <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--blue)">{total_tables:,}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Tables</div></div>
     <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--blue)">{total_indexes:,}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Indexes</div></div>
-    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--green)">{total_views}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Views</div></div>
-    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--green)">{total_funcs}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Functions</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'green' if not views_fail else 'red'})">{total_views}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Views</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'green' if not funcs_fail else 'red'})">{total_funcs}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Functions</div></div>
     <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'amber' if procs_fail else 'green'})">{total_procs}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Procedures</div></div>
-    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--green)">{round(total_ok_objs/(total_ok_objs+total_fail_objs)*100) if (total_ok_objs+total_fail_objs) else 100}%</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Success Rate</div></div>
+    <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'red' if total_fail_objs else 'green'})">{round(total_ok_objs/(total_ok_objs+total_fail_objs)*100) if (total_ok_objs+total_fail_objs) else 100}%</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Success Rate</div></div>
   </div>
 
   <div class="section">
