@@ -102,9 +102,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         schemas[db] = {
             "tables_ok":    phases.get("tables",      {}).get("ok",   0),
             "tables_total": phases.get("tables",      {}).get("ok",   0)
-                          + phases.get("tables",      {}).get("fail", 0),
+                          + (phases.get("tables",     {}).get("failed", 0) or phases.get("tables",  {}).get("fail", 0)),
             "indexes_ok":   phases.get("indexes",     {}).get("ok",   0),
-            "indexes_fail": phases.get("indexes",     {}).get("fail", 0),
+            "indexes_fail": (phases.get("indexes",    {}).get("failed", 0) or phases.get("indexes", {}).get("fail", 0)),
             "seqs_ok":      phases.get("sequences",   {}).get("ok",   0),
             "fk_benign":    fk_benign,
             "fk_real":      fk_real,
@@ -1116,6 +1116,8 @@ def render_html(data: dict) -> str:
 <!-- ═══════════════════════════ OVERVIEW ═══════════════════════════ -->
 <div class="tab-panel active" id="tab-overview">
 
+  {'<div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:6px;margin-bottom:20px"><strong style="color:#dc2626">&#9888; ' + str(total_fail_objs) + ' object(s) are NOT in your SPG instance</strong><div style="font-size:13px;margin-top:4px;color:#111">The following objects exist in the source database but were not deployed to SPG: ' + ', '.join(filter(None, [str(len(views_fail)) + ' views' if views_fail else '', str(len(funcs_fail)) + ' functions' if funcs_fail else '', str(len(procs_fail)) + ' procedures' if procs_fail else ''])) + '. Check the Deployment tab for details and fix the errors to deploy them.</div></div>' if total_fail_objs else ''}
+
   <div class="kpi-grid">
     <div class="kpi-card" data-tip="Base tables (CREATE TABLE) migrated from the source database. Temporary and derived tables are excluded. All source tables should appear here at 100%.">
       <div class="num green">{total_tables:,}</div>
@@ -1129,22 +1131,22 @@ def render_html(data: dict) -> str:
       <div class="sub" style="color:var(--{'red' if sum(s['indexes_fail'] for s in schemas.values()) else 'green'})">0 failed</div>
       <div class="sub">{sum(s['indexes_fail'] for s in schemas.values())} skipped</div>
     </div>
-    <div class="kpi-card" data-tip="CREATE VIEW objects converted from source SQL dialect to PostgreSQL-compatible syntax and deployed to SPG.">
-      <div class="num green">{total_views}</div>
-      <div class="label">Views<span class="tip-icon">ⓘ</span></div>
-      <div class="sub" style="color:var(--{'red' if views_fail else 'green'})">{len(views_fail)} failed</div>
+    <div class="kpi-card" data-tip="CREATE VIEW objects deployed to SPG. Objects shown as 'not in SPG' exist in the source but failed deployment and are absent from your target database.">
+      <div class="num {'red' if (not total_views and views_fail) else ('amber' if (total_views and views_fail) else 'green')}">{total_views}</div>
+      <div class="label">Views in SPG<span class="tip-icon">ⓘ</span></div>
+      <div class="sub" style="color:var(--{'red' if views_fail else 'green'})">{len(views_fail)} not in SPG</div>
       <div class="sub">0 skipped</div>
     </div>
-    <div class="kpi-card" data-tip="Scalar and table-valued functions (UDFs) converted to PL/pgSQL. Failed functions are first attempted by the rule engine, then by LLM repair.">
-      <div class="num green">{total_funcs}</div>
-      <div class="label">Functions<span class="tip-icon">ⓘ</span></div>
-      <div class="sub" style="color:var(--{'red' if funcs_fail else 'green'})">{len(funcs_fail)} failed</div>
+    <div class="kpi-card" data-tip="Scalar and table-valued functions deployed to SPG. Objects shown as 'not in SPG' failed deployment and are absent from your target database.">
+      <div class="num {'red' if (not total_funcs and funcs_fail) else ('amber' if (total_funcs and funcs_fail) else 'green')}">{total_funcs}</div>
+      <div class="label">Functions in SPG<span class="tip-icon">ⓘ</span></div>
+      <div class="sub" style="color:var(--{'red' if funcs_fail else 'green'})">{len(funcs_fail)} not in SPG</div>
       <div class="sub">0 skipped</div>
     </div>
-    <div class="kpi-card" data-tip="Stored procedures converted from source dialect (T-SQL / PL/SQL / MySQL) to PL/pgSQL. Failures first go through rule-based repair, then LLM repair. Remaining failures need manual review.">
-      <div class="num {'green' if not procs_fail else 'amber'}">{total_procs}</div>
-      <div class="label">Procedures<span class="tip-icon">ⓘ</span></div>
-      <div class="sub" style="color:var(--{'red' if procs_fail else 'green'})">{len(procs_fail)} failed</div>
+    <div class="kpi-card" data-tip="Stored procedures deployed to SPG. Failed procedures are NOT in the target database. They go through rule-based then LLM repair — remaining failures need manual review.">
+      <div class="num {'red' if (not total_procs and procs_fail) else ('amber' if (total_procs and procs_fail) else 'green')}">{total_procs}</div>
+      <div class="label">Procedures in SPG<span class="tip-icon">ⓘ</span></div>
+      <div class="sub" style="color:var(--{'red' if procs_fail else 'green'})">{len(procs_fail)} not in SPG</div>
       <div class="sub">{len(procs_legacy)} legacy skipped</div>
     </div>
     <div class="kpi-card" data-tip="Procedures and functions that failed initial conversion and were successfully repaired by the Cortex AI LLM repair loop. &#39;Still failing&#39; = objects that exceeded the repair budget and require manual intervention.">
@@ -1185,7 +1187,7 @@ def render_html(data: dict) -> str:
     <h2>Migration Summary</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Category</th><th style="text-align:right">Deployed</th><th style="text-align:right">Failed</th><th style="text-align:right">Skipped</th><th>Notes</th></tr></thead>
+        <thead><tr><th>Category</th><th style="text-align:right">In SPG &#10003;</th><th style="text-align:right">Not in SPG &#10007;</th><th style="text-align:right">Skipped</th><th>Notes</th></tr></thead>
         <tbody>
           <tr>
             <td>Tables</td>
@@ -1287,8 +1289,8 @@ def render_html(data: dict) -> str:
         </colgroup>
         <thead><tr>
           <th style="text-align:left">Object Type</th>
-          <th style="text-align:right">Deployed</th>
-          <th style="text-align:right">Failed</th>
+          <th style="text-align:right">In SPG &#10003;</th>
+          <th style="text-align:right">Not in SPG &#10007;</th>
           <th style="text-align:right">Fixed by Rules</th>
           <th style="text-align:right">Fixed by LLM</th>
           <th style="text-align:right">Still Failing</th>
@@ -1517,7 +1519,7 @@ new Chart(document.getElementById('typeChart'), {{
 new Chart(document.getElementById('successChart'), {{
   type: 'doughnut',
   data: {{
-    labels: ['Success', 'Failed'],
+    labels: ['In SPG', 'Not in SPG'],
     datasets: [{{ data: [{total_ok_objs}, {total_fail_objs}],
       backgroundColor: ['#16a34a', '#dc2626'], borderWidth: 0 }}]
   }},
