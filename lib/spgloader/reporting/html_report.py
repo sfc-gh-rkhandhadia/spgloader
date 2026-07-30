@@ -1212,7 +1212,7 @@ def render_html(data: dict) -> str:
             <td class="num ok">{total_views}</td>
             <td class="num {'fail' if views_fail else 'ok'}">{len(views_fail)}</td>
             <td class="num muted">0</td>
-            <td class="small">Rule conversion + auto-fixes applied</td>
+            <td class="small">{len([n for n in still_failed if n in {v.lower() for v in views_all}])} still failing after LLM repair</td>
           </tr>
           <tr>
             <td>Functions</td>
@@ -1226,8 +1226,9 @@ def render_html(data: dict) -> str:
             <td class="num {'ok' if not procs_fail else 'amber'}">{total_procs}</td>
             <td class="num {'fail' if procs_fail else 'ok'}">{len(procs_fail)}</td>
             <td class="num muted">{len(procs_legacy)}</td>
-            <td class="small">{len(still_failed)} still failing after LLM repair · {len(procs_legacy)} legacy skipped</td>
+            <td class="small">{len(procs_legacy)} legacy skipped{' · ' + str(len([n for n in still_failed if n in {p.lower() for p in procs_all}])) + ' still failing after LLM repair' if any(n in {p.lower() for p in procs_all} for n in still_failed) else ''}</td>
           </tr>
+          {'<tr><td colspan="5" class="small" style="background:var(--bg-subtle);color:var(--muted);padding:6px 12px">&#9881; LLM Repair — Fixed by rules: ' + str(len(rule_fixed)) + ' &nbsp;·&nbsp; Fixed by LLM: ' + str(len(llm_fixed)) + ' &nbsp;·&nbsp; Still failing (all types): ' + str(len(still_failed)) + '</td></tr>' if still_failed or llm_fixed or rule_fixed else ''}
         </tbody>
       </table>
     </div>
