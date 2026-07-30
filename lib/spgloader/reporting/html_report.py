@@ -129,6 +129,7 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     views_ok   = [_clean_name(n) for n in vr.get("succeeded", [])]
     views_fail = vr.get("failed", [])
     views_fixed = [_clean_name(n) for n in vr.get("auto_fixed", [])]
+    views_skip = [_clean_name(n) for n in vr.get("skipped", [])]
 
     # -- functions deployment ---------------------------------------------
     fr         = _load_json(ws / "conversion" / "functions_deploy_report.json")
@@ -303,6 +304,7 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "views_ok":       views_ok,
         "views_fail":     views_fail,
         "views_fixed":    views_fixed,
+        "views_skip":     views_skip,
         # Functions
         "funcs_ok":       funcs_ok,
         "funcs_fail":     funcs_fail,
@@ -892,6 +894,7 @@ def render_html(data: dict) -> str:
     views_ok     = data["views_ok"]
     views_fail   = data["views_fail"]
     views_fixed  = data["views_fixed"]
+    views_skip   = data.get("views_skip", [])
     funcs_ok     = data["funcs_ok"]
     funcs_fail   = data["funcs_fail"]
     procs_ok     = data["procs_ok"]
@@ -1190,7 +1193,7 @@ def render_html(data: dict) -> str:
       <div class="num {'red' if (not total_views and views_fail) else ('amber' if (total_views and views_fail) else 'green')}">{total_views}</div>
       <div class="label">Views in SPG<span class="tip-icon">ⓘ</span></div>
       <div class="sub" style="color:var(--{'red' if views_fail else 'green'})">{len(views_fail)} not in SPG</div>
-      <div class="sub">0 skipped</div>
+      <div class="sub">{len(data.get('views_skip', []))} skipped</div>
     </div>
     <div class="kpi-card" data-tip="Scalar and table-valued functions deployed to SPG. Objects shown as 'not in SPG' failed deployment and are absent from your target database.">
       <div class="num {'red' if (not total_funcs and funcs_fail) else ('amber' if (total_funcs and funcs_fail) else 'green')}">{total_funcs}</div>
@@ -1269,7 +1272,7 @@ def render_html(data: dict) -> str:
             <td>Views</td>
             <td class="num ok">{total_views}</td>
             <td class="num {'fail' if views_fail else 'ok'}">{len(views_fail)}</td>
-            <td class="num muted">0</td>
+            <td class="num {'fail' if views_fail else ('amber' if views_skip else 'ok')}">{len(views_skip)}</td>
             <td class="small">{len([n for n in still_failed if n in {v.lower() for v in views_all}])} still failing after LLM repair</td>
           </tr>
           <tr>
@@ -1359,7 +1362,7 @@ def render_html(data: dict) -> str:
             <td class="num ok">{len(views_fixed)}</td>
             <td class="num muted">—</td>
             <td class="num ok">0</td>
-            <td class="num muted">0</td>
+            <td class="num {'amber' if views_skip else 'muted'}">{len(views_skip)}</td>
           </tr>
           <tr>
             <td><strong>Functions</strong></td>
