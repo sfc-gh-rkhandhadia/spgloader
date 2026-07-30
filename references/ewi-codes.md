@@ -34,6 +34,12 @@ All BLOCK and WARN codes map directly to rules in `references/spg-compatibility.
 | `SPG-WARN-006` | Non-Postgres FDW | Only `postgres_fdw` available | `FOREIGN DATA WRAPPER oracle_fdw/mysql_fdw/tds_fdw` | Use `postgres_fdw` or remove FDW dependency |
 | `SPG-WARN-007` | Cursor loop in procedure | Cursors supported but review recommended | `DECLARE cursor`, `OPEN cursor`, `FETCH cursor` | Review converted PL/pgSQL; consider set-based rewrite |
 | `SPG-WARN-008` | Dynamic SQL dialect syntax | PG EXECUTE syntax differs | `EXECUTE IMMEDIATE`, `sp_executesql`, `PREPARE ... FROM` | Review converted EXECUTE statement |
+| `SPG-WARN-009` | PIVOT expression in view | Auto-converts to CTE; FIX-REQUIRED if parse fails | `PIVOT(` in view DDL | Verify `wave_2_views_fixed/` after Phase 4; manually rewrite if FIX-REQUIRED |
+| `SPG-WARN-010` | UDTT parameter in procedure | Cannot auto-migrate table-valued params | `READONLY` or `TABLE TYPE` in proc params | Rewrite to temp table or JSON parameter; object excluded from execution parity |
+| `SPG-WARN-011` | Cross-database reference in MySQL view | No cross-DB access in PostgreSQL | Three-part `db.schema.table` name in MySQL view DDL | Include the referenced DB in migration scope or use `postgres_fdw` |
+| `SPG-WARN-012` | Potential UNION branch type mismatch | PG requires exact type compat across UNION branches | UNION with mixed date and text expressions | Add explicit `CAST` to the mismatched branch if deploy fails |
+| `SPG-WARN-013` | Potential implicit integer/text coercion in JOIN | PG requires explicit cast | `ObjectKey` (varchar) joined to an integer ID column | Add `::integer` or `::text` to the JOIN ON clause |
+| `SPG-WARN-014` | TINYINT(1) mapping choice required (MySQL) | TINYINT(1) may be boolean flag or small integer | `TINYINT(1)` columns in MySQL/MariaDB schema | Skill will ask: BOOLEAN (convention) or SMALLINT (numeric) |
 
 ---
 
@@ -94,6 +100,6 @@ $$ LANGUAGE plpgsql;
 | Severity | Count | Migration impact |
 |----------|-------|-----------------|
 | BLOCK | 8 codes | Hard stop — must resolve before migration |
-| WARN | 8 codes | Confirmation required — acknowledge before proceeding |
+| WARN | 14 codes | Confirmation required — acknowledge before proceeding |
 | RESOLVE | 5 codes | Advisory — pre-deploy extensions auto-generated |
 | INFO | 13+ codes | Annotation only — no stop |

@@ -109,6 +109,50 @@ Use `ask_user_question` for this confirmation.
 If the user says **no**: stop and return control.
 If the user says **yes**: proceed to Phase 4.
 
+### Step 4.5: ⚠️ TINYINT(1) mapping choice (MySQL / MariaDB only)
+
+If `assessment_summary.json` has `tinyint1_count > 0`, ask the user how to map these columns.
+This must be asked **before** Phase 4 conversion begins so the choice can be applied consistently.
+
+```python
+import json, pathlib
+summary = json.loads(pathlib.Path(f"{WORK_DIR}/assessment/assessment_summary.json").read_text())
+tinyint1_count = summary.get("tinyint1_count", 0)
+```
+
+If `tinyint1_count > 0`:
+
+```
+ask_user_question:
+  header: "TINYINT(1) mapping"
+  question: "<tinyint1_count> column(s) use TINYINT(1).
+
+             In MySQL, TINYINT(1) is the conventional boolean flag (0/1 → false/true).
+             Some schemas also use TINYINT(1) for small numeric values (counters, status codes).
+
+             How should TINYINT(1) columns be mapped in Snowflake Postgres?"
+  defaultAnswer: "BOOLEAN (MySQL convention — recommended)"
+  options:
+    - label: "BOOLEAN (MySQL convention — recommended)"
+      description: "Map to PG BOOLEAN. Values 0→false, 1→true. Best choice for
+                    flag columns (is_active, deleted, enabled, archived)."
+    - label: "SMALLINT (preserve as numeric)"
+      description: "Map to PG SMALLINT. Values remain 0/1 as integers. Choose
+                    if TINYINT(1) is used for counters or small numeric values in your schema."
+```
+
+Write the user's choice back into `assessment_summary.json`:
+
+```python
+summary["tinyint1_mapping"] = "boolean"   # or "smallint"
+pathlib.Path(f"{WORK_DIR}/assessment/assessment_summary.json").write_text(json.dumps(summary, indent=2))
+```
+
+Phase 4 `convert_objects.py` and `parallel_deploy.py` read `tinyint1_mapping` from this file
+and apply the correct type consistently across all TINYINT(1) columns.
+
+If `tinyint1_count == 0` (no TINYINT(1) found, or not a MySQL/MariaDB migration): skip this step.
+
 ### Step 5: Deploy extension prerequisites (if any)
 
 If `assessment/pre_deploy_extensions.sql` was generated, display it to the user:

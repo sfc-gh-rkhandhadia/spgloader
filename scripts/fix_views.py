@@ -77,6 +77,22 @@ def fix_patterns(sql: str, cfg: dict) -> tuple[str, list[str]]:
             sql = new
             fixes.append(f"single_quoted_alias: {n} occurrences")
 
+    if cfg.get("double_quoted_alias"):
+        # AS "MixedCase"  →  AS mixedcase  (double-quoted aliases create case-sensitive
+        # PG identifiers; normalise to lowercase unquoted to prevent downstream failures
+        # when outer queries reference the alias without quoting).
+        def _lc_dq_alias(m: re.Match) -> str:
+            alias = m.group(1)
+            lower = alias.lower()
+            if re.match(r"^[a-z_][a-z0-9_]*$", lower):
+                return f"AS {lower}"
+            return f'AS "{lower}"'
+
+        new, n = re.subn(r'\bAS\s+"([^"]+)"', _lc_dq_alias, sql, flags=re.IGNORECASE)
+        if n:
+            sql = new
+            fixes.append(f"double_quoted_alias: {n} occurrences")
+
     if cfg.get("column_equals_alias"):
         # T-SQL: alias = expression  →  expression AS alias  (line-start form)
         def _swap(m: re.Match) -> str:

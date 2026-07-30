@@ -53,6 +53,11 @@ pattern_fixes:
   # T-SQL:   col AS 'Alias'  →  col AS lowercased_alias (plain identifier)
   single_quoted_alias: true
 
+  # T-SQL:   col AS "MixedCase"  →  col AS mixedcase
+  # Double-quoted aliases create case-sensitive PG identifiers.
+  # Normalise to lowercase unquoted to prevent outer queries from failing.
+  double_quoted_alias: true
+
   # T-SQL:   alias = expression  (column alias on left of =, at line start)
   # PG:      expression AS alias
   column_equals_alias: true

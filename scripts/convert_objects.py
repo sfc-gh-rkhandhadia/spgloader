@@ -951,6 +951,18 @@ def main():
     # reflects the user's ask_user_question decisions.  Do NOT read
     # skip_objects directly — that flat list is written at scan time and
     # is not updated when the user changes a group from "skip" to "migrate".
+
+    # ── Read assessment summary for user-prompted choices (Phase 3.5) ────
+    # tinyint1_mapping: "boolean" | "smallint" — set by skill based on user answer
+    tinyint1_as_boolean: bool = True  # default: MySQL convention
+    assessment_path = work_dir / "assessment" / "assessment_summary.json"
+    if assessment_path.exists():
+        try:
+            assessment_summary = json.loads(assessment_path.read_text())
+            mapping = assessment_summary.get("tinyint1_mapping", "boolean")
+            tinyint1_as_boolean = (mapping == "boolean")
+        except Exception:
+            pass
     skip_fqns: set[str] = set()
     review_path = work_dir / "deprecated" / "deprecated_review.json"
     if review_path.exists():
@@ -1012,6 +1024,14 @@ def main():
             continue
 
         wave = wave_map[obj_type]
+
+        # ── MySQL/MariaDB: apply TINYINT(1) mapping before conversion ─────
+        # User's choice (from Phase 3.5 assessment prompt) determines whether
+        # TINYINT(1) maps to BOOLEAN or stays as TINYINT (→ SMALLINT via YAML).
+        if source_type in ("mysql", "mariadb") and tinyint1_as_boolean:
+            ddl = re.sub(
+                r'\bTINYINT\s*\(\s*1\s*\)', 'BOOLEAN', ddl, flags=re.IGNORECASE
+            )
 
         # ── Dispatch by source type ───────────────────────────────────────
         if source_type == "oracle":

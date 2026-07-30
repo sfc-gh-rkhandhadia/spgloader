@@ -481,3 +481,18 @@ body_transforms:
     replacement: '\1\2'
     flags:       [IGNORECASE]
     view_only:   true
+
+
+  # ── New rules from migration analysis ────────────────────────────────────
+
+  - name:        if_update_col
+    description: "IF UPDATE(col) → IF TG_OP = 'UPDATE' AND NEW.col IS DISTINCT FROM OLD.col  (T-SQL trigger per-column change check)"
+    pattern:     '\bIF\s+UPDATE\s*\(\s*(\w+)\s*\)'
+    replacement: "IF TG_OP = 'UPDATE' AND NEW.\\1 IS DISTINCT FROM OLD.\\1"
+    flags:       [IGNORECASE]
+
+  - name:        dedupe_cast_text
+    description: "CAST(CAST(expr AS TEXT) AS TEXT) → CAST(expr AS TEXT)  (redundant nested CAST from multi-pass conversion)"
+    pattern:     '\bCAST\s*\(\s*CAST\s*\(\s*([^()]+)\s+AS\s+TEXT\s*\)\s+AS\s+TEXT\s*\)'
+    replacement: 'CAST(\1 AS TEXT)'
+    flags:       [IGNORECASE]

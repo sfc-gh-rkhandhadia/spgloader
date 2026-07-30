@@ -98,6 +98,7 @@ class AssessmentResult:
     catalog_eligible: list[str] = field(default_factory=list)    # fqns (tables for parallel_deploy.py)
     llm_required: list[str] = field(default_factory=list)        # fqns
     conversion_confidence: float = 1.0
+    tinyint1_count: int = 0   # MySQL: TINYINT(1) occurrences — skill will ask BOOLEAN vs SMALLINT
 
     @property
     def is_blocked(self) -> bool:
@@ -123,6 +124,7 @@ class AssessmentResult:
             "extension_prereqs": self.extension_prereqs,
             "catalog_eligible": self.catalog_eligible,
             "llm_required": self.llm_required,
+            "tinyint1_count": self.tinyint1_count,
         }
 
 
@@ -167,6 +169,11 @@ class SPGCompatibilityAssessment:
             self._check_cursor_usage(ddl, fqn, obj_type, result)
             self._check_dynamic_sql(ddl, fqn, obj_type, source_type, result)
             self._check_protected_config(ddl, fqn, obj_type, result)
+            self._check_pivot_views(ddl, fqn, obj_type, result)
+            self._check_udt_parameters(ddl, fqn, obj_type, result)
+            self._check_cross_db_refs(ddl, fqn, obj_type, result, source_type)
+            self._check_union_type_mismatch(ddl, fqn, obj_type, result)
+            self._check_implicit_type_coercion(ddl, fqn, obj_type, result)
 
             # --- RESOLVE checks ---
             self._check_uuid_functions(ddl, fqn, obj_type, result, prereqs_added)
@@ -192,6 +199,9 @@ class SPGCompatibilityAssessment:
             ))
             result.extension_prereqs.append("orafce")
             prereqs_added.add("orafce")
+
+        # --- Schema-level checks (run after per-object loop) ---
+        self._check_tinyint1_mapping(objects, source_type, result)
 
         # Count-based BLOCK checks
         role_count = sum(1 for o in objects if "CREATE ROLE" in (o.get("ddl") or "").upper())
@@ -443,6 +453,131 @@ class SPGCompatibilityAssessment:
             ))
             result.extension_prereqs.append("pgcrypto")
             prereqs_added.add("pgcrypto")
+
+    # ----------------------------------------------------------------
+    # New WARN checks (added from migration analysis)
+    # ----------------------------------------------------------------
+
+    def _check_tinyint1_mapping(self, objects: list[dict], source_type: str, result: "AssessmentResult"):
+        """Schema-level: count TINYINT(1) columns in MySQL/MariaDB migrations.
+        The skill will ask the user BOOLEAN vs SMALLINT based on this count."""
+        if source_type not in ("mysql", "mariadb"):
+            return
+        import re as _re
+        count = sum(
+            len(_re.findall(r'\bTINYINT\s*\(\s*1\s*\)', obj.get("ddl", ""), _re.IGNORECASE))
+            for obj in objects
+            if obj.get("type") in ("table", "TABLE")
+        )
+        if count:
+            result.tinyint1_count = count
+            result.warn_findings.append(Finding(
+                code="SPG-WARN-014",
+                severity=EWISeverity.WARN,
+                title=f"TINYINT(1) mapping choice required ({count} occurrence(s))",
+                object_fqn="(schema-wide)",
+                object_type="table",
+                detail=(
+                    f"{count} column(s) use TINYINT(1). "
+                    "TINYINT(1) is MySQL's boolean convention but some schemas use it "
+                    "for small numeric values. The skill will ask how to map these columns."
+                ),
+            ))
+
+    def _check_pivot_views(self, ddl: str, fqn: str, obj_type: str, result: "AssessmentResult"):
+        """MSSQL: PIVOT syntax requires CTE rewrite — warn if auto-conversion may fail."""
+        if obj_type == "view" and re.search(r'\bPIVOT\s*\(', ddl, re.IGNORECASE):
+            result.warn_findings.append(Finding(
+                code="SPG-WARN-009",
+                severity=EWISeverity.WARN,
+                title="PIVOT expression in view",
+                object_fqn=fqn,
+                object_type=obj_type,
+                detail=(
+                    "PIVOT is auto-converted to conditional aggregation (CTE). "
+                    "If conversion fails, the view is marked FIX-REQUIRED and skipped during deployment. "
+                    "Verify output in wave_2_views_fixed/ after Phase 4 conversion."
+                ),
+            ))
+
+    def _check_udt_parameters(self, ddl: str, fqn: str, obj_type: str, result: "AssessmentResult"):
+        """MSSQL: User-Defined Table Type parameters cannot be auto-migrated."""
+        if obj_type in ("procedure", "function") and re.search(
+            r'\bREADONLY\b|\bTABLE\s+TYPE\b|\bAS\s+TABLE\s*\(', ddl, re.IGNORECASE
+        ):
+            result.warn_findings.append(Finding(
+                code="SPG-WARN-010",
+                severity=EWISeverity.WARN,
+                title="User-Defined Table Type (UDTT) parameter",
+                object_fqn=fqn,
+                object_type=obj_type,
+                detail=(
+                    "Procedure/function uses a table-valued parameter (UDTT) which cannot be "
+                    "directly migrated to PostgreSQL. This object will be excluded from execution "
+                    "parity testing. Consider rewriting to use a temporary table or JSON parameter."
+                ),
+            ))
+
+    def _check_cross_db_refs(self, ddl: str, fqn: str, obj_type: str, result: "AssessmentResult", source_type: str):
+        """MySQL/MariaDB: cross-database references in views won't work in PG."""
+        if source_type not in ("mysql", "mariadb"):
+            return
+        if obj_type == "view" and re.search(r'\b\w+\.\w+\.\w+\b', ddl):
+            result.warn_findings.append(Finding(
+                code="SPG-WARN-011",
+                severity=EWISeverity.WARN,
+                title="Cross-database reference in MySQL view",
+                object_fqn=fqn,
+                object_type=obj_type,
+                detail=(
+                    "View contains a three-part name referencing a table in another MySQL database. "
+                    "PostgreSQL does not support cross-database queries. "
+                    "Include the referenced database in the migration scope or use postgres_fdw."
+                ),
+            ))
+
+    def _check_union_type_mismatch(self, ddl: str, fqn: str, obj_type: str, result: "AssessmentResult"):
+        """MSSQL/MySQL: UNION with mixed date and text expressions — PG requires exact type compat."""
+        if obj_type != "view":
+            return
+        if not re.search(r'\bUNION\b', ddl, re.IGNORECASE):
+            return
+        has_date = re.search(r'\bCURRENT_DATE\b|\bCURRENT_TIMESTAMP\b|\bGETDATE\s*\(\s*\)|\bNOW\s*\(\s*\)', ddl, re.IGNORECASE)
+        has_text_cast = re.search(r"CAST\s*\([^)]+AS\s+(?:TEXT|VARCHAR|NVARCHAR)\s*\)", ddl, re.IGNORECASE)
+        if has_date and has_text_cast:
+            result.warn_findings.append(Finding(
+                code="SPG-WARN-012",
+                severity=EWISeverity.WARN,
+                title="Potential UNION branch type mismatch (date vs text)",
+                object_fqn=fqn,
+                object_type=obj_type,
+                detail=(
+                    "View uses UNION with mixed date and text expressions. "
+                    "PostgreSQL requires exact type compatibility across all UNION branches. "
+                    "If deployment fails with 'UNION types cannot be matched', add an explicit CAST "
+                    "to the mismatched branch (e.g., '::date' or '::text')."
+                ),
+            ))
+
+    def _check_implicit_type_coercion(self, ddl: str, fqn: str, obj_type: str, result: "AssessmentResult"):
+        """MSSQL: ObjectKey (varchar) joined to integer ID columns — PG requires explicit cast."""
+        if obj_type != "view":
+            return
+        if (re.search(r'\bObjectKey\b', ddl, re.IGNORECASE)
+                and re.search(r'\b(?:OrderID|ItemID|ClientID|VendorID|UserID|PersonID)\b', ddl, re.IGNORECASE)):
+            result.warn_findings.append(Finding(
+                code="SPG-WARN-013",
+                severity=EWISeverity.WARN,
+                title="Potential implicit integer/text coercion in JOIN",
+                object_fqn=fqn,
+                object_type=obj_type,
+                detail=(
+                    "View joins a varchar column (ObjectKey) to an integer ID column. "
+                    "T-SQL coerces types implicitly; PostgreSQL requires an explicit cast. "
+                    "If deployment fails with 'operator does not exist: integer = text', "
+                    "add '::integer' or '::text' to the JOIN ON clause."
+                ),
+            ))
 
 
 def format_report(result: AssessmentResult, source_desc: str = "") -> str:
