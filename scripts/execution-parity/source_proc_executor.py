@@ -249,7 +249,56 @@ def exec_func(schema, func_name, param_info, obj_type='IF', override_params=None
                 'result_sets': [], 'total_result_sets': 0, 'total_rows': 0, 'error': str(e)}
 
 
+def _exec_proc_mysql(schema, proc_name, param_info):
+    """Execute a MySQL/MariaDB stored procedure using CALL syntax.
+    IN params get %s (NULL), OUT/INOUT params get @out_N user variables."""
+    conn = _adapter.connect()
+    cur  = conn.cursor()
+    parts = []
+    bind_vals = []
+    for i, p in enumerate(param_info):
+        if p.get('is_output', False):
+            parts.append('@_out_%d' % i)
+        else:
+            parts.append('%s')
+            bind_vals.append(None)
+    call_str = 'CALL `%s`.`%s`(%s)' % (schema, proc_name, ', '.join(parts))
+    params_used = bind_vals
+    try:
+        cur.execute(call_str, params_used)
+    except Exception as e:
+        conn.close()
+        return {'status': 'ERROR', 'call_string': call_str,
+                'params_used': params_used, 'param_source': 'typed_nulls',
+                'result_sets': [], 'total_result_sets': 0, 'total_rows': 0, 'error': str(e)}
+    result_sets = []
+    while True:
+        if cur.description:
+            cols = [d[0] for d in cur.description]
+            try:
+                rows = [serialize_row(r) for r in cur.fetchall()]
+            except Exception as fe:
+                conn.close()
+                return {'status': 'ERROR', 'call_string': call_str,
+                        'params_used': params_used, 'param_source': 'typed_nulls',
+                        'result_sets': result_sets, 'total_result_sets': len(result_sets),
+                        'total_rows': sum(r['row_count'] for r in result_sets), 'error': str(fe)}
+            result_sets.append({'columns': cols, 'rows': rows, 'row_count': len(rows)})
+        try:
+            if not cur.nextset(): break
+        except: break
+    conn.close()
+    return {'status': 'SUCCESS', 'call_string': call_str,
+            'params_used': params_used, 'param_source': 'typed_nulls',
+            'sampled_table': None, 'sample_query': None,
+            'result_sets': result_sets, 'total_result_sets': len(result_sets),
+            'total_rows': sum(r['row_count'] for r in result_sets), 'error': None}
+
+
 def exec_proc(schema, proc_name, override_params, param_info, proc_def=''):
+    if SOURCE_TYPE in ('mysql', 'mariadb'):
+        return _exec_proc_mysql(schema, proc_name, param_info)
+
     conn = _adapter.connect()
     cur  = conn.cursor()
 
