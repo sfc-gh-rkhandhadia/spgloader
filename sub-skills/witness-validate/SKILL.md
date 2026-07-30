@@ -20,11 +20,7 @@ From `spgloader/SKILL.md` after Phase 6 (schema validation) completes.
 
 ---
 
-## Step 1 — Ask user
-
-> **This phase is part of the standard migration workflow and MUST always be presented to the user.**
-> Never skip silently — the Witness and Equivalence Test tabs in the migration report will show
-> "Not Run" if this phase is omitted. Always ask; let the user decide.
+## Step 1 — Choose seeding mode
 
 Load connection info first:
 
@@ -46,46 +42,36 @@ SPG_PASSWORD=$(awk "/\[$SPG_HOST\]/{found=1} found && /password/{print \$NF; exi
               grep "$SPG_HOST:*:$SPG_DATABASE:$SPG_USER:" ~/.pgpass | cut -d: -f5)
 ```
 
-Then ask (**always ask — never auto-skip**):
+**Witness validation and parity testing are mandatory.** Ask only which seeding mode to use:
 
 ```
 ask_user_question:
   header: "Witness Validation"
-  question: "Phase 6 schema validation is complete. Witness validation
-             (Phase 6.5) and Equivalence Testing (Phase 6.6) are the
-             next steps. Skipping will leave those tabs empty in the
-             migration report. How would you like to proceed?"
-  defaultAnswer: "Yes — full (seed + validate + parity)"
+  question: "Phase 6 validation is complete. Proceeding to witness validation
+             (Phase 6.5) and parity testing (Phase 6.6).
+
+             Choose how to run the witness phase:"
+  defaultAnswer: <see routing below>
   options:
-    - label: "Yes — full (seed + validate + parity)"                    [RECOMMENDED]
-      description: "Generate 3-row synthetic dataset, confirm source
-                    views/procs return rows, then run same queries on SPG
-                    and diff results. Witness + Equivalence tabs will be
-                    fully populated in the report.
-                    [Only available when source is Docker or SPCS]"
-      # Only show this option if SOURCE_ENV == "docker" or SOURCE_ENV == "spcs"
+    - label: "Full — seed synthetic data + validate + parity"        [Docker/SPCS only]
+      description: "Generate 3-row synthetic dataset, confirm source views/procs
+                    return rows, then compare same queries on SPG and diff results.
+                    Recommended for Docker and SPCS source environments."
+      # Show only if SOURCE_ENV == "docker" or SOURCE_ENV == "spcs"
 
-    - label: "Yes — validate + parity only (no seeding)"
-      description: "Validate views/procs against existing data in source DB,
-                    then parity-test on SPG. Safe for customer's own instance.
-                    Witness + Equivalence tabs will be populated."
-
-    - label: "No — skip (not recommended)"
-      description: "Skip Phases 6.5 and 6.6. The Witness and Equivalence Test
-                    tabs will show 'Not Run' in the migration report.
-                    Only choose this if you intend to run them separately."
+    - label: "Validate + parity only (no seeding)"
+      description: "Run chain validation against existing data in the source DB,
+                    then parity-test on SPG. Correct for customer instances and
+                    existing environments where seeding is not safe."
 ```
 
-**If SOURCE_ENV is `existing` or `none`:** show "validate + parity only" as the [RECOMMENDED] default and "skip" as the last option.
-**If SOURCE_ENV is `docker` or `spcs`:** show all three options with "full" as [RECOMMENDED].
-
-**NEVER auto-skip.** If the user does not answer, default to "Yes — full" (or "validate + parity only" for existing instances).
-
-If user explicitly chooses "No — skip": jump to Step 8 (update report, done).
+**Routing rules (automatic, no user input needed):**
+- `SOURCE_ENV = docker` or `SOURCE_ENV = spcs` → offer both options; default to "Full"
+- `SOURCE_ENV = existing` or `SOURCE_ENV = none` → automatically use "validate + parity only"
+  (do NOT prompt; just announce: "Source is an existing instance — skipping synthetic seeding")
 
 Store choice as:
 - `DO_SEED` = true | false
-- `DO_WITNESS` = true | false
 
 ---
 

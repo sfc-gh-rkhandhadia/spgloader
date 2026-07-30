@@ -135,7 +135,11 @@ Execute phases in order. Load each sub-skill, execute its full workflow, then co
 | **6.5** | **`sub-skills/witness-validate/SKILL.md`** | **Witness validation: seed synthetic data (Docker/SPCS) + confirm views/procs return rows on source** |
 | **6.6** | **`sub-skills/witness-validate/SKILL.md`** | **Parity testing: same queries on SPG, diff results, sign-off report** |
 
-**Phase 6.5 and 6.6 are optional** — the sub-skill asks the user at the start of Phase 6.5 whether to proceed.
+**Phase 6, 6.5, and 6.6 are mandatory.** Phase 6 runs schema validation and generates `validation_report.json`.
+Phase 6.5 runs witness validation (seeding + chain validation). Phase 6.6 runs structural and execution parity
+and generates the sign-off report. These phases cannot be skipped — the Validation, Witness, and Equivalence
+Test tabs in the migration report will be empty without them.
+
 If source is an existing customer instance (`SOURCE_ENV=existing`), synthetic seeding is automatically
 skipped; only `validate_chains` + parity run against existing data.
 
@@ -285,8 +289,8 @@ Phase 3.6: Deprecated Review     ← pending / in_progress / skipped / completed
 Phase 4: Conversion              ← pending / in_progress / completed
 Phase 5: Deploy                  ← pending / in_progress / completed
 Phase 6: Validate                ← pending / in_progress / completed
-Phase 6.5: Witness Validation    ← pending / in_progress / skipped / completed
-Phase 6.6: Parity Testing        ← pending / in_progress / skipped / completed
+Phase 6.5: Witness Validation    ← pending / in_progress / completed
+Phase 6.6: Parity Testing        ← pending / in_progress / completed
 ```
 
 ## Mandatory Stopping Points
