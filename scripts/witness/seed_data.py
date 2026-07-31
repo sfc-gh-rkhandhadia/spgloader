@@ -150,6 +150,39 @@ def connect(server: str, port: int, user: str, password: str, database: str):
 # None means the column is a MAX-length type (varchar(max), etc.) — no clamping.
 _COL_LENGTH_CACHE: dict[tuple, dict[str, int | None]] = {}
 
+# Cache: (schema, table) -> set of identity column names (lowercase) — MSSQL only.
+# Queried from sys.columns.is_identity rather than DDL text, because extract_ddl.py
+# omits IDENTITY(1,1) from the DDL output, causing parse_ddl.py to set identity=False.
+_IDENTITY_COL_CACHE: dict[tuple, set[str]] = {}
+
+
+def fetch_identity_cols_mssql(conn, schema: str, table: str) -> set[str]:
+    """MSSQL only: return set of identity column names (lowercase) for this table.
+
+    Queries sys.columns.is_identity directly — more reliable than DDL text parsing
+    because extract_ddl.py omits IDENTITY(1,1) from the DDL it stores in ddl_objects.json.
+    Returns an empty set for MySQL/MariaDB (AUTO_INCREMENT does not need IDENTITY_INSERT).
+    """
+    sc = _conn_factory
+    if sc is None or sc._type != "mssql":
+        return set()
+    key = (schema.lower(), table.lower())
+    if key in _IDENTITY_COL_CACHE:
+        return _IDENTITY_COL_CACHE[key]
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT c.name "
+        "FROM sys.columns c "
+        "JOIN sys.tables t ON c.object_id = t.object_id "
+        "JOIN sys.schemas s ON t.schema_id = s.schema_id "
+        "WHERE s.name = %s AND t.name = %s AND c.is_identity = 1",
+        (schema, table),
+    )
+    cols = {row[0].lower() for row in cur.fetchall()}
+    cur.close()
+    _IDENTITY_COL_CACHE[key] = cols
+    return cols
+
 
 def fetch_col_lengths(conn, schema: str, table: str) -> dict[str, int | None]:
     """Return {col_name_lower: max_char_length | None} for every column.
@@ -393,18 +426,38 @@ def insert_and_readback(
     q = sc.q if sc else (lambda n: f"[{n}]")
     qt = sc.q2(schema, table) if sc else f"[{schema}].[{table}]"
 
-    non_identity = [c for c in columns if not c.get("identity")]
-    if not non_identity or not rows:
+    # MSSQL: query the live catalog to find identity columns.
+    # parse_ddl.py sets identity=False for all MSSQL columns because extract_ddl.py
+    # omits IDENTITY(1,1) from the DDL text it writes to ddl_objects.json.
+    # Querying sys.columns.is_identity is the only reliable detection path.
+    identity_col_names: set[str] = fetch_identity_cols_mssql(conn, schema, table)
+    use_identity_insert = bool(identity_col_names)  # True only for MSSQL tables with identity
+
+    if use_identity_insert:
+        # Include ALL columns in the INSERT; IDENTITY_INSERT ON allows explicit values.
+        insert_cols = columns
+    else:
+        # MySQL/MariaDB AUTO_INCREMENT and any correctly-flagged MSSQL identity: skip them.
+        insert_cols = [c for c in columns if not c.get("identity")]
+
+    if not insert_cols or not rows:
         return {}
 
-    col_clause   = ", ".join(q(c["name"]) for c in non_identity)
-    placeholders = ", ".join("%s" for _ in non_identity)
+    col_clause   = ", ".join(q(c["name"]) for c in insert_cols)
+    placeholders = ", ".join("%s" for _ in insert_cols)
     sql_ins = f"INSERT INTO {qt} ({col_clause}) VALUES ({placeholders})"
 
     cur = conn.cursor()
+
+    # MSSQL-specific: enable explicit identity inserts for this table.
+    # MySQL/MariaDB AUTO_INCREMENT does not need this — only MSSQL uses IDENTITY_INSERT.
+    if use_identity_insert:
+        cur.execute(f"SET IDENTITY_INSERT {qt} ON")
+        conn.commit()
+
     inserted = 0
     for row in rows:
-        vals = tuple(row.get(c["name"]) for c in non_identity)
+        vals = tuple(row.get(c["name"]) for c in insert_cols)
         try:
             cur.execute(sql_ins, vals)
             inserted += 1
@@ -414,6 +467,11 @@ def insert_and_readback(
             if "2627" not in err and "1062" not in err:
                 print(f"    Insert warn {qt}: {err}")
     conn.commit()
+
+    if use_identity_insert:
+        cur.execute(f"SET IDENTITY_INSERT {qt} OFF")
+        conn.commit()
+
     cur.close()
 
     if inserted == 0:
