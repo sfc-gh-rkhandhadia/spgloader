@@ -406,14 +406,14 @@ def parse(source: str, source_type: str = "mssql",
             obj["dependencies"] = extract_deps(stmt, name)
             if source_type in ("mysql", "mariadb"):
                 obj["row_producing"] = bool(
-                    re.search(r"^\s+SELECT\b", stmt, re.IGNORECASE | re.MULTILINE)
+                    re.search(r"^\s*SELECT\b", stmt, re.IGNORECASE | re.MULTILINE)
                 )
                 obj["has_dynamic_sql"] = bool(
                     re.search(r"\bPREPARE\b|\bEXECUTE\b", stmt, re.IGNORECASE)
                 )
             else:
                 obj["row_producing"] = bool(
-                    re.search(r"^\s+SELECT\b", stmt, re.IGNORECASE | re.MULTILINE)
+                    re.search(r"^\s*SELECT\b", stmt, re.IGNORECASE | re.MULTILINE)
                 )
                 obj["has_dynamic_sql"] = bool(
                     re.search(r"\bEXEC\s*\(\s*@", stmt, re.IGNORECASE)
@@ -574,7 +574,7 @@ def enrich_from_ddl_objects(path: str, source_type: str,
 
         elif o["type"] == "PROCEDURE":
             o.setdefault("row_producing", bool(
-                re.search(r"^\s+SELECT\b", ddl, re.IGNORECASE | re.MULTILINE)
+                re.search(r"^\s*SELECT\b", ddl, re.IGNORECASE | re.MULTILINE)
             ))
             o.setdefault("dependencies", [])
 

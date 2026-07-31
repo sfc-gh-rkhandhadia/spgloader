@@ -621,9 +621,10 @@ def _build_dep_rows(groups: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _VERDICT_STYLE = {
-    "PASS":  ("success", "✓ Pass"),
-    "FAIL":  ("fail",    "✗ Fail"),
-    "ERROR": ("fail",    "⚠ Error"),
+    "PASS":         ("success", "✓ Pass"),
+    "PASS_RENAMED": ("info",    "✓ Renamed"),
+    "FAIL":         ("fail",    "✗ Fail"),
+    "ERROR":        ("fail",    "⚠ Error"),
 }
 
 
