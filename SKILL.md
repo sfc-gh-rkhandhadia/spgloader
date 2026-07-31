@@ -350,6 +350,7 @@ Objects migrated:
   Views:               N  (rule conversion + LLM repair)
   Functions:           N  (rule conversion + LLM repair)
   Stored procedures:   N  (rule conversion + LLM repair)
+  Triggers:            N  (rule conversion + LLM repair, bundled in wave_4_procedures_triggers)
 
 LLM Repair (claude-sonnet-4-5):
   Fixed by rules   : N
@@ -370,9 +371,49 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/generate_report.py \
   --output "$SPGLOADER_WORK_DIR/migration_report.html"
 ```
 
----
+## Source-Specific Notes
 
-## Teardown
+### MySQL
+- Stored procedures with `OUT` parameters: the CALL statement emits `@session_var` for each OUT param.
+  After each CALL the connector drains all result sets (`cursor.nextset()`) and resets the connection
+  state (`conn.raw.cmd_reset_connection()`) to prevent "Unread result" and "MySQL Connection not
+  available" errors on subsequent objects.
+- Triggers: `ACTION_TIMING` (BEFORE/AFTER) is fetched from `INFORMATION_SCHEMA.TRIGGERS` and
+  included in the generated DDL. The conversion pipeline also applies a fallback regex for any
+  trigger DDL still missing explicit timing.
+- Type mappings: `TINYINT(N) UNSIGNED`, `INT(N) UNSIGNED`, etc. (with size modifier) map to
+  `SMALLINT` / `BIGINT` before the bare-type rules fire.
+
+### Oracle
+- `_oracle_tables` joins `ALL_OBJECTS` (OBJECT_TYPE=\'TABLE\') to exclude views and synonyms
+  from the column-level DDL extraction.
+- `copy_oracle_data.py` sets `session_replication_role = replica` for the duration of the bulk
+  copy to suppress FK trigger enforcement without schema changes, then restores to DEFAULT.
+- Identity columns use `INSERT ... OVERRIDING SYSTEM VALUE` so source values are preserved.
+- BLOB/CLOB columns auto-parsed by oracledb as Python dict/list are re-serialised to JSON bytes
+  before the psycopg2 COPY stream.
+
+## Migration Report
+
+After Phase 6.6, generate the HTML + PDF report:
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/generate_report.py \
+  "$SPGLOADER_WORK_DIR" --pdf
+```
+
+The report includes:
+- **Overview** — KPI cards for Tables, Indexes, Views, Functions, Procedures, Triggers (conditional),
+  LLM Repaired; print-ready stat grid; Migration Summary table with per-category In SPG / Not in SPG
+  / Skipped counts; Objects by Type donut chart.
+- **Objects tab** — separate sections for Views, Functions, Stored Procedures, Triggers, Legacy.
+  All sections show Source Name / SPG Name (muted when unchanged) / Status badge.
+  Status badges: ✓ Deployed | ✗ Deploy Failed | ⚙ LLM Fixed | ⚙ Rule Fixed | ⟳ Stub.
+  Triggers are separated from procedures via `ddl_objects.json` type classification so they
+  appear in their own section rather than inflating the procedure fail count.
+- **Validation**, **Witness**, **Equivalence Test** tabs populated by Phase 6, 6.5, 6.6 output.
+
+
 
 When a user asks to tear down the environment (drop SPG + remove Docker source container):
 
