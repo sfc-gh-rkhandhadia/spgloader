@@ -483,7 +483,8 @@ def _build_obj_table(items: list, col: str, llm_fixed: list, rule_fixed: list,
             src_name = name.split(".")[-1] if "." in name else name
             spg_name = "—"
         spg_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_name}</td>"
-                    if spg_name != "—" else "<td class='muted' style='text-align:center'>—</td>")
+                    if spg_name != "—"
+                    else f"<td class='mono small' style='color:var(--muted)'>{src_name}</td>")
         badge  = _obj_status_badge(name, llm_fixed, rule_fixed, still_failed, stubs)
         rows.append(f"<tr><td class='mono small'>{schema}</td>"
                     f"<td class='mono small'>{src_name}</td>"
@@ -992,7 +993,8 @@ def _build_witness_tab(data: dict) -> str:
         else:
             spg_name = src_name.lower() if src_name.lower() != src_name else "—"
         spg_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_name}</td>"
-                    if spg_name != "—" else "<td class='muted' style='text-align:center'>—</td>")
+                    if spg_name != "—"
+                    else f"<td class='mono small' style='color:var(--muted)'>{src_name}</td>")
         rows += (f"<tr>"
                  f"<td class='mono small'>{schema}</td>"
                  f"<td class='mono small'>{src_name}</td>"
