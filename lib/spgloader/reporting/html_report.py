@@ -418,8 +418,8 @@ def _build_obj_table(items: list, col: str, llm_fixed: list, rule_fixed: list,
     rows = []
     for raw in items:
         name = _clean_name(raw)
-        schema = name.split(".")[0] if "." in name else "—"
-        obj    = name.split(".")[-1]
+        schema = name.split(".")[0] if "." in name else "dbo"
+        obj    = name.split(".")[-1] if "." in name else name
         badge  = _obj_status_badge(name, llm_fixed, rule_fixed, still_failed, stubs)
         rows.append(f"<tr><td class='mono'>{schema}</td><td class='mono'>{obj}</td>"
                     f"<td>{badge}</td></tr>")

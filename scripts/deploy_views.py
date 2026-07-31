@@ -240,9 +240,11 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
                 with conn:
                     with conn.cursor() as cur:
                         cur.execute(sql)
-                results["succeeded"].append(name)
+                # Always store as schema-qualified FQN so html_report shows the schema column correctly
+                fqn = name if "." in name else f"{schema}.{name}"
+                results["succeeded"].append(fqn)
                 if attempt > 0:
-                    results["auto_fixed"].append(name)
+                    results["auto_fixed"].append(fqn)
                     print(f"  OK    {name}  [auto-prefixed]")
                 else:
                     print(f"  OK    {name}")
