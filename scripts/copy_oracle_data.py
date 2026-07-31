@@ -103,6 +103,9 @@ def _pg_value(val):
     # Decimal → float for simplicity (numeric columns)
     if isinstance(val, Decimal):
         return float(val)
+    # oracledb may auto-parse BLOB/CLOB JSON as Python dict/list
+    if isinstance(val, (dict, list)):
+        return json.dumps(val).encode("utf-8")
     return val
 
 
@@ -135,7 +138,9 @@ def _copy_table(
         # Truncate target if requested
         if truncate_first:
             with pg_conn.cursor() as pg_cur:
-                pg_cur.execute(f"TRUNCATE TABLE {pg_fqn}")
+                # Use DELETE (not TRUNCATE CASCADE) — session_replication_role=replica
+                # suppresses FK checks for DML without cascading to other tables.
+                pg_cur.execute(f"DELETE FROM {pg_fqn}")
             pg_conn.commit()
 
         # Fetch column names from Oracle
@@ -144,7 +149,7 @@ def _copy_table(
         col_names = [d[0].lower() for d in ora_cur.description]
         cols_sql = ", ".join(col_names)
         placeholders = ", ".join(["%s"] * len(col_names))
-        insert_sql = f"INSERT INTO {pg_fqn} ({cols_sql}) VALUES ({placeholders})"
+        insert_sql = f"INSERT INTO {pg_fqn} ({cols_sql}) OVERRIDING SYSTEM VALUE VALUES ({placeholders})"
 
         # Stream data from Oracle in batches
         ora_cur = ora_conn.cursor()
@@ -235,6 +240,13 @@ def copy_oracle_data(
     pg_conn = _connect_spg(spg_service)
     pg_conn.autocommit = False
 
+    # Disable FK trigger enforcement for the duration of the bulk copy.
+    # session_replication_role = replica suppresses FK/unique trigger firing
+    # without altering the schema — restored below after all tables are done.
+    with pg_conn.cursor() as pg_cur:
+        pg_cur.execute("SET session_replication_role = replica")
+    pg_conn.commit()
+
     print(f"\nCopying {len(table_list)} table(s)  [batch_size={batch_size}"
           f"{', truncate_first' if truncate_first else ''}]\n")
 
@@ -244,6 +256,10 @@ def copy_oracle_data(
         results.append(result)
 
     ora_conn.close()
+    # Restore FK enforcement
+    with pg_conn.cursor() as pg_cur:
+        pg_cur.execute("SET session_replication_role = DEFAULT")
+    pg_conn.commit()
     pg_conn.close()
 
     copied = sum(1 for r in results if r["error"] is None)

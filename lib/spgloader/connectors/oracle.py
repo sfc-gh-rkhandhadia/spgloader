@@ -121,12 +121,16 @@ def _oracle_tables(cur, schema: str) -> list[dict]:
 
     identity_col = "IDENTITY_COLUMN" if has_identity else "'NO'"
     cur.execute(f"""
-        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE,
-               DATA_LENGTH, DATA_PRECISION, DATA_SCALE,
-               NULLABLE, DATA_DEFAULT, {identity_col} AS IS_IDENTITY
-        FROM ALL_TAB_COLUMNS
-        WHERE OWNER = :s
-        ORDER BY TABLE_NAME, COLUMN_ID
+        SELECT atc.TABLE_NAME, atc.COLUMN_NAME, atc.DATA_TYPE,
+               atc.DATA_LENGTH, atc.DATA_PRECISION, atc.DATA_SCALE,
+               atc.NULLABLE, atc.DATA_DEFAULT, {identity_col} AS IS_IDENTITY
+        FROM ALL_TAB_COLUMNS atc
+        JOIN ALL_OBJECTS ao
+          ON ao.OWNER = atc.OWNER
+         AND ao.OBJECT_NAME = atc.TABLE_NAME
+         AND ao.OBJECT_TYPE = 'TABLE'
+        WHERE atc.OWNER = :s
+        ORDER BY atc.TABLE_NAME, atc.COLUMN_ID
     """, s=schema)
     rows = cur.fetchall()
 
