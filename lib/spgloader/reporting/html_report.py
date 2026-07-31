@@ -76,6 +76,54 @@ def _is_trigger_fn(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Name mapping helpers  (source MSSQL name ↔ SPG deployed name)
+# ---------------------------------------------------------------------------
+
+def _build_name_map(ddl_objects: list) -> dict:
+    """Build a lookup from SPG name key → {source_fqn, spg_fqn, source_base, spg_base}.
+
+    Keys are indexed two ways so we can find the original name regardless of whether
+    the caller has the exact lowercase form (key = spg_base) or the space/underscore-
+    stripped form (key = base.replace(' ','').replace('_','')), which handles the
+    procedure name-folding case (e.g. 'employee sales by country' → 'employee').
+    """
+    nmap: dict = {}
+    for obj in ddl_objects if isinstance(ddl_objects, list) else ddl_objects.get("objects", []):
+        src_fqn = obj.get("fqn") or obj.get("name") or ""
+        if not src_fqn:
+            continue
+        parts = src_fqn.split(".", 1)
+        schema   = parts[0].lower() if len(parts) == 2 else "dbo"
+        src_base = parts[-1]
+        spg_base  = src_base.lower()
+        spg_fqn   = f"{schema}.{spg_base}"
+        entry = {"source_fqn": src_fqn, "spg_fqn": spg_fqn,
+                 "source_base": src_base, "spg_base": spg_base}
+        nmap[spg_base] = entry
+        nmap.setdefault(spg_base.replace(" ", "").replace("_", ""), entry)
+    return nmap
+
+
+def _resolve_name_pair(spg_name: str, name_map: dict) -> tuple[str, str]:
+    """Return (source_display, spg_display) given the SPG-side name.
+
+    - source_display: original MSSQL object name (base, no schema prefix)
+    - spg_display:    SPG object name — shown as '—' when identical to source
+                      (i.e. only a case-fold occurred, no meaningful rename)
+    """
+    base = (spg_name.split(".")[-1].lower() if spg_name else "")
+    key  = base.replace(" ", "").replace("_", "")
+    entry = name_map.get(base) or name_map.get(key)
+    if not entry:
+        return spg_name.split(".")[-1] if "." in spg_name else spg_name, "—"
+    src = entry["source_base"]
+    spg = entry["spg_base"]
+    # Show SPG name whenever it differs from source (including case-only renames)
+    spg_display = spg if spg != src else "—"
+    return src, spg_display
+
+
+# ---------------------------------------------------------------------------
 # load_workspace_data
 # ---------------------------------------------------------------------------
 
@@ -332,6 +380,13 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     # Equivalence filter (user's legacy group include/skip choices)
     equiv_filter = _load_json(ws / "parity" / "equivalence_filter.json")
 
+    # -- name map (source MSSQL name ↔ SPG name) --------------------------------
+    ddl_objects_raw = _load_json(ws / "ddl_objects.json")
+    name_map = _build_name_map(
+        ddl_objects_raw if isinstance(ddl_objects_raw, list)
+        else ddl_objects_raw.get("objects", [])
+    )
+
     return {
         "generated":      date.today().isoformat(),
         "source_type":    source_type,
@@ -385,6 +440,8 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "parity_results":     parity_results,
         "parity_structured":  parity_structured,
         "equiv_filter":       equiv_filter,
+        # Name mapping
+        "name_map":           name_map,
     }
 
 
@@ -412,19 +469,28 @@ def _obj_status_badge(name: str, llm_fixed: list, rule_fixed: list,
 
 
 def _build_obj_table(items: list, col: str, llm_fixed: list, rule_fixed: list,
-                      still_failed: list, stubs: list) -> str:
+                      still_failed: list, stubs: list,
+                      name_map: dict | None = None) -> str:
     if not items:
         return "<p class='muted-msg'>None</p>"
     rows = []
     for raw in items:
         name = _clean_name(raw)
         schema = name.split(".")[0] if "." in name else "dbo"
-        obj    = name.split(".")[-1] if "." in name else name
+        if name_map is not None:
+            src_name, spg_name = _resolve_name_pair(name, name_map)
+        else:
+            src_name = name.split(".")[-1] if "." in name else name
+            spg_name = "—"
+        spg_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_name}</td>"
+                    if spg_name != "—" else "<td class='muted' style='text-align:center'>—</td>")
         badge  = _obj_status_badge(name, llm_fixed, rule_fixed, still_failed, stubs)
-        rows.append(f"<tr><td class='mono'>{schema}</td><td class='mono'>{obj}</td>"
+        rows.append(f"<tr><td class='mono small'>{schema}</td>"
+                    f"<td class='mono small'>{src_name}</td>"
+                    f"{spg_cell}"
                     f"<td>{badge}</td></tr>")
     return (f"<div class='table-wrap'><table><thead><tr>"
-            f"<th>Schema</th><th>{col}</th><th>Status</th></tr></thead>"
+            f"<th>Schema</th><th>Source Name</th><th>SPG Name</th><th>Status</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table></div>")
 
 
@@ -458,7 +524,7 @@ def _build_warn_rows(warns: list) -> str:
     return "".join(rows)
 
 
-def _build_val_rows(checks: list) -> str:
+def _build_val_rows(checks: list, name_map: dict | None = None) -> str:
     rows = []
     for c in checks:
         chk     = c.get("check", "")
@@ -505,14 +571,28 @@ def _build_val_rows(checks: list) -> str:
         label = chk.replace("_", " ").title()
         schema = c.get("_schema", "")
         schema_cell = f"<td class='mono small'>{schema}</td>" if schema else "<td class='muted'>—</td>"
+        # Source → SPG name columns (for per-table row_count checks)
+        if chk == "row_count" and c.get("table"):
+            tbl = c["table"]
+            if name_map:
+                src_name, spg_name = _resolve_name_pair(tbl, name_map)
+            else:
+                src_name = tbl
+                spg_name = tbl.lower() if tbl.lower() != tbl else "—"
+            spg_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_name}</td>"
+                        if spg_name != "—" else "<td class='muted' style='text-align:center'>—</td>")
+            obj_cells = f"<td class='mono small'>{src_name}</td>{spg_cell}"
+        else:
+            obj_cells = "<td class='muted' style='text-align:center'>—</td><td class='muted' style='text-align:center'>—</td>"
         rows.append(
             f"<tr>{schema_cell}"
+            f"{obj_cells}"
             f"<td{tip_attr} style='{'cursor:help' if tip else ''}'>{label}"
             f"{'<span class=\"tip-icon\">ⓘ</span>' if tip else ''}"
             f"</td><td>{badge}</td>"
             f"<td class='small'>{detail}</td></tr>"
         )
-    return "".join(rows) or "<tr><td colspan='4' class='muted-msg'>No checks run</td></tr>"
+    return "".join(rows) or "<tr><td colspan='6' class='muted-msg'>No checks run</td></tr>"
 
 
 def _build_dep_rows(groups: dict) -> str:
@@ -586,6 +666,7 @@ def _build_equivalence_tab(data: dict) -> str:
     grand   = parity_results.get("grand", {})
     schemas = parity_results.get("schemas", {})
     equiv_filter = data.get("equiv_filter", {})
+    name_map     = data.get("name_map", {})
 
     total_pass    = grand.get("pass",     0)
     total_fail    = grand.get("fail",     0)
@@ -741,12 +822,21 @@ def _build_equivalence_tab(data: dict) -> str:
             verdict   = r.get("verdict", "?")
             vst, vlbl = _VERDICT_STYLE.get(verdict, ("muted", verdict))
             obj_type  = r.get("type", "")
-            name      = r.get("name", "")
+            spg_name  = r.get("name", "")
             ms_rows   = r.get("ms_rows")
             spg_rows  = r.get("spg_rows")
             ms_p      = r.get("ms_p")
             spg_p     = r.get("spg_p")
             issues    = "; ".join(r.get("issues", []))[:120]
+
+            # Resolve source name from name_map
+            if name_map:
+                src_name, spg_display = _resolve_name_pair(spg_name, name_map)
+            else:
+                src_name = spg_name
+                spg_display = "—"
+            spg_name_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_display}</td>"
+                             if spg_display != "—" else "<td class='muted' style='text-align:center'>—</td>")
 
             if obj_type == "VIEW":
                 ms_val  = str(ms_rows)  if ms_rows  is not None else "—"
@@ -758,7 +848,8 @@ def _build_equivalence_tab(data: dict) -> str:
             rows += (
                 f"<tr>"
                 f"<td class='mono small'>{schema_name}</td>"
-                f"<td class='mono small'>{name}</td>"
+                f"<td class='mono small'>{src_name}</td>"
+                f"{spg_name_cell}"
                 f"<td class='small'>{obj_type}</td>"
                 f"<td class='num small'>{ms_val}</td>"
                 f"<td class='num small'>{spg_val}</td>"
@@ -791,12 +882,12 @@ def _build_equivalence_tab(data: dict) -> str:
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>Schema</th><th>Object</th><th>Type</th>
+            <th>Schema</th><th>Source Name</th><th>SPG Name</th><th>Type</th>
             <th style="text-align:right">MSSQL</th>
             <th style="text-align:right">SPG</th>
             <th>Verdict</th><th>Issues</th>
           </tr></thead>
-          <tbody>{rows if rows else "<tr><td colspan='7' class='muted-msg'>No matched objects tested</td></tr>"}</tbody>
+          <tbody>{rows if rows else "<tr><td colspan='8' class='muted-msg'>No matched objects tested</td></tr>"}</tbody>
         </table>
       </div>
       {f"""<details style='margin-top:12px'><summary style='cursor:pointer;font-size:12px;color:var(--amber)'>{len(missing)} Missing Objects (in MSSQL, not in SPG)</summary>
@@ -886,6 +977,7 @@ def _build_witness_tab(data: dict) -> str:
                   f"</div>")
 
     # Per-object table
+    name_map = data.get("name_map", {})
     rows = ""
     for fqn, r in sorted(results.items()):
         status = r.get("status", "skipped")
@@ -893,17 +985,24 @@ def _build_witness_tab(data: dict) -> str:
         note = r.get("note", "")[:120]
         style, label = _WITNESS_ICONS.get(status, ("muted", status))
         schema = fqn.split(".")[0] if "." in fqn else "dbo"
-        name = fqn.split(".")[-1]
+        src_name = fqn.split(".")[-1]   # original MSSQL name (already correct case)
+        if name_map:
+            _, spg_name = _resolve_name_pair(fqn, name_map)
+        else:
+            spg_name = src_name.lower() if src_name.lower() != src_name else "—"
+        spg_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_name}</td>"
+                    if spg_name != "—" else "<td class='muted' style='text-align:center'>—</td>")
         rows += (f"<tr>"
                  f"<td class='mono small'>{schema}</td>"
-                 f"<td class='mono small'>{name}</td>"
+                 f"<td class='mono small'>{src_name}</td>"
+                 f"{spg_cell}"
                  f"<td class='small'>{obj_type}</td>"
                  f"<td><span class='badge badge-{style}'>{label}</span></td>"
                  f"<td class='small'>{note}</td>"
                  f"</tr>")
 
     if not rows:
-        rows = "<tr><td colspan='5' class='muted-msg'>No objects validated</td></tr>"
+        rows = "<tr><td colspan='6' class='muted-msg'>No objects validated</td></tr>"
 
     return f"""
   <div class="section">
@@ -918,7 +1017,7 @@ def _build_witness_tab(data: dict) -> str:
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Schema</th><th>Object</th><th>Type</th><th>Status</th><th>Note</th></tr></thead>
+        <thead><tr><th>Schema</th><th>Source Name</th><th>SPG Name</th><th>Type</th><th>Status</th><th>Note</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
@@ -946,6 +1045,7 @@ def render_html(data: dict) -> str:
     llm_fixed    = data["llm_fixed"]
     rule_fixed   = data["rule_fixed"]
     still_failed = data["still_failed"]
+    name_map     = data.get("name_map", {})
 
     total_tables  = data["total_tables"]
     total_indexes = data["total_indexes"]
@@ -990,14 +1090,14 @@ def render_html(data: dict) -> str:
     procs_all  = list(procs_ok) + [_clean_name(f.get("procedure", f) if isinstance(f, dict) else f)
                                     for f in procs_fail]
 
-    views_table  = _build_obj_table(views_all,  "View",      llm_fixed, rule_fixed, still_failed, stubs)
-    funcs_table  = _build_obj_table(funcs_all,  "Function",  llm_fixed, rule_fixed, still_failed, stubs)
-    procs_table  = _build_obj_table(procs_all,  "Procedure", llm_fixed, rule_fixed, still_failed, stubs)
-    legacy_table = (_build_obj_table(procs_legacy, "Procedure (Legacy)", [], [], [], [])
+    views_table  = _build_obj_table(views_all,  "View",      llm_fixed, rule_fixed, still_failed, stubs, name_map)
+    funcs_table  = _build_obj_table(funcs_all,  "Function",  llm_fixed, rule_fixed, still_failed, stubs, name_map)
+    procs_table  = _build_obj_table(procs_all,  "Procedure", llm_fixed, rule_fixed, still_failed, stubs, name_map)
+    legacy_table = (_build_obj_table(procs_legacy, "Procedure (Legacy)", [], [], [], [], name_map)
                     if procs_legacy else "<p class='muted-msg'>None</p>")
 
     warn_rows = _build_warn_rows(data["warn_findings"])
-    val_rows  = _build_val_rows(data["val_checks"])
+    val_rows  = _build_val_rows(data["val_checks"], name_map)
     dep_rows  = _build_dep_rows(data["dep_groups"])
 
     ext_list = ""
@@ -1517,7 +1617,7 @@ def render_html(data: dict) -> str:
     <h2>Schema Validation Checks</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Schema</th><th>Check</th><th>Result</th><th>Details</th></tr></thead>
+        <thead><tr><th>Schema</th><th>Source Object</th><th>SPG Object</th><th>Check</th><th>Result</th><th>Details</th></tr></thead>
         <tbody>{val_rows}</tbody>
       </table>
     </div>
