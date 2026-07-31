@@ -193,7 +193,11 @@ def _copy_table(
     import psycopg2
 
     # Schema/table casing: MSSQL is case-insensitive, PG uses lowercase
-    src_fqn = f"{schema}.{table}"
+    # Bracket-quote MSSQL identifiers to handle spaces/reserved words in names
+    if source_type == "mssql":
+        src_fqn = f"[{schema}].[{table}]"
+    else:
+        src_fqn = f"{schema}.{table}"
     pg_schema = schema.lower()
     pg_table = table.lower()
     pg_fqn = f'"{pg_schema}"."{pg_table}"'

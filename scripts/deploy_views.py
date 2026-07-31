@@ -66,11 +66,26 @@ def _get_spg_tables(conn, schema: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def _extract_view_name(sql: str) -> str | None:
-    """Extract the fully-qualified view name from a CREATE OR REPLACE VIEW."""
-    m = re.search(r"CREATE\s+OR\s+REPLACE\s+VIEW\s+(\S+)", sql, re.IGNORECASE)
+    """Extract the fully-qualified view name from a CREATE OR REPLACE VIEW.
+
+    Handles quoted identifiers with spaces, e.g.:
+      CREATE OR REPLACE VIEW dbo."order details extended" AS
+      CREATE OR REPLACE VIEW "products above average price" AS
+    """
+    # Match optional schema prefix, then a quoted name (with spaces) or bare identifier
+    m = re.search(
+        r'CREATE\s+OR\s+REPLACE\s+VIEW\s+((?:\w+\.)?(?:"[^"]+"|[\w]+))',
+        sql, re.IGNORECASE
+    )
     if not m:
         return None
-    return m.group(1).lower().rstrip("(").strip('"')
+    name = m.group(1).lower()
+    # Normalise: strip outer quotes, keep schema prefix
+    if '.' in name:
+        schema, obj = name.split('.', 1)
+        obj = obj.strip('"')
+        return f"{schema}.{obj}"
+    return name.strip('"')
 
 
 def _extract_view_refs(sql: str, all_names: set[str]) -> set[str]:
