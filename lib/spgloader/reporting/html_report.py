@@ -1386,7 +1386,7 @@ def render_html(data: dict) -> str:
 <!-- ═══════════════════════════ OVERVIEW ═══════════════════════════ -->
 <div class="tab-panel active" id="tab-overview">
 
-  {'<div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:6px;margin-bottom:20px"><strong style="color:#dc2626">&#9888; ' + str(total_fail_objs) + ' object(s) are NOT in your SPG instance</strong><div style="font-size:13px;margin-top:4px;color:#111">The following objects exist in the source database but were not deployed to SPG: ' + ', '.join(filter(None, [str(total_idx_fail) + ' indexes' if total_idx_fail else '', str(len(views_fail)) + ' views' if views_fail else '', str(len(funcs_fail)) + ' functions' if funcs_fail else '', str(len(procs_fail)) + ' procedures' if procs_fail else ''])) + '. Check the Deployment tab for details and fix the errors to deploy them.</div></div>' if total_fail_objs else ''}
+  {'<div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:6px;margin-bottom:20px"><strong style="color:#dc2626">&#9888; ' + str(total_fail_objs) + ' object(s) are NOT in your SPG instance</strong><div style="font-size:13px;margin-top:4px;color:#111">The following objects exist in the source database but were not deployed to SPG: ' + ', '.join(filter(None, [str(total_idx_fail) + ' indexes' if total_idx_fail else '', str(len(views_fail)) + ' views' if views_fail else '', str(len(funcs_fail)) + ' functions' if funcs_fail else '', str(len(procs_fail)) + ' procedures' if procs_fail else '', str(len(triggers_fail)) + ' triggers' if triggers_fail else ''])) + '. Check the Deployment tab for details and fix the errors to deploy them.</div></div>' if total_fail_objs else ''}
 
   <div class="kpi-grid">
     <div class="kpi-card" data-tip="Base tables (CREATE TABLE) migrated from the source database. Temporary and derived tables are excluded. All source tables should appear here at 100%.">
@@ -1418,6 +1418,7 @@ def render_html(data: dict) -> str:
       <div class="sub" style="color:var(--{'red' if procs_fail else 'green'})">{len(procs_fail)} not in SPG</div>
       <div class="sub">{len(procs_legacy)} legacy skipped</div>
     </div>
+    {'<div class="kpi-card" data-tip="Database triggers deployed to SPG. Failed triggers are NOT in the target database."><div class="num ' + ("red" if (not total_trigs and triggers_fail) else ("amber" if (total_trigs and triggers_fail) else "green")) + '">' + str(total_trigs) + '</div><div class="label">Triggers in SPG<span class="tip-icon">ⓘ</span></div><div class="sub" style="color:var(--' + ("red" if triggers_fail else "green") + ')">' + str(len(triggers_fail)) + ' not in SPG</div><div class="sub">0 skipped</div></div>' if (triggers_ok or triggers_fail) else ''}
     <div class="kpi-card" data-tip="Procedures and functions that failed initial conversion and were successfully repaired by the Cortex AI LLM repair loop. &#39;Still failing&#39; = objects that exceeded the repair budget and require manual intervention.">
       <div class="num purple">{total_repair}</div>
       <div class="label">LLM Repaired<span class="tip-icon">ⓘ</span></div>
@@ -1449,6 +1450,7 @@ def render_html(data: dict) -> str:
     <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'green' if not views_fail else 'red'})">{total_views}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Views</div></div>
     <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'green' if not funcs_fail else 'red'})">{total_funcs}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Functions</div></div>
     <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'amber' if procs_fail else 'green'})">{total_procs}</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Procedures</div></div>
+    {'<div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--' + ("amber" if triggers_fail else "green") + ')">' + str(total_trigs) + '</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Triggers</div></div>' if (triggers_ok or triggers_fail) else ''}
     <div style="flex:1;min-width:120px;text-align:center"><div style="font-size:28px;font-weight:800;color:var(--{'red' if total_fail_objs else 'green'})">{round(total_ok_objs/(total_ok_objs+total_fail_objs)*100) if (total_ok_objs+total_fail_objs) else 100}%</div><div style="font-size:11px;color:var(--muted);text-transform:uppercase">Success Rate</div></div>
   </div>
 
@@ -1500,6 +1502,7 @@ def render_html(data: dict) -> str:
             <td class="num muted">{len(procs_legacy)}</td>
             <td class="small">{len(procs_legacy)} legacy skipped{' · ' + str(len([n for n in still_failed if n in {p.lower() for p in procs_all}])) + ' still failing after LLM repair' if any(n in {p.lower() for p in procs_all} for n in still_failed) else ''}</td>
           </tr>
+          {'<tr><td>Triggers</td><td class="num ' + ("ok" if not triggers_fail else "amber") + '">' + str(total_trigs) + '</td><td class="num ' + ("fail" if triggers_fail else "ok") + '">' + str(len(triggers_fail)) + '</td><td class="num muted">0</td><td class="small">Source triggers converted and deployed to SPG</td></tr>' if (triggers_ok or triggers_fail) else ''}
           {'<tr><td colspan="5" class="small" style="background:var(--bg-subtle);color:var(--muted);padding:6px 12px">&#9881; LLM Repair — Fixed by rules: ' + str(len(rule_fixed)) + ' &nbsp;·&nbsp; Fixed by LLM: ' + str(len(llm_fixed)) + ' &nbsp;·&nbsp; Still failing (all types): ' + str(len(still_failed)) + '</td></tr>' if still_failed or llm_fixed or rule_fixed else ''}
         </tbody>
       </table>
@@ -1593,10 +1596,11 @@ def render_html(data: dict) -> str:
             <td class="num {'fail' if still_failed else 'ok'}">{len(still_failed)}</td>
             <td class="num muted">{len(procs_legacy)}</td>
           </tr>
+          {'<tr><td><strong>Triggers</strong></td><td class="num ' + ("ok" if not triggers_fail else "amber") + '">' + str(total_trigs) + '</td><td class="num ' + ("fail" if triggers_fail else "ok") + '">' + str(len(triggers_fail)) + '</td><td class="num ok">0</td><td class="num ok">0</td><td class="num ok">0</td><td class="num muted">0</td></tr>' if (triggers_ok or triggers_fail) else ''}
           <tr style="font-weight:600;border-top:2px solid var(--border)">
             <td>Total</td>
-            <td class="num ok">{total_views + total_funcs + total_procs}</td>
-            <td class="num {'fail' if (views_fail or funcs_fail or procs_fail) else 'ok'}">{len(views_fail) + len(funcs_fail) + len(procs_fail)}</td>
+            <td class="num ok">{total_views + total_funcs + total_procs + total_trigs}</td>
+            <td class="num {'fail' if (views_fail or funcs_fail or procs_fail or triggers_fail) else 'ok'}">{len(views_fail) + len(funcs_fail) + len(procs_fail) + len(triggers_fail)}</td>
             <td class="num ok">{len(views_fixed) + len(rule_fixed)}</td>
             <td class="num ok">{len(llm_fixed)}</td>
             <td class="num {'fail' if still_failed else 'ok'}">{len(still_failed)}</td>
@@ -1777,9 +1781,9 @@ new Chart(document.getElementById('tablesChart'), {{
 new Chart(document.getElementById('typeChart'), {{
   type: 'doughnut',
   data: {{
-    labels: ['Tables', 'Indexes', 'Views', 'Functions', 'Procedures'],
-    datasets: [{{ data: [{total_tables}, {total_indexes}, {total_views}, {total_funcs}, {total_procs}],
-      backgroundColor: ['#0069be','#00b4d8','#16a34a','#7c3aed','#d97706'],
+    labels: ['Tables', 'Indexes', 'Views', 'Functions', 'Procedures', 'Triggers'],
+    datasets: [{{ data: [{total_tables}, {total_indexes}, {total_views}, {total_funcs}, {total_procs}, {total_trigs}],
+      backgroundColor: ['#0069be','#00b4d8','#16a34a','#7c3aed','#d97706','#db2777'],
       borderWidth: 0 }}]
   }},
   options: {{ plugins: {{ legend: {{ position: 'bottom', labels: {{ boxWidth: 12 }} }} }},
