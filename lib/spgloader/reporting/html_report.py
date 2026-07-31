@@ -44,10 +44,31 @@ def _load_yaml(path: Path) -> Any:
     return yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+def _norm_view_name(n: Any) -> str:
+    """Normalise view names from deploy_report or fix_report to 'schema.view' form.
+
+    fix_report stores file names  (schema__view_name.sql) -> schema.view_name
+    deploy_report may have stray double-quotes from MySQL quoting round-trips.
+    """
+    if isinstance(n, dict):
+        n = n.get("view") or n.get("name") or str(n)
+    n = str(n)
+    # fix_report file-name format: first __ is the schema separator
+    if n.endswith(".sql") and "__" in n:
+        n = n[:-4].replace("__", ".", 1)
+    # strip stray double-quotes that can appear from MySQL quoting round-trips
+    n = n.replace('"', "")
+    return n.strip()
+
+
 def _clean_name(n) -> str:
     if isinstance(n, dict):
         n = n.get("procedure") or n.get("view") or n.get("name") or str(n)
-    return re.sub(r'"\.?"', ".", str(n)).strip('"')
+    n = str(n)
+    # Normalise MySQL fix_report file-name format: schema__view_name.sql -> schema.view_name
+    if n.endswith(".sql") and "__" in n:
+        n = n[:-4].replace("__", ".", 1)
+    return re.sub(r'"\.?"', ".", n).strip('"')
 
 
 def _is_trigger_fn(name: str) -> bool:
@@ -121,15 +142,36 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     total_indexes = sum(s["indexes_ok"]  for s in schemas.values())
 
     # -- views deployment -------------------------------------------------
-    vr         = _load_json(ws / "conversion" / "deploy_report.json")
-    # Only fall back to fix_report.json when deploy_report.json is absent/empty.
-    # Do NOT fall back just because succeeded=[] — that's valid when all views failed deployment.
-    if not vr and (ws / "conversion" / "fix_report.json").exists():
-        vr     = _load_json(ws / "conversion" / "fix_report.json")
+    vr     = _load_json(ws / "conversion" / "deploy_report.json")
+    fix_vr = _load_json(ws / "conversion" / "fix_report.json")
+    # fix_report.json is written after views are manually fixed and redeployed.
+    # When it has more successes than the initial deploy_report.json, treat it
+    # as the authoritative post-fix state: merge its succeeded list in and
+    # remove from failed any views that were successfully fixed.
+    if fix_vr.get("succeeded") and (
+        not vr or len(fix_vr["succeeded"]) > len(vr.get("succeeded", []))
+    ):
+        fix_ok_set = {_norm_view_name(n).lower() for n in fix_vr["succeeded"]}
+        extra_from_deploy = [
+            n for n in vr.get("succeeded", [])
+            if _norm_view_name(n).lower() not in fix_ok_set
+        ]
+        vr = dict(vr,
+                  succeeded  = list(fix_vr["succeeded"]) + extra_from_deploy,
+                  failed     = [
+                      f for f in vr.get("failed", [])
+                      if _norm_view_name(
+                          f.get("view", f) if isinstance(f, dict) else f
+                      ).lower() not in fix_ok_set
+                  ],
+                  auto_fixed = list(fix_vr.get("succeeded", [])),
+                  )
+    elif not vr:
+        vr = fix_vr
     views_ok   = [_clean_name(n) for n in vr.get("succeeded", [])]
     views_fail = vr.get("failed", [])
     views_fixed = [_clean_name(n) for n in vr.get("auto_fixed", [])]
-    views_skip = [_clean_name(n) for n in vr.get("skipped", [])]
+    views_skip  = [_clean_name(n) for n in vr.get("skipped", [])]
 
     # -- functions deployment ---------------------------------------------
     fr         = _load_json(ws / "conversion" / "functions_deploy_report.json")
@@ -913,9 +955,9 @@ def render_html(data: dict) -> str:
     total_repair  = len(llm_fixed) + len(rule_fixed)
 
     # counts for the overview donut
+    total_idx_fail  = sum(s["indexes_fail"] for s in schemas.values())
     total_ok_objs   = total_tables + total_indexes + total_views + total_funcs + total_procs
-    total_fail_objs = (sum(s["indexes_fail"] for s in schemas.values())
-                       + len(views_fail) + len(funcs_fail) + len(procs_fail))
+    total_fail_objs = (total_idx_fail + len(views_fail) + len(funcs_fail) + len(procs_fail))
 
     assess_status = "&#10003; PASSED" if not is_blocked else "&#9888; BLOCKED"
     assess_badge  = "success" if not is_blocked else "fail"
@@ -1174,7 +1216,7 @@ def render_html(data: dict) -> str:
 <!-- ═══════════════════════════ OVERVIEW ═══════════════════════════ -->
 <div class="tab-panel active" id="tab-overview">
 
-  {'<div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:6px;margin-bottom:20px"><strong style="color:#dc2626">&#9888; ' + str(total_fail_objs) + ' object(s) are NOT in your SPG instance</strong><div style="font-size:13px;margin-top:4px;color:#111">The following objects exist in the source database but were not deployed to SPG: ' + ', '.join(filter(None, [str(len(views_fail)) + ' views' if views_fail else '', str(len(funcs_fail)) + ' functions' if funcs_fail else '', str(len(procs_fail)) + ' procedures' if procs_fail else ''])) + '. Check the Deployment tab for details and fix the errors to deploy them.</div></div>' if total_fail_objs else ''}
+  {'<div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:6px;margin-bottom:20px"><strong style="color:#dc2626">&#9888; ' + str(total_fail_objs) + ' object(s) are NOT in your SPG instance</strong><div style="font-size:13px;margin-top:4px;color:#111">The following objects exist in the source database but were not deployed to SPG: ' + ', '.join(filter(None, [str(total_idx_fail) + ' indexes' if total_idx_fail else '', str(len(views_fail)) + ' views' if views_fail else '', str(len(funcs_fail)) + ' functions' if funcs_fail else '', str(len(procs_fail)) + ' procedures' if procs_fail else ''])) + '. Check the Deployment tab for details and fix the errors to deploy them.</div></div>' if total_fail_objs else ''}
 
   <div class="kpi-grid">
     <div class="kpi-card" data-tip="Base tables (CREATE TABLE) migrated from the source database. Temporary and derived tables are excluded. All source tables should appear here at 100%.">
@@ -1184,10 +1226,10 @@ def render_html(data: dict) -> str:
       <div class="sub">0 failed &nbsp;·&nbsp; 0 skipped</div>
     </div>
     <div class="kpi-card" data-tip="Non-primary-key indexes deployed to SPG. PostgreSQL auto-creates implicit indexes for PRIMARY KEY and UNIQUE constraints, so the SPG count is typically higher than the source. Skipped = duplicate names or unsupported index types.">
-      <div class="num green">{total_indexes:,}</div>
+      <div class="num {'red' if total_idx_fail else 'green'}">{total_indexes:,}</div>
       <div class="label">Indexes<span class="tip-icon">ⓘ</span></div>
-      <div class="sub" style="color:var(--{'red' if sum(s['indexes_fail'] for s in schemas.values()) else 'green'})">0 failed</div>
-      <div class="sub">{sum(s['indexes_fail'] for s in schemas.values())} skipped</div>
+      <div class="sub" style="color:var(--{'red' if total_idx_fail else 'green'})">{total_idx_fail} failed</div>
+      <div class="sub">{total_idx_fail} skipped</div>
     </div>
     <div class="kpi-card" data-tip="CREATE VIEW objects deployed to SPG. Objects shown as 'not in SPG' exist in the source but failed deployment and are absent from your target database.">
       <div class="num {'red' if (not total_views and views_fail) else ('amber' if (total_views and views_fail) else 'green')}">{total_views}</div>
