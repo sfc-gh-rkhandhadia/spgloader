@@ -58,20 +58,87 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parallel_deploy.py \
 
 This deploys in 5 parallel phases: schemas → sequences → tables → indexes → foreign keys.
 
+### Step 1.5: ⚠️ Data copy strategy prompt (MANDATORY — ask before copying)
+
+Before starting the data copy, estimate the total row count and ask the user which
+strategy to use. The copy runs host-side (source DB → your Mac → SPG), so cloud
+round-trip latency is the main bottleneck for large tables.
+
+**Estimate row counts first:**
+
+```bash
+# MSSQL
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/extract_ddl.py \
+  --source-type "$SOURCE_TYPE" \
+  --host "$SOURCE_HOST" --port "$SOURCE_PORT" \
+  --database "$SOURCE_DATABASE" --user "$SOURCE_USER" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --count-rows --output "$SPGLOADER_WORK_DIR/source_row_counts.json" 2>/dev/null \
+  || echo "(row count estimate not available)"
+
+# MySQL / MariaDB — query information_schema directly
+docker exec spgloader_mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" \
+  -e "SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.TABLES \
+      WHERE TABLE_SCHEMA='$SOURCE_DATABASE' AND TABLE_TYPE='BASE TABLE' \
+      ORDER BY TABLE_ROWS DESC LIMIT 10" 2>/dev/null \
+  || echo "(row count estimate not available)"
+```
+
+**Show the top 5 largest tables and total estimated rows, then ask:**
+
+```
+ask_user_question:
+  header: "Data copy strategy"
+  question: "Estimated dataset: ~<TOTAL_ROWS> rows across <TABLE_COUNT> tables.
+
+             Largest tables:
+               <table1>: ~<N1> rows
+               <table2>: ~<N2> rows
+               ...
+
+             The data copy runs host-side (source → this machine → SPG cloud).
+             Larger batch sizes reduce round-trips; more workers copy tables in parallel.
+
+             Which strategy do you want?"
+  defaultAnswer: "Standard — batch 5000, 4 workers"
+  options:
+    - label: "Standard — batch 5000, 4 workers"
+      description: "Default settings. Reliable for most datasets.
+                    Good starting point when total rows < 100K."
+    - label: "Fast — batch 10000, 8 workers"
+      description: "Larger batches reduce SPG round-trips; 8 parallel table workers.
+                    Recommended for 100K–5M total rows.
+                    Uses more memory (~500MB peak per worker)."
+    - label: "Schema-only — skip data copy"
+      description: "Deploy schema only (tables, FKs, indexes). No rows copied.
+                    Choose this for DDL-only migrations or when data will be
+                    loaded separately."
+    - label: "Sample — copy 3 rows per table"
+      description: "Copy exactly 3 rows per table for smoke-testing.
+                    Useful when you only need witness validation to pass."
+```
+
+Store the user's choice as `DATA_COPY_STRATEGY`:
+- "Standard" → `--batch-size 5000 --workers 4`
+- "Fast" → `--batch-size 10000 --workers 8`
+- "Schema-only" → **skip Step 2 entirely**
+- "Sample" → `--batch-size 3 --workers 4 --limit-rows 3`
+
 ### Step 2: Copy data from source to SPG
 
-Skip this step for **schema-only migrations** (DDL file source with no live data).
+**Skip this step if `DATA_COPY_STRATEGY == "Schema-only"`.**
+
+Build the copy command from the chosen strategy flags:
 
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/copy_source_data.py \
   --work-dir    "$SPGLOADER_WORK_DIR" \
   --spg-service "$TARGET_SPG_SERVICE" \
-  --workers 4
+  $DATA_COPY_FLAGS   # e.g. "--batch-size 10000 --workers 8"
 ```
 
-Optional flags:
+Optional flags (always available regardless of strategy):
 - `--truncate-first` — TRUNCATE each target table before copying (idempotent reruns)
-- `--batch-size 2000` — tune rows per INSERT batch (default 5000)
 - `--tables dbo.orders dbo.customers` — copy a subset of tables only
 
 Output: `$SPGLOADER_WORK_DIR/copy_data_report.json`
@@ -107,14 +174,26 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parallel_deploy.py \
 ```
 This deploys: tables (with column types mapped), sequences, indexes, foreign keys.
 
-**Step 2: Copy data from Oracle to SPG:**
+**Step 2: Ask for data copy strategy (same prompt as MSSQL/MySQL Step 1.5), then copy data from Oracle to SPG:**
+
+Run the row count estimate using Oracle syntax:
+```bash
+docker exec spgloader_oracle sqlplus -s system/"$ORACLE_PWD"@FREEPDB1 << 'EOF'
+SET PAGESIZE 0 FEEDBACK OFF
+SELECT table_name, num_rows FROM user_tables ORDER BY num_rows DESC;
+EXIT;
+EOF
+```
+
+Then present the same data copy strategy prompt (Standard / Fast / Schema-only / Sample).
+
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/copy_oracle_data.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
-  --spg-service "$TARGET_SPG_SERVICE"
+  --spg-service "$TARGET_SPG_SERVICE" \
+  $DATA_COPY_FLAGS
 ```
 Optional flags: `--truncate-first` (idempotent re-run), `--batch-size 2000` (tune for memory).
-Output: `$SPGLOADER_WORK_DIR/copy_data_report.json`
 
 ---
 
