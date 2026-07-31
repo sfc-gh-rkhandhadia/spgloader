@@ -418,7 +418,7 @@ def _build_obj_table(items: list, col: str, llm_fixed: list, rule_fixed: list,
     rows = []
     for raw in items:
         name = _clean_name(raw)
-        schema = name.split(".")[0] if "." in name else "dbo"
+        schema = name.split(".")[0] if "." in name else "—"
         obj    = name.split(".")[-1]
         badge  = _obj_status_badge(name, llm_fixed, rule_fixed, still_failed, stubs)
         rows.append(f"<tr><td class='mono'>{schema}</td><td class='mono'>{obj}</td>"
@@ -1229,7 +1229,6 @@ def render_html(data: dict) -> str:
       <div class="num {'red' if total_idx_fail else 'green'}">{total_indexes:,}</div>
       <div class="label">Indexes<span class="tip-icon">ⓘ</span></div>
       <div class="sub" style="color:var(--{'red' if total_idx_fail else 'green'})">{total_idx_fail} failed</div>
-      <div class="sub">{total_idx_fail} skipped</div>
     </div>
     <div class="kpi-card" data-tip="CREATE VIEW objects deployed to SPG. Objects shown as 'not in SPG' exist in the source but failed deployment and are absent from your target database.">
       <div class="num {'red' if (not total_views and views_fail) else ('amber' if (total_views and views_fail) else 'green')}">{total_views}</div>
@@ -1448,8 +1447,8 @@ def render_html(data: dict) -> str:
   <div class="section">
     <h2>Index Failures</h2>
     <p class="small" style="margin-bottom:10px;color:var(--muted)">
-      These indexes could not be migrated due to MSSQL-specific features with no
-      PostgreSQL equivalent (computed columns, expression columns, &gt;32 column limit).
+      These indexes could not be deployed. Common causes: duplicate names (already created by PostgreSQL
+      for a PRIMARY KEY or UNIQUE constraint), expression columns, or index types with no PostgreSQL equivalent.
     </p>
     {idx_fail_html}
   </div>
@@ -1503,7 +1502,7 @@ def render_html(data: dict) -> str:
       <span class="badge badge-muted" style="font-size:12px;margin-left:6px">{len(procs_legacy)} skipped</span>
     </h2>
     <p class="small" style="margin-bottom:10px;color:var(--muted)">
-      ASP.NET Membership, SQL Server Agent, and other vendor-framework objects excluded during Phase 3.6 Deprecated Review.
+      Vendor-framework or deprecated objects excluded from migration during the Deprecated Object Review phase.
     </p>
     {legacy_table}
   </div>
