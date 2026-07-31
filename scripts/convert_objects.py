@@ -430,11 +430,17 @@ def convert_trigger(ddl: str, source_type: str = "mssql") -> tuple[str, list[str
         'CREATE ', ddl, flags=re.IGNORECASE,
     )
     ddl = re.sub(r'`(\w+)`', r'\1', ddl)
-    # MySQL trigger syntax uses: CREATE TRIGGER name event ON table FOR EACH ROW
-    # Normalise to MSSQL-like: CREATE TRIGGER name ON table AFTER event
+    # MySQL trigger syntax: CREATE TRIGGER name BEFORE/AFTER event ON table FOR EACH ROW
+    # Normalise to MSSQL-like: CREATE TRIGGER name ON table BEFORE/AFTER event
     ddl = re.sub(
         r'CREATE\s+TRIGGER\s+(\w+)\s+(BEFORE|AFTER)\s+(INSERT|UPDATE|DELETE)\s+ON\s+(\S+)\s+FOR\s+EACH\s+ROW',
         r'CREATE TRIGGER \1 ON \4 \2 \3',
+        ddl, flags=re.IGNORECASE,
+    )
+    # Fallback: triggers without explicit timing (default to AFTER)
+    ddl = re.sub(
+        r'CREATE\s+TRIGGER\s+(\w+)\s+(INSERT|UPDATE|DELETE)\s+ON\s+(\S+)\s+FOR\s+EACH\s+ROW',
+        r'CREATE TRIGGER \1 ON \3 AFTER \2',
         ddl, flags=re.IGNORECASE,
     )
     ddl = strip_brackets(ddl)

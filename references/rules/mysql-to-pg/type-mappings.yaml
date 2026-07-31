@@ -163,6 +163,26 @@ substitutions:
 
   # ── MySQL unsigned integers ────────────────────────────────────────────────
 
+  - pattern:     '\bINT\s*\(\d+\)\s+UNSIGNED\b'
+    replacement: 'BIGINT'
+    context:     pre_downcase
+    note:        'MySQL INT(N) UNSIGNED → BIGINT (with size modifier)'
+
+  - pattern:     '\bSMALLINT\s*\(\d+\)\s+UNSIGNED\b'
+    replacement: 'INTEGER'
+    context:     pre_downcase
+    note:        'MySQL SMALLINT(N) UNSIGNED → INTEGER (with size modifier)'
+
+  - pattern:     '\bTINYINT\s*\(\d+\)\s+UNSIGNED\b'
+    replacement: 'SMALLINT'
+    context:     pre_downcase
+    note:        'MySQL TINYINT(N) UNSIGNED → SMALLINT (with size modifier)'
+
+  - pattern:     '\b\w+INT\s*\(\d+\)\s+UNSIGNED\b'
+    replacement: 'BIGINT'
+    context:     pre_downcase
+    note:        'Catch-all for TYPE(N) UNSIGNED integer variants with size modifier'
+
   - pattern:     '\bINT\s+UNSIGNED\b'
     replacement: 'BIGINT'
     context:     pre_downcase

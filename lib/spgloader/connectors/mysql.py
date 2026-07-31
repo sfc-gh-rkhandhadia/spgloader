@@ -92,12 +92,12 @@ class MySQLConnector(Connector):
                                        _extract_deps_from_sql(ddl, table_names)))
 
         cur.execute("""
-            SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_STATEMENT
+            SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_STATEMENT
             FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA = %s
             ORDER BY TRIGGER_NAME
         """, (self.database,))
-        for trig_name, event, parent_table, body in cur.fetchall():
-            ddl = f"CREATE TRIGGER `{trig_name}` {event} ON `{parent_table}`\nFOR EACH ROW\n{body}"
+        for trig_name, timing, event, parent_table, body in cur.fetchall():
+            ddl = f"CREATE TRIGGER `{trig_name}` {timing} {event} ON `{parent_table}`\nFOR EACH ROW\n{body}"
             objects.append(make_object("trigger", self.database, trig_name, ddl, [parent_table]))
 
         conn.close()
