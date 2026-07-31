@@ -65,9 +65,13 @@ def _clean_name(n) -> str:
     if isinstance(n, dict):
         n = n.get("procedure") or n.get("view") or n.get("name") or str(n)
     n = str(n)
-    # Normalise MySQL fix_report file-name format: schema__view_name.sql -> schema.view_name
-    if n.endswith(".sql") and "__" in n:
-        n = n[:-4].replace("__", ".", 1)
+    # Normalise MySQL schema__object format (with or without .sql suffix)
+    if n.endswith(".sql"):
+        n = n[:-4]
+    if "__" in n and not n.startswith("_"):
+        parts = n.split("__", 1)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            n = f"{parts[0]}.{parts[1]}"
     return re.sub(r'"\.?"', ".", n).strip('"')
 
 
@@ -235,6 +239,38 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     procs_fail   = pr.get("failed", [])
     procs_legacy = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n)))
                     for n in pr.get("skipped_legacy", [])]
+
+    # -- separate triggers (bundled with procedures in wave 4) -------------
+    ddl_objs_early = _load_json(ws / "ddl_objects.json")
+    ddl_objs_early = ddl_objs_early if isinstance(ddl_objs_early, list) else ddl_objs_early.get("objects", [])
+    _trigger_names = {
+        o.get("name", "").lower()
+        for o in ddl_objs_early
+        if o.get("type", "").lower() == "trigger"
+    }
+
+    actual_procs_fail  = []
+    triggers_fail      = []
+    for f in procs_fail:
+        raw_name = (f.get("procedure", "") if isinstance(f, dict) else str(f))
+        base     = _clean_name(raw_name).split(".")[-1].lower()
+        if base in _trigger_names:
+            triggers_fail.append(f)
+        else:
+            actual_procs_fail.append(f)
+    procs_fail = actual_procs_fail
+
+    # Triggers that succeeded are those in ddl_objects but not in triggers_fail
+    _trigger_fail_bases = {
+        _clean_name(f.get("procedure", "") if isinstance(f, dict) else str(f)).split(".")[-1].lower()
+        for f in triggers_fail
+    }
+    triggers_ok = [
+        _clean_name(o.get("fqn") or o.get("name", ""))
+        for o in ddl_objs_early
+        if o.get("type", "").lower() == "trigger"
+        and o.get("name", "").lower() not in _trigger_fail_bases
+    ]
 
     # -- LLM repair -------------------------------------------------------
     rr           = _load_json(ws / "conversion" / "repair_report.json")
@@ -409,6 +445,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "procs_ok":       procs_ok,
         "procs_fail":     procs_fail,
         "procs_legacy":   procs_legacy,
+        # Triggers (separated from wave-4 bundle)
+        "triggers_ok":    triggers_ok,
+        "triggers_fail":  triggers_fail,
         "stubs":          stubs_list,
         # LLM repair
         "llm_fixed":      llm_fixed,
@@ -455,28 +494,40 @@ def _badge(text: str, style: str) -> str:
 
 
 def _obj_status_badge(name: str, llm_fixed: list, rule_fixed: list,
-                       still_failed: list, stubs: list) -> str:
+                       still_failed: list, stubs: list,
+                       deploy_failed: set | None = None) -> str:
     n = name.lower()
-    if any(x.lower() == n for x in still_failed):
+    n_base = n.split(".")[-1]  # handle both "schema.obj" and bare "obj"
+    # deploy_failed takes highest priority — object was repaired but SPG deployment failed
+    if deploy_failed and (n in deploy_failed or n_base in deploy_failed):
+        return _badge("✗ Deploy Failed", "fail")
+    if any(x.lower() == n or x.lower() == n_base for x in still_failed):
         return _badge("✗ Failed", "fail")
-    if any(x.lower() == n for x in llm_fixed):
+    if any(x.lower() == n or x.lower() == n_base for x in llm_fixed):
         return _badge("⚙ LLM Fixed", "info")
-    if any(x.lower() == n for x in rule_fixed):
+    if any(x.lower() == n or x.lower() == n_base for x in rule_fixed):
         return _badge("⚙ Rule Fixed", "info")
-    if any(x.lower() == n for x in stubs):
+    if any(x.lower() == n or x.lower() == n_base for x in stubs):
         return _badge("⟳ Stub", "muted")
     return _badge("✓ Deployed", "success")
 
 
 def _build_obj_table(items: list, col: str, llm_fixed: list, rule_fixed: list,
                       still_failed: list, stubs: list,
-                      name_map: dict | None = None) -> str:
+                      name_map: dict | None = None,
+                      deploy_failed: set | None = None) -> str:
     if not items:
         return "<p class='muted-msg'>None</p>"
     rows = []
     for raw in items:
         name = _clean_name(raw)
-        schema = name.split(".")[0] if "." in name else "dbo"
+        schema = name.split(".")[0] if "." in name else "—"
+        # Try to recover schema from name_map when not in name
+        if schema == "—" and name_map:
+            base = name.lower()
+            entry = name_map.get(base) or name_map.get(base.replace(" ", "").replace("_", ""))
+            if entry and "." in entry.get("spg_fqn", ""):
+                schema = entry["spg_fqn"].split(".")[0]
         if name_map is not None:
             src_name, spg_name = _resolve_name_pair(name, name_map)
         else:
@@ -485,7 +536,7 @@ def _build_obj_table(items: list, col: str, llm_fixed: list, rule_fixed: list,
         spg_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_name}</td>"
                     if spg_name != "—"
                     else f"<td class='mono small' style='color:var(--muted)'>{src_name}</td>")
-        badge  = _obj_status_badge(name, llm_fixed, rule_fixed, still_failed, stubs)
+        badge  = _obj_status_badge(name, llm_fixed, rule_fixed, still_failed, stubs, deploy_failed)
         rows.append(f"<tr><td class='mono small'>{schema}</td>"
                     f"<td class='mono small'>{src_name}</td>"
                     f"{spg_cell}"
@@ -1044,6 +1095,8 @@ def render_html(data: dict) -> str:
     procs_ok     = data["procs_ok"]
     procs_fail   = data["procs_fail"]
     procs_legacy = data["procs_legacy"]
+    triggers_ok   = data.get("triggers_ok", [])
+    triggers_fail = data.get("triggers_fail", [])
     stubs        = data["stubs"]
     llm_fixed    = data["llm_fixed"]
     rule_fixed   = data["rule_fixed"]
@@ -1055,12 +1108,13 @@ def render_html(data: dict) -> str:
     total_views   = len(views_ok)
     total_funcs   = len(funcs_ok)
     total_procs   = len(procs_ok)
+    total_trigs   = len(triggers_ok)
     total_repair  = len(llm_fixed) + len(rule_fixed)
 
     # counts for the overview donut
     total_idx_fail  = sum(s["indexes_fail"] for s in schemas.values())
-    total_ok_objs   = total_tables + total_indexes + total_views + total_funcs + total_procs
-    total_fail_objs = (total_idx_fail + len(views_fail) + len(funcs_fail) + len(procs_fail))
+    total_ok_objs   = total_tables + total_indexes + total_views + total_funcs + total_procs + total_trigs
+    total_fail_objs = (total_idx_fail + len(views_fail) + len(funcs_fail) + len(procs_fail) + len(triggers_fail))
 
     assess_status = "&#10003; PASSED" if not is_blocked else "&#9888; BLOCKED"
     assess_badge  = "success" if not is_blocked else "fail"
@@ -1092,10 +1146,23 @@ def render_html(data: dict) -> str:
                                     for f in funcs_fail]
     procs_all  = list(procs_ok) + [_clean_name(f.get("procedure", f) if isinstance(f, dict) else f)
                                     for f in procs_fail]
+    triggers_all = list(triggers_ok) + [_clean_name(f.get("procedure", f) if isinstance(f, dict) else f)
+                                        for f in triggers_fail]
 
-    views_table  = _build_obj_table(views_all,  "View",      llm_fixed, rule_fixed, still_failed, stubs, name_map)
-    funcs_table  = _build_obj_table(funcs_all,  "Function",  llm_fixed, rule_fixed, still_failed, stubs, name_map)
-    procs_table  = _build_obj_table(procs_all,  "Procedure", llm_fixed, rule_fixed, still_failed, stubs, name_map)
+    # deploy_failed sets for badge priority (these failed after LLM repair)
+    views_deploy_failed  = {_clean_name(f.get("view", f) if isinstance(f, dict) else f).split(".")[-1].lower()
+                            for f in views_fail}
+    funcs_deploy_failed  = {_clean_name(f.get("function", f) if isinstance(f, dict) else f).split(".")[-1].lower()
+                            for f in funcs_fail}
+    procs_deploy_failed  = {_clean_name(f.get("procedure", f) if isinstance(f, dict) else f).split(".")[-1].lower()
+                            for f in procs_fail}
+    trigs_deploy_failed  = {_clean_name(f.get("procedure", f) if isinstance(f, dict) else f).split(".")[-1].lower()
+                            for f in triggers_fail}
+
+    views_table  = _build_obj_table(views_all,    "View",      llm_fixed, rule_fixed, still_failed, stubs, name_map, views_deploy_failed)
+    funcs_table  = _build_obj_table(funcs_all,    "Function",  llm_fixed, rule_fixed, still_failed, stubs, name_map, funcs_deploy_failed)
+    procs_table  = _build_obj_table(procs_all,    "Procedure", llm_fixed, rule_fixed, still_failed, stubs, name_map, procs_deploy_failed)
+    trigs_table  = _build_obj_table(triggers_all, "Trigger",   llm_fixed, rule_fixed, still_failed, stubs, name_map, trigs_deploy_failed)
     legacy_table = (_build_obj_table(procs_legacy, "Procedure (Legacy)", [], [], [], [], name_map)
                     if procs_legacy else "<p class='muted-msg'>None</p>")
 
@@ -1596,9 +1663,11 @@ def render_html(data: dict) -> str:
   </div>
 
   <div class="section">
-    <h2>Stored Procedures <span class="badge badge-{'success' if not procs_fail else 'warn'}" style="font-size:12px;margin-left:6px">{total_procs} / {total_procs + len(procs_fail)}</span></h2>
+    <h2>Stored Procedures <span class="badge badge-{'success' if not procs_fail else 'warn'}" style="font-size:12px;margin-left:6px">{len(procs_ok)} / {len(procs_ok) + len(procs_fail)}</span></h2>
     {procs_table}
   </div>
+
+  {'<div class="section"><h2>Triggers <span class="badge badge-' + ("success" if not triggers_fail else "warn") + '" style="font-size:12px;margin-left:6px">' + str(len(triggers_ok)) + ' / ' + str(len(triggers_ok) + len(triggers_fail)) + '</span></h2>' + trigs_table + '</div>' if triggers_ok or triggers_fail else ''}
 
   <div class="section">
     <h2>Legacy / Skipped Procedures
