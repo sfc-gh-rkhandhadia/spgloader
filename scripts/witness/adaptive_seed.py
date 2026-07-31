@@ -1813,8 +1813,6 @@ def parse_proc_params_mysql(sql: str) -> list[dict]:
     params: list[dict] = []
     for m in _RE_MYSQL_PARAM.finditer(param_block):
         mode = (m.group("mode") or "IN").upper()
-        if mode in ("OUT",):
-            continue  # output-only params don't need input values
         name = m.group("name").strip("`")
         ptype = m.group("type").upper().split("(")[0].strip()
         if ptype in ("READS", "MODIFIES", "CONTAINS", "NO", "NOT",
@@ -1822,10 +1820,13 @@ def parse_proc_params_mysql(sql: str) -> list[dict]:
                      "IN", "OUT", "INOUT", "CHARSET", "COLLATE"):
             continue  # not a real type — parser matched a keyword
         default_raw = (m.group("default") or "").strip().strip("'\"")
+        # OUT params are included but flagged — CALL needs a placeholder for them
+        # (MySQL requires all params including OUT in CALL; use @session_var syntax)
         params.append({
             "name":    name,
             "type":    ptype,
             "mode":    mode,
+            "is_out":  mode in ("OUT", "INOUT"),
             "default": default_raw or None,
         })
     return params
@@ -1918,11 +1919,28 @@ def adaptive_validate_proc_mysql(conn: Any, obj: dict, objects: dict) -> dict | 
     if not params:
         return None  # can't infer — caller keeps existing result
 
-    param_vals = [infer_param_value_mysql(p, conn, objects) for p in params]
-    placeholders = ", ".join("%s" for _ in param_vals)
+    # Build placeholder list: IN/INOUT params use bound %s values;
+    # OUT params use MySQL session variables (@varname) — MySQL requires OUT
+    # params to be present in CALL but they can't be bound literals.
+    in_params  = [p for p in params if not p.get("is_out")]
+    out_params = [p for p in params if p.get("is_out")]
+
+    in_vals = [infer_param_value_mysql(p, conn, objects) for p in in_params]
+
+    # Build positional placeholder list respecting original param order
+    call_parts: list[str] = []
+    for p in params:
+        if p.get("is_out"):
+            call_parts.append(f"@{p['name']}")
+        else:
+            call_parts.append("%s")
+
+    placeholders = ", ".join(call_parts)
     pinfo = ", ".join(
-        f"{p['name']}={v!r}" for p, v in zip(params, param_vals)
+        f"{p['name']}={v!r}" for p, v in zip(in_params, in_vals)
     )
+    if out_params:
+        pinfo += " (OUT: " + ", ".join(f"@{p['name']}" for p in out_params) + ")"
 
     try:
         cur = conn.cursor()
@@ -1931,21 +1949,46 @@ def adaptive_validate_proc_mysql(conn: Any, obj: dict, objects: dict) -> dict | 
         else:
             query = f"CALL `{schema}`.`{name}`({placeholders})"
 
-        if param_vals:
-            cur.execute(query, tuple(param_vals))
+        if in_vals:
+            cur.execute(query, tuple(in_vals))
         else:
             cur.execute(query)
 
         try:
             row = cur.fetchone()
+            # Drain ALL remaining result sets so the shared connection stays clean.
+            # Stored procs can produce multiple implicit result sets; nextset()
+            # advances through them; fetchall() clears the current one.
+            try:
+                cur.fetchall()
+            except Exception:
+                pass
+            try:
+                while cur.nextset():
+                    try:
+                        cur.fetchall()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception:
             # InterfaceError: No result set — DML-only proc, executed OK
             cur.close()
+            # Reset the connection so subsequent objects aren't affected.
+            try:
+                conn.raw.cmd_reset_connection()
+            except Exception:
+                pass
             return {
                 "status": "partially_validated",
                 "note": f"DML-only proc executed with inferred params ({pinfo})",
             }
         cur.close()
+        # Reset connection state after stored proc to clear any pending result sets.
+        try:
+            conn.raw.cmd_reset_connection()
+        except Exception:
+            pass
 
         if ftype == "FUNCTION":
             val = row[0] if row else None
