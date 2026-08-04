@@ -24,7 +24,7 @@ Limitations:
 """
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import psycopg2, psycopg2.extras, concurrent.futures, sys
+import psycopg2, psycopg2.extras, concurrent.futures, sys, os
 from config import MSSQL_CONF, SPG_CONF, is_mssql_system_schema, is_spg_system_schema, check_required
 from source_adapter import build_adapter
 
@@ -32,7 +32,7 @@ _src_adapter = build_adapter()
 
 check_required()
 
-BATCH = 12
+BATCH = 24  # matches parity thread parallelism
 SEP   = "=" * 110
 
 def ms_conn():  return _src_adapter.connect()
@@ -60,11 +60,15 @@ def discover_schemas_spg():
 
 # ── Object discovery per schema ───────────────────────────────────────────────
 
-def discover_mssql_schema(schema):
-    """Discover procedures, functions, and views in a source DB schema."""
+def discover_mssql_schema(schema, ms_schema_name=None):
+    """Discover procedures, functions, and views in a source DB schema.
+    schema       — lowercase key used for matching.
+    ms_schema_name — original source casing (MSSQL is case-sensitive in sys.* queries).
+    """
+    src_name = ms_schema_name or schema
     result = {}
     try:
-        for rinfo in _src_adapter.get_routines(schema):
+        for rinfo in _src_adapter.get_routines(src_name):
             obj_kind = 'FUNCTION' if rinfo['type'] in ('FN','TF','IF','FUNCTION') else 'PROCEDURE'
             result[rinfo['name'].lower()] = {'name': rinfo['name'], 'type': obj_kind}
     except Exception:
@@ -78,12 +82,12 @@ def discover_mssql_schema(schema):
                 SELECT v.name AS obj_name FROM sys.views v
                 JOIN sys.schemas s ON v.schema_id = s.schema_id
                 WHERE s.name = %s
-            """, (schema,))
+            """, (src_name,))
         else:
             cur.execute("""
                 SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS
                 WHERE TABLE_SCHEMA = %s
-            """, (schema,))
+            """, (src_name,))
         for r in cur.fetchall():
             name = r[0]
             result[name.lower()] = {'name': name, 'type': 'VIEW'}
@@ -226,12 +230,24 @@ def validate_proc(schema, name):
 
 # ── Per-schema runner ─────────────────────────────────────────────────────────
 
-def run_schema(schema, grand):
-    ms_obj  = discover_mssql_schema(schema)
+def run_schema(schema, grand, schema_results=None, exclude_fqns=None, ms_schema_name=None):
+    # schema is the lowercase key; ms_schema_name is the original source casing (MSSQL case-sensitive)
+    ms_obj  = discover_mssql_schema(schema, ms_schema_name=ms_schema_name)
     spg_obj = discover_spg_schema(schema)
 
     ms_names  = set(ms_obj.keys())
     spg_names = set(spg_obj.keys())
+
+    # Apply FQN exclusions (user opted out of testing legacy objects)
+    excluded_names: set = set()
+    if exclude_fqns:
+        for name in list(ms_names):
+            fqn = ('%s.%s' % (schema, name)).lower()
+            if fqn in exclude_fqns or name.lower() in exclude_fqns:
+                excluded_names.add(name)
+        ms_names  = ms_names  - excluded_names
+        spg_names = spg_names - excluded_names
+
     matched   = ms_names & spg_names
     only_ms   = ms_names - spg_names
     only_spg  = spg_names - ms_names
@@ -245,13 +261,21 @@ def run_schema(schema, grand):
         print("  (empty schema — no objects on either side)")
         return
 
+    # Initialise schema_results entry for JSON output
+    if schema_results is not None:
+        schema_results[schema] = {
+            'results': [],
+            'missing_objects': [{'fqn': '%s.%s' % (schema, n), 'name': n, 'type': ms_obj[n]['type']} for n in sorted(only_ms)],
+            'excluded_objects': [{'fqn': '%s.%s' % (schema, n), 'name': n, 'type': ms_obj[n]['type']} for n in sorted(excluded_names)],
+        }
+
     def run_one(name):
         obj_type = ms_obj[name]['type']
         if obj_type == 'VIEW':
             r = validate_view(schema, name)
         else:
             r = validate_proc(schema, name)
-        r.update({'name': name, 'type': obj_type, 'schema': schema})
+        r.update({'name': name, 'type': obj_type, 'schema': schema, 'fqn': '%s.%s' % (schema, name)})
         return r
 
     all_results = []
@@ -265,6 +289,14 @@ def run_schema(schema, grand):
 
     order = {'FAIL': 0, 'ERROR': 1, 'PASS': 2}
     all_results.sort(key=lambda r: (order.get(r['verdict'], 9), r['type'], r['name']))
+
+    # Store in collector for JSON output
+    if schema_results is not None and schema in schema_results:
+        schema_results[schema]['results'] = all_results
+        schema_results[schema]['pass']    = sum(1 for r in all_results if r['verdict'] == 'PASS')
+        schema_results[schema]['fail']    = sum(1 for r in all_results if r['verdict'] in ('FAIL', 'ERROR'))
+        schema_results[schema]['missing'] = len(only_ms)
+        schema_results[schema]['spg_only'] = len(only_spg)
 
     view_res = [r for r in all_results if r['type'] == 'VIEW']
     proc_res = [r for r in all_results if r['type'] in ('PROCEDURE', 'FUNCTION')]
@@ -320,18 +352,42 @@ def run_schema(schema, grand):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    import argparse, json as _json
+    parser = argparse.ArgumentParser(description="Cross-schema structural validator")
+    parser.add_argument("--inventory", help="Path to object_inventory.json (unused, accepted for compat)")
+    parser.add_argument("--output-dir", help="Directory to write parity_results.json")
+    parser.add_argument("--exclude-fqns-file",
+        help="JSON file with {excluded_fqns: [...]} — skip these FQNs from the equivalence test")
+    args, _ = parser.parse_known_args()
+
+    # Load FQN exclusions
+    exclude_fqns: set = set()
+    if args.exclude_fqns_file and os.path.exists(args.exclude_fqns_file):
+        with open(args.exclude_fqns_file) as ef:
+            edata = _json.load(ef)
+        for fqn in edata.get('excluded_fqns', []):
+            exclude_fqns.add(fqn.lower())
+            exclude_fqns.add(fqn.split('.')[-1].lower())
+        if exclude_fqns:
+            print("[FILTER] Excluding %d FQN(s) from equivalence test" % len(edata.get('excluded_fqns', [])))
+
     print("[NOTICE] full_validation.py is a structural spot-check tool. "
           "Results are not saved to audit tables. Use run.py for the full pipeline.")
 
     print("\nDiscovering schemas from system catalog...")
     ms_schemas  = discover_schemas_mssql()
     spg_schemas = discover_schemas_spg()
-    all_schemas = sorted(set(ms_schemas + spg_schemas))
-    print("MSSQL schemas: %s" % ms_schemas)
-    print("SPG   schemas: %s" % spg_schemas)
-    print("Union         : %s" % all_schemas)
+    # Normalize: source schemas may be mixed-case (e.g. MSSQL HumanResources),
+    # SPG always folds to lowercase. Build lowercase → original mapping.
+    ms_lower_map = {s.lower(): s for s in ms_schemas}
+    spg_lower_set = {s.lower() for s in spg_schemas}
+    all_schemas = sorted(set(list(ms_lower_map.keys()) + list(spg_lower_set)))
+    print("Source schemas: %s" % ms_schemas)
+    print("SPG    schemas: %s" % spg_schemas)
+    print("Union (normalised): %s" % all_schemas)
 
     grand = {'pass': 0, 'fail': 0, 'missing': 0, 'spg_only': 0}
+    schema_results = {}  # collector for JSON output
 
     print("\n" + SEP)
     print("FULL CROSS-SCHEMA VALIDATION REPORT")
@@ -339,7 +395,10 @@ def main():
     print(SEP)
 
     for schema in all_schemas:
-        run_schema(schema, grand)
+        ms_orig = ms_lower_map.get(schema, schema)  # original source casing
+        run_schema(schema, grand, schema_results,
+                   exclude_fqns=exclude_fqns if exclude_fqns else None,
+                   ms_schema_name=ms_orig)
 
     print("\n" + SEP)
     print("GRAND TOTAL ACROSS ALL SCHEMAS")
@@ -347,6 +406,33 @@ def main():
     print("  PASS: %d  |  FAIL/ERROR: %d  |  Missing-in-SPG: %d  |  SPG-only: %d" % (
         grand['pass'], grand['fail'], grand['missing'], grand['spg_only']))
     print(SEP)
+
+    grand['excluded'] = sum(len(s.get('excluded_objects', [])) for s in schema_results.values())
+    if grand['excluded']:
+        print("  Excluded from test (user choice): %d" % grand['excluded'])
+
+    # Write structured JSON output (parity_results.json consumed by html_report.py)
+    out_dir = args.output_dir or os.path.join(os.getcwd(), 'parity')
+    os.makedirs(out_dir, exist_ok=True)
+    results_data = {
+        'grand': grand,
+        'schemas': {
+            sch: {
+                'pass':             s.get('pass', 0),
+                'fail':             s.get('fail', 0),
+                'missing':          s.get('missing', 0),
+                'spg_only':         s.get('spg_only', 0),
+                'results':          s.get('results', []),
+                'missing_objects':  s.get('missing_objects', []),
+                'excluded_objects': s.get('excluded_objects', []),
+            }
+            for sch, s in schema_results.items()
+        }
+    }
+    json_path = os.path.join(out_dir, 'parity_results.json')
+    with open(json_path, 'w') as f:
+        _json.dump(results_data, f, indent=2)
+    print("\nParity results written: %s" % json_path)
 
 
 if __name__ == "__main__":

@@ -378,7 +378,7 @@ Runs the same queries that succeeded on source side against SPG and diffs the re
 
 **MSSQL / T-SQL:**
 ```bash
-uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/full_validation.py \
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/execution-parity/full_validation.py \
   --inventory    "$SPGLOADER_WORK_DIR/witness/object_inventory.json" \
   --mssql-server "$SOURCE_HOST" \
   --mssql-port   "${SOURCE_PORT:-1433}" \
@@ -395,7 +395,7 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/full_validation.p
 
 **MySQL / MariaDB:**
 ```bash
-uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/mysql_structural_parity.py \
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/execution-parity/mysql_structural_parity.py \
   --source-type  "${SOURCE_TYPE:-mysql}" \
   --source-host  "$SOURCE_HOST" \
   --source-port  "${SOURCE_PORT:-3306}" \
@@ -477,7 +477,7 @@ Continue to Step 9 (markdown/parity report + HTML regeneration).
 ## Step 9 — Generate sign-off reports
 
 ```bash
-uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/generate_validation_markdown.py \
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/execution-parity/generate_validation_markdown.py \
   --output "$SPGLOADER_WORK_DIR/parity/parity_report.md"
 ```
 
@@ -495,7 +495,7 @@ ask_user_question:
 
 If yes:
 ```bash
-uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parity/generate_migration_report.py \
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/execution-parity/generate_migration_report.py \
   --output "$SPGLOADER_WORK_DIR/parity/migration_signoff.pptx"
 ```
 
@@ -548,5 +548,5 @@ $SPGLOADER_WORK_DIR/
 | `seed_data.py: FK violation` | Parent table missing | Check dep_graph waves; rerun with `--row-volume 1` |
 | `validate_chains.py: 0 rows — seed data does not satisfy join` | Complex view joins | Mark as `partial` — manually verify |
 | `discover_spg_constraints.py: connection refused` | SPG instance suspended | Resume SPG first: `ALTER POSTGRES INSTANCE $TARGET_SPG_SERVICE RESUME` |
-| `full_validation.py: module not found` | Missing parity script | Check `scripts/parity/` directory exists |
+| `full_validation.py: module not found` | Missing parity script | Check `scripts/execution-parity/` directory exists |
 | `SOURCE_ENV = existing` + seed attempted | Bug in routing | Never seed existing instances — `DO_SEED` must be `false` when `SOURCE_ENV=existing` |

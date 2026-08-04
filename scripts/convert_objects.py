@@ -253,7 +253,7 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
         rest = rest.strip().rstrip(",").rstrip(";").strip()
         rest = re.sub(r"^AS\s+", "", rest, flags=re.IGNORECASE)
         if re.match(r"TABLE\s*\(", rest, re.IGNORECASE) or rest.upper().strip() == "TABLE":
-            return f"    -- TODO: {var} TABLE variable — convert to CREATE TEMP TABLE"
+            return f"    -- SPG-EWI-0012: {var} TABLE variable — convert to CREATE TEMP TABLE"
         assign_m = re.match(r"(.+?)\s*=\s*(.+)$", rest, re.DOTALL)
         if assign_m:
             typ = assign_m.group(1).strip()
@@ -385,7 +385,7 @@ $$;"""
         body = fragment[body_inner_start:pos].strip()
     else:
         am = re.search(r'\bAS\b\s*(.+)', fragment, re.IGNORECASE | re.DOTALL)
-        body = am.group(1).strip() if am else "-- TODO: convert function body"
+        body = am.group(1).strip() if am else "-- SPG-EWI-0012: convert function body"
     body = re.sub(r"\bSET\s+NOCOUNT\s+ON\s*;?", "", body, flags=re.IGNORECASE)
 
     declare_lines = []
@@ -465,7 +465,7 @@ def convert_trigger(ddl: str, source_type: str = "mssql") -> tuple[str, list[str
     events = event + (f" OR {extra_event.upper()}" if extra_event else "")
 
     body_m = re.search(r"(?:^AS|\bBEGIN\b)(.+)", ddl, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-    body = body_m.group(1).strip() if body_m else "-- TODO: convert trigger body"
+    body = body_m.group(1).strip() if body_m else "-- SPG-EWI-0012: convert trigger body"
     body = re.sub(r"\bSET\s+NOCOUNT\s+ON\s*;?", "", body, flags=re.IGNORECASE)
     body = re.sub(r"\bGO\b", "", body, flags=re.IGNORECASE)
     body = re.sub(r"^\s*BEGIN\s*", "", body, flags=re.IGNORECASE)
@@ -609,7 +609,7 @@ def _convert_oracle_param(param: str) -> str:
     elif m_plain:
         pname, ptype, mode = m_plain.group(1), m_plain.group(2).strip(), "IN"
     else:
-        return f"    -- TODO param: {param}"
+        return f"    -- SPG-EWI-0012 param: {param}"
 
     # Strip DEFAULT/':=' and NOCOPY
     ptype = re.sub(r'\s+DEFAULT\s+.+$', '', ptype, flags=re.IGNORECASE)
@@ -643,13 +643,13 @@ def _convert_oracle_local_decls(decls_text: str) -> list[str]:
         stmt_norm = ' '.join(stmt.split())  # collapse whitespace
 
         if re.match(r'CURSOR\b', stmt_norm, re.IGNORECASE):
-            lines.append(f"    -- TODO CURSOR: {stmt_norm};  -- convert to FOR loop or REFCURSOR")
+            lines.append(f"    -- SPG-EWI-0012 CURSOR: {stmt_norm};  -- convert to FOR loop or REFCURSOR")
             continue
         if re.match(r'TYPE\b', stmt_norm, re.IGNORECASE):
-            lines.append(f"    -- TODO TYPE: {stmt_norm};  -- convert collection/record type")
+            lines.append(f"    -- SPG-EWI-0012 TYPE: {stmt_norm};  -- convert collection/record type")
             continue
         if re.search(r'\bEXCEPTION\s*$', stmt_norm, re.IGNORECASE):
-            lines.append(f"    -- TODO EXCEPTION_VAR: {stmt_norm};  -- define as needed")
+            lines.append(f"    -- SPG-EWI-0012 EXCEPTION_VAR: {stmt_norm};  -- define as needed")
             continue
         if re.match(r'PRAGMA\b', stmt_norm, re.IGNORECASE):
             lines.append(f"    -- PRAGMA: {stmt_norm};  -- review Oracle-specific pragma")
@@ -666,7 +666,7 @@ def _convert_oracle_local_decls(decls_text: str) -> list[str]:
 
         parts = base_decl.split(None, 1)
         if len(parts) < 2:
-            lines.append(f"    -- TODO: {stmt_norm};")
+            lines.append(f"    -- SPG-EWI-0012: {stmt_norm};")
             continue
 
         vname = parts[0].lower()
@@ -898,7 +898,7 @@ def convert_oracle_trigger(ddl: str) -> tuple[str, list[str]]:
     if body_m:
         body, exception_block = _split_oracle_body_exception(body_m.group(1))
     else:
-        body = "-- TODO: trigger body"
+        body = "-- SPG-EWI-0012: trigger body"
         exception_block = ""
 
     fn_name = f"{trig_name.split('.')[-1]}_fn"
@@ -1086,6 +1086,40 @@ def main():
     manifest_path = work_dir / "conversion" / "_conversion_report.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    # Write _conversion_metrics.json — accuracy tracking for consistent quality monitoring
+    _NEEDS_REPAIR = {"SPG-EWI-0004", "SPG-EWI-0007", "SPG-EWI-0008"}
+    _NEEDS_MANUAL = {"SPG-EWI-0012"}
+    metrics: dict = {"source_type": source_type, "by_type": {}, "totals": {}}
+    total_first_pass = total_needs_repair = total_needs_manual = 0
+    for entry in manifest_entries:
+        otype = entry["type"]
+        codes_set = set(entry.get("ewi_codes", []))
+        is_manual  = bool(codes_set & _NEEDS_MANUAL)
+        is_repair  = bool(codes_set & _NEEDS_REPAIR) and not is_manual
+        is_clean   = not is_manual and not is_repair
+        bt = metrics["by_type"].setdefault(otype, {"total": 0, "first_pass_clean": 0, "needs_llm_repair": 0, "needs_manual": 0})
+        bt["total"] += 1
+        if is_clean:   bt["first_pass_clean"]  += 1; total_first_pass   += 1
+        if is_repair:  bt["needs_llm_repair"]  += 1; total_needs_repair += 1
+        if is_manual:  bt["needs_manual"]       += 1; total_needs_manual += 1
+    total = len(manifest_entries)
+    metrics["totals"] = {
+        "objects": total,
+        "first_pass_clean":  total_first_pass,
+        "needs_llm_repair":  total_needs_repair,
+        "needs_manual":      total_needs_manual,
+        "first_pass_rate":   round(total_first_pass  / total * 100) if total else 100,
+        "manual_rate":       round(total_needs_manual / total * 100) if total else 0,
+    }
+    metrics_path = work_dir / "conversion" / "_conversion_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2))
+    print(f"Conversion metrics:  {metrics_path}")
+    print(f"  First-pass clean: {total_first_pass}/{total} ({metrics['totals']['first_pass_rate']}%)")
+    if total_needs_repair:
+        print(f"  Needs LLM repair: {total_needs_repair}")
+    if total_needs_manual:
+        print(f"  Needs manual:     {total_needs_manual} (SPG-EWI-0012 — check before deploying)")
 
     print(f"\nConversion complete: {len(manifest_entries)} objects")
     print(f"Conversion manifest: {manifest_path}")

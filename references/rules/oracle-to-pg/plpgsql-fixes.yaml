@@ -1,0 +1,65 @@
+# Oracle → PL/pgSQL fixes
+# Applied during Phase 4 conversion after function substitutions.
+# These patterns handle Oracle PL/SQL body syntax differences.
+
+fixes:
+  # Oracle declaration type aliases → PostgreSQL equivalents
+  type_aliases:
+    - name: binary_integer
+      pattern: '\bBINARY_INTEGER\b'
+      replacement: 'INTEGER'
+      flags: IGNORECASE
+
+    - name: pls_integer
+      pattern: '\bPLS_INTEGER\b'
+      replacement: 'INTEGER'
+      flags: IGNORECASE
+
+    - name: boolean_varchar
+      pattern: '\bBOOLEAN\b'
+      replacement: 'BOOLEAN'
+      flags: IGNORECASE
+      note: "Oracle BOOLEAN is PL/SQL-only; maps to PostgreSQL BOOLEAN in procs"
+
+    - name: varchar2_to_varchar
+      pattern: '\bVARCHAR2\b'
+      replacement: 'VARCHAR'
+      flags: IGNORECASE
+
+    - name: number_to_numeric
+      pattern: '\bNUMBER\b(?!\s*\()'
+      replacement: 'NUMERIC'
+      flags: IGNORECASE
+      note: "Bare NUMBER (no precision) → NUMERIC"
+
+  # Exception handling differences
+  exception_handling:
+    note: >
+      Oracle EXCEPTION block maps to PostgreSQL EXCEPTION block.
+      WHEN NO_DATA_FOUND → WHEN NO_DATA_FOUND (same name in pgSQL).
+      WHEN OTHERS → WHEN OTHERS (same).
+      RAISE_APPLICATION_ERROR(-20xxx, msg) → RAISE EXCEPTION '%', msg (manual review needed).
+
+  # DBMS_OUTPUT → RAISE NOTICE
+  dbms_output:
+    - name: dbms_output_put_line
+      pattern: '\bDBMS_OUTPUT\.PUT_LINE\s*\((.+?)\)'
+      replacement: "RAISE NOTICE '%', \\1"
+      flags: IGNORECASE
+      note: "DBMS_OUTPUT.PUT_LINE → RAISE NOTICE for logging"
+
+  # Unsupported Oracle constructs (will emit SPG-EWI-0012)
+  # These constructs have no direct PL/pgSQL equivalent. The converter emits
+  # SPG-EWI-0012 placeholders. Manual rewriting is required before deployment.
+  manual_review_required:
+    - "BULK COLLECT INTO"
+    - "FORALL"
+    - "TYPE ... IS TABLE OF"
+    - "TYPE ... IS VARRAY"
+    - "CURSOR ... IS SELECT"
+    - "%ROWTYPE"
+    - "%TYPE"
+    - "PRAGMA AUTONOMOUS_TRANSACTION"
+    - "UTL_FILE"
+    - "DBMS_PIPE"
+    - "XMLTYPE"

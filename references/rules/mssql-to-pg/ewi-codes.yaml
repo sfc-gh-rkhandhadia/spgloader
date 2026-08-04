@@ -116,6 +116,18 @@ codes:
       WITH (NOLOCK) / (NOLOCK) removed. Alias for SPG-EWI-0009 (retained
       for backwards compatibility with converted files using this code).
 
+  SPG-EWI-0012:
+    severity:    WARN
+    title:       "Unconverted construct — manual review required"
+    description: >
+      The automated converter could not translate this construct into valid
+      PL/pgSQL (e.g. TABLE variables, cursor loops, collection/record types,
+      or unsupported T-SQL / PL/SQL syntax). The placeholder comment marks
+      exactly where manual rewriting is needed. The object will likely deploy
+      but produce incorrect or incomplete behaviour until the marked section
+      is rewritten. assess.py reports all objects containing SPG-EWI-0012
+      in the WARN findings so they are visible before deployment.
+
   # =========================================================================
   # BLOCK CODES — migration cannot proceed until resolved
   # =========================================================================

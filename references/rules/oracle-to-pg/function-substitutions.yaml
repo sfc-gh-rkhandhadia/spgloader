@@ -1,0 +1,45 @@
+# Oracle → PostgreSQL function substitutions
+# Applied by convert_objects.py _apply_oracle_func_subs() during Phase 4 conversion.
+# Pattern: Python regex pattern string. Replacement: substitution string (supports \1 backrefs).
+
+substitutions:
+  # NULL handling
+  - name: nvl_to_coalesce
+    pattern: '\bNVL\s*\('
+    replacement: 'COALESCE('
+    flags: IGNORECASE
+    note: "NVL(expr, default) → COALESCE(expr, default) — identical 2-arg signature"
+
+  # Current timestamp
+  - name: sysdate_to_now
+    pattern: '\bSYSDATE\b'
+    replacement: 'NOW()'
+    flags: IGNORECASE
+    note: "Oracle SYSDATE → PostgreSQL NOW()"
+
+  - name: systimestamp_to_now
+    pattern: '\bSYSTIMESTAMP\b'
+    replacement: 'NOW()'
+    flags: IGNORECASE
+    note: "Oracle SYSTIMESTAMP → PostgreSQL NOW()"
+
+  # Dual pseudo-table removal
+  - name: from_dual_remove
+    pattern: '\s+FROM\s+(?:SYS\.)?DUAL\b'
+    replacement: ''
+    flags: IGNORECASE
+    note: "Remove FROM DUAL / FROM SYS.DUAL — not needed in PostgreSQL"
+
+  # Sequence NEXTVAL syntax
+  - name: sequence_nextval
+    pattern: '\b(\w+)\.NEXTVAL\b'
+    replacement: "NEXTVAL('\\1')"
+    flags: IGNORECASE
+    note: "seq.NEXTVAL → NEXTVAL('seq') — PostgreSQL function call syntax"
+
+  # UUID generation
+  - name: sys_guid_to_uuid
+    pattern: '\bSYS_GUID\s*\(\s*\)'
+    replacement: 'gen_random_uuid()'
+    flags: IGNORECASE
+    note: "SYS_GUID() → gen_random_uuid() — requires pgcrypto or pg 13+"

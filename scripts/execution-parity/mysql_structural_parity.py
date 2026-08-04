@@ -10,7 +10,7 @@ Writes `parity_results.json` in the schema that html_report._build_equivalence_t
 expects so the Equivalence Test tab is fully populated.
 
 Usage:
-    uv run --project <SKILL_DIR> python scripts/parity/mysql_structural_parity.py \\
+    uv run --project <SKILL_DIR> python scripts/execution-parity/mysql_structural_parity.py \\
       --source-type  mysql \\
       --source-host  localhost \\
       --source-port  3306 \\

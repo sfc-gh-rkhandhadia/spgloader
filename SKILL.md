@@ -128,7 +128,7 @@ Execute phases in order. Load each sub-skill, execute its full workflow, then co
 | 2 | `sub-skills/target-setup/SKILL.md` | Connect or provision SPG |
 | 3 | `sub-skills/ddl-extract/SKILL.md` | Extract schema (catalog or file) + build dep graph |
 | **3.5** | **`sub-skills/assess/SKILL.md`** | **SPG Compatibility Assessment (GUARDRAIL)** |
-| **3.6** | **`scripts/analyze_deprecated.py`** | **Deprecated Object Review (DECISION GATE)** |
+| **3.6** | **`sub-skills/deprecated-review/SKILL.md`** | **Deprecated Object Review (DECISION GATE)** |
 | 4 | `sub-skills/convert/SKILL.md` | Convert non-table objects (LLM, EWI-annotated) |
 | 5 | `sub-skills/deploy/SKILL.md` | Deploy to SPG (catalog-based parallel for tables; DDL for rest) |
 | 6 | `sub-skills/validate/SKILL.md` | Row counts + schema spot checks |

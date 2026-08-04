@@ -256,6 +256,17 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/repair_procedures.py \
 The repair loop auto-selects `references/prompts/procedure-repair-oracle-prompt.md`
 (PL/SQL→PL/pgSQL rules) when `--source-type oracle` is specified.
 
+**LLM prompt selection by source type** (auto-applied by `repair_procedures.py`):
+
+| Source type | Prompt file | Optimised for |
+|---|---|---|
+| `mssql` (default) | `procedure-repair-prompt.md` | T-SQL → PL/pgSQL |
+| `mysql` / `mariadb` | `procedure-repair-mysql-prompt.md` | MySQL SQL → PL/pgSQL |
+| `oracle` | `procedure-repair-oracle-prompt.md` | PL/SQL → PL/pgSQL |
+
+No flag is needed — the script reads `SOURCE_TYPE` from `source_conn.env` and selects automatically.
+Pass `--source-type <type>` to override if needed.
+
 For manual guidance, load:
 - `references/type-mappings/oracle-to-pg.md` — Oracle type and function mapping reference
 - `references/ewi-codes.md` — EWI annotation code catalog
