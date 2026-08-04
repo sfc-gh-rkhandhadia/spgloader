@@ -263,9 +263,11 @@ def validate_proc(schema, name):
 
 # ── Per-schema runner ─────────────────────────────────────────────────────────
 
-def run_schema(schema, grand, schema_results=None, exclude_fqns=None):
-    ms_obj  = discover_mssql_schema(schema)
-    spg_obj = discover_spg_schema(schema)
+def run_schema(schema, grand, schema_results=None, exclude_fqns=None, ms_schema_name=None):
+    # schema is the lowercase key; ms_schema_name is the original MSSQL casing (if different)
+    ms_name = ms_schema_name or schema
+    ms_obj  = discover_mssql_schema(ms_name)
+    spg_obj = discover_spg_schema(schema)  # SPG always lowercase
 
     ms_names  = set(ms_obj.keys())
     spg_names = set(spg_obj.keys())
@@ -412,10 +414,15 @@ def main():
     print("\nDiscovering schemas from system catalog...")
     ms_schemas  = discover_schemas_mssql()
     spg_schemas = discover_schemas_spg()
-    all_schemas = sorted(set(ms_schemas + spg_schemas))
+    # Normalize: MSSQL schemas are mixed case, SPG folds to lowercase.
+    # Build a mapping: lowercase → canonical MSSQL name, then iterate once per unique schema.
+    ms_lower_map = {s.lower(): s for s in ms_schemas}
+    spg_lower_set = {s.lower() for s in spg_schemas}
+    all_lower = sorted(set(list(ms_lower_map.keys()) + list(spg_lower_set)))
+    all_schemas = all_lower  # iterate with lowercase keys; discover_spg_schema uses them directly
     print("MSSQL schemas: %s" % ms_schemas)
     print("SPG   schemas: %s" % spg_schemas)
-    print("Union         : %s" % all_schemas)
+    print("Union (normalised): %s" % all_schemas)
 
     grand = {'pass': 0, 'fail': 0, 'missing': 0, 'spg_only': 0}
     schema_results = {}  # collector for JSON output
@@ -426,7 +433,8 @@ def main():
     print(SEP)
 
     for schema in all_schemas:
-        run_schema(schema, grand, schema_results, exclude_fqns=exclude_fqns if exclude_fqns else None)
+        ms_orig = ms_lower_map.get(schema, schema)  # original MSSQL casing
+        run_schema(schema, grand, schema_results, exclude_fqns=exclude_fqns if exclude_fqns else None, ms_schema_name=ms_orig)
 
     print("\n" + SEP)
     print("GRAND TOTAL ACROSS ALL SCHEMAS")

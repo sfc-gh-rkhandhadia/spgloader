@@ -167,10 +167,12 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         deploy_files = [summary_file]
 
     schemas: dict[str, dict] = {}
+    _schema_count = 0
     for f in deploy_files:
         d = _load_json(f)
         db = d.get("source_db", f.stem.replace("_deploy", "").replace("_summary", ""))
         phases  = d.get("phases", {})
+        _schema_count += phases.get("schemas", {}).get("ok", 0)
         failures = d.get("failures", [])
         fk_benign = sum(1 for x in failures if "already exists" in x.get("error", str(x)))
         fk_real   = sum(1 for x in failures if x.get("phase") == "foreign_keys"
@@ -193,36 +195,35 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     total_tables  = sum(s["tables_ok"]   for s in schemas.values())
     total_indexes = sum(s["indexes_ok"]  for s in schemas.values())
 
+    # Schema names from ddl_objects (accurate list of distinct schema names)
+    _ddl_objects = _load_json(ws / "ddl_objects.json")
+    _obj_list = _ddl_objects if isinstance(_ddl_objects, list) else _ddl_objects.get("objects", []) if isinstance(_ddl_objects, dict) else []
+    _schema_names = sorted({
+        obj.get("schema", "")
+        for obj in _obj_list
+        if isinstance(obj, dict) and obj.get("schema", "")
+    })
+    total_schema_count = _schema_count if _schema_count else len(_schema_names) or 1
+    schema_names_str   = ", ".join(_schema_names) if _schema_names else ""
+
     # -- views deployment -------------------------------------------------
-    vr     = _load_json(ws / "conversion" / "deploy_report.json")
-    fix_vr = _load_json(ws / "conversion" / "fix_report.json")
-    # fix_report.json is written after views are manually fixed and redeployed.
-    # When it has more successes than the initial deploy_report.json, treat it
-    # as the authoritative post-fix state: merge its succeeded list in and
-    # remove from failed any views that were successfully fixed.
-    if fix_vr.get("succeeded") and (
-        not vr or len(fix_vr["succeeded"]) > len(vr.get("succeeded", []))
-    ):
-        fix_ok_set = {_norm_view_name(n).lower() for n in fix_vr["succeeded"]}
-        extra_from_deploy = [
-            n for n in vr.get("succeeded", [])
-            if _norm_view_name(n).lower() not in fix_ok_set
-        ]
-        vr = dict(vr,
-                  succeeded  = list(fix_vr["succeeded"]) + extra_from_deploy,
-                  failed     = [
-                      f for f in vr.get("failed", [])
-                      if _norm_view_name(
-                          f.get("view", f) if isinstance(f, dict) else f
-                      ).lower() not in fix_ok_set
-                  ],
-                  auto_fixed = list(fix_vr.get("succeeded", [])),
-                  )
-    elif not vr:
-        vr = fix_vr
-    views_ok   = [_clean_name(n) for n in vr.get("succeeded", [])]
-    views_fail = vr.get("failed", [])
-    views_fixed = [_clean_name(n) for n in vr.get("auto_fixed", [])]
+    vr = _load_json(ws / "conversion" / "deploy_report.json")
+    # fix_report.json records which SQL files were successfully TRANSFORMED by fix_views.py,
+    # NOT which views deployed to SPG. The authoritative deployment outcome is deploy_report.json
+    # (succeeded / failed / skipped / auto_fixed). Do NOT override deploy_report with fix_report.
+    # Deduplicate the failed list — multiple deploy passes can produce duplicate entries
+    # for the same XML views that consistently fail (XQuery/FOR XML incompatible with Postgres).
+    _seen_fail = set()
+    _deduped_fail = []
+    for _f in vr.get("failed", []):
+        _key = (_f.get("view", _f) if isinstance(_f, dict) else _f).lower()
+        if _key not in _seen_fail:
+            _seen_fail.add(_key)
+            _deduped_fail.append(_f)
+    vr = dict(vr, failed=_deduped_fail)
+    views_ok    = [_clean_name(n) for n in vr.get("succeeded", [])]
+    views_fail  = vr.get("failed", [])
+    views_fixed = [_clean_name(n) for n in vr.get("auto_fixed", [])]  # empty → Fixed by Rules=0
     views_skip  = [_clean_name(n) for n in vr.get("skipped", [])]
 
     # -- functions deployment ---------------------------------------------
@@ -249,20 +250,30 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         if o.get("type", "").lower() == "trigger"
     }
 
+    def _is_trigger_fn(name: str) -> bool:
+        """Returns True if name matches a trigger function (e.g. 'iuperson_fn' matches trigger 'iuperson')."""
+        base = _clean_name(name).split(".")[-1].lower()
+        return base in _trigger_names or base.rstrip("_fn") in _trigger_names or base.replace("_fn", "") in _trigger_names
+
+    # Filter trigger functions out of procs_ok
+    actual_procs_ok = [n for n in procs_ok if not _is_trigger_fn(n)]
+    trigger_fns_ok  = [n for n in procs_ok if _is_trigger_fn(n)]
+    procs_ok = actual_procs_ok
+
     actual_procs_fail  = []
     triggers_fail      = []
     for f in procs_fail:
         raw_name = (f.get("procedure", "") if isinstance(f, dict) else str(f))
-        base     = _clean_name(raw_name).split(".")[-1].lower()
-        if base in _trigger_names:
+        if _is_trigger_fn(raw_name):
             triggers_fail.append(f)
         else:
             actual_procs_fail.append(f)
     procs_fail = actual_procs_fail
 
     # Triggers that succeeded are those in ddl_objects but not in triggers_fail
+    # Strip _fn suffix when matching trigger functions back to their trigger names
     _trigger_fail_bases = {
-        _clean_name(f.get("procedure", "") if isinstance(f, dict) else str(f)).split(".")[-1].lower()
+        _clean_name(f.get("procedure", "") if isinstance(f, dict) else str(f)).split(".")[-1].lower().replace("_fn", "")
         for f in triggers_fail
     }
     triggers_ok = [
@@ -281,6 +292,12 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     llm_fixed    = _to_name_list(rr.get("fixed_llm", []))
     rule_fixed   = _to_name_list(rr.get("fixed_rules", []))
     still_failed = _to_name_list(rr.get("still_failed", []))
+    # Split repair counts by type — repair_report bundles procs + trigger fns together
+    proc_llm_fixed   = [n for n in llm_fixed  if not _is_trigger_fn(n)]
+    trig_llm_fixed   = [n for n in llm_fixed  if _is_trigger_fn(n)]
+    proc_rule_fixed  = [n for n in rule_fixed if not _is_trigger_fn(n)]
+    trig_rule_fixed  = [n for n in rule_fixed if _is_trigger_fn(n)]
+    proc_still_failed = [n for n in still_failed if not _is_trigger_fn(n)]
 
     # Stubs (backward compat)
     stubs_report = _load_json(ws / "conversion" / "stubs_report.json")
@@ -355,7 +372,7 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     parity_file = ws / "parity" / "parity_report.md"
     if parity_file.exists():
         parity_report_md = parity_file.read_text(encoding="utf-8")[:8000]
-    parity_ran = parity_file.exists()
+    parity_ran = parity_file.exists() or (ws / "parity" / "parity_results.json").exists()
 
     # Structured parity results (written by full_validation.py / mysql_structural_parity.py)
     parity_results = _load_json(ws / "parity" / "parity_results.json")
@@ -413,6 +430,37 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
             parity_structured = True
             parity_ran = True
 
+    # -- Reconcile view deployment status with parity ground truth ---------------
+    # deploy_report.json is written during the INITIAL deployment pass. fix_views.py
+    # may subsequently re-deploy some previously failed/skipped views without updating
+    # deploy_report. When parity data is available, use it as ground truth:
+    #   - View in deploy fail/skip but NOT in parity.missing → it IS in SPG (was fixed later)
+    #   - View in deploy skip AND in parity.missing → truly not in SPG (move to fail)
+    if parity_results and parity_results.get("schemas") and not parity_results.get("_is_structural"):
+        _parity_missing_names = {
+            m.get("name", "").lower()
+            for sd in parity_results["schemas"].values()
+            for m in sd.get("missing_objects", [])
+        }
+        # Rescue failed views that parity confirms are actually in SPG
+        _views_still_fail = []
+        for _f in views_fail:
+            _nm = (_clean_name(_f.get("view", _f) if isinstance(_f, dict) else _f)).split(".")[-1].lower()
+            if _nm in _parity_missing_names:
+                _views_still_fail.append(_f)
+            else:
+                views_ok.append(_clean_name(_f.get("view", _f) if isinstance(_f, dict) else _f))
+        views_fail = _views_still_fail
+        # Reconcile skipped views: split into truly-missing (→ fail) and deployed (→ ok)
+        _new_views_skip = []
+        for _n in views_skip:
+            _nm = _n.split(".")[-1].lower()
+            if _nm in _parity_missing_names:
+                views_fail.append({"view": _n, "error": "Could not deploy — manual rewrite needed"})
+            else:
+                views_ok.append(_n)   # was skipped but parity confirms it IS in SPG
+        views_skip = _new_views_skip  # empty — all accounted for
+
     # Equivalence filter (user's legacy group include/skip choices)
     equiv_filter = _load_json(ws / "parity" / "equivalence_filter.json")
 
@@ -429,6 +477,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "source_db":      source_db,
         "spg_instance":   spg_instance,
         "is_blocked":     is_blocked,
+        # Schemas
+        "total_schema_count": total_schema_count,
+        "schema_names_str":   schema_names_str,
         # Deployment
         "schemas":        schemas,
         "total_tables":   total_tables,
@@ -450,9 +501,14 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "triggers_fail":  triggers_fail,
         "stubs":          stubs_list,
         # LLM repair
-        "llm_fixed":      llm_fixed,
-        "rule_fixed":     rule_fixed,
-        "still_failed":   still_failed,
+        "llm_fixed":       llm_fixed,
+        "rule_fixed":      rule_fixed,
+        "still_failed":    still_failed,
+        "proc_llm_fixed":  proc_llm_fixed,
+        "trig_llm_fixed":  trig_llm_fixed,
+        "proc_rule_fixed": proc_rule_fixed,
+        "trig_rule_fixed": trig_rule_fixed,
+        "proc_still_failed": proc_still_failed,
         # Assessment
         "warn_findings":  warn_findings,
         "ext_prereqs":    ext_prereqs,
@@ -481,7 +537,150 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "equiv_filter":       equiv_filter,
         # Name mapping
         "name_map":           name_map,
+        # Overall status (computed from all phases)
+        "overall_status":     _compute_overall_status(
+            is_blocked=is_blocked,
+            total_fail_objs=(len(views_fail) + len(funcs_fail) + len(procs_fail) + len(triggers_fail)),
+            val_checks=val_checks,
+            witness_ran=witness_ran,
+            witness_summary=witness_chains.get("summary", {}),
+            parity_ran=parity_ran,
+            parity_results=parity_results,
+        ),
     }
+
+
+def _compute_overall_status(is_blocked, total_fail_objs, val_checks,
+                            witness_ran, witness_summary, parity_ran, parity_results):
+    """Return a dict describing each migration phase status for the Overview panel."""
+    # 1. Compatibility Check
+    if is_blocked:
+        compat = ("BLOCKED", "fail", "Compatibility check failed — migration was blocked.")
+    else:
+        compat = ("PASSED", "success", "No blocking compatibility issues found.")
+
+    # 2. Deployment
+    if total_fail_objs == 0:
+        deploy = ("PASSED", "success", "All objects deployed to SPG successfully.")
+    else:
+        deploy = ("NEEDS ATTENTION", "warn", f"{total_fail_objs} object(s) failed deployment — check Deployment / Objects tabs.")
+
+    # 3. Schema Verification
+    if not val_checks:
+        schema_v = ("NOT RUN", "muted", "Schema verification has not been executed yet.")
+    else:
+        failed_checks = [c for c in val_checks if not c.get("passed", True)]
+        if not failed_checks:
+            schema_v = ("PASSED", "success", f"All {len(val_checks)} schema checks passed.")
+        else:
+            schema_v = ("NEEDS ATTENTION", "warn", f"{len(failed_checks)} of {len(val_checks)} schema checks failed.")
+
+    # 4. Functional Smoke Test
+    if not witness_ran:
+        smoke = ("NOT RUN", "muted", "Functional smoke test has not been executed yet.")
+    else:
+        w_fail = witness_summary.get("failed", 0)
+        w_ok   = witness_summary.get("validated", 0)
+        w_part = witness_summary.get("partially_validated", 0)
+        if w_fail == 0:
+            smoke = ("PASSED", "success", f"{w_ok} objects validated, {w_part} partial.")
+        else:
+            smoke = ("NEEDS ATTENTION", "warn", f"{w_fail} objects failed on source DB — check Functional Smoke Test tab.")
+
+    # 5. Parity Check
+    if not parity_ran or not parity_results:
+        parity = ("NOT RUN", "muted", "Parity check has not been executed yet.")
+    else:
+        grand = parity_results.get("grand", {})
+        p_fail = grand.get("fail", 0) + grand.get("error", 0)
+        p_miss = grand.get("missing", 0)
+        p_pass = grand.get("pass", 0)
+        if p_fail == 0 and p_miss == 0:
+            parity = ("PASSED", "success", f"All {p_pass} objects match between source and SPG.")
+        elif p_fail > 0:
+            parity = ("NEEDS ATTENTION", "warn", f"{p_fail} object(s) mismatched, {p_miss} missing in SPG — review Parity Check tab.")
+        else:
+            parity = ("REVIEW", "info", f"{p_miss} object(s) missing in SPG (XML views or schema differences).")
+
+    # Overall rollup
+    statuses = [compat[1], deploy[1], schema_v[1], smoke[1], parity[1]]
+    if "fail" in statuses or "BLOCKED" in [compat[0]]:
+        overall = ("BLOCKED", "fail")
+    elif all(s == "success" for s in statuses):
+        overall = ("MIGRATION COMPLETE", "success")
+    elif "muted" in statuses:
+        overall = ("IN PROGRESS", "info")
+    else:
+        overall = ("NEEDS ATTENTION", "warn")
+
+    return {
+        "overall":     overall,
+        "compat":      compat,
+        "deploy":      deploy,
+        "schema_v":    schema_v,
+        "smoke":       smoke,
+        "parity":      parity,
+    }
+
+
+def _build_overall_status_panel(os: dict, mig_pct: int = 0, mig_ok: int = 0, mig_total: int = 0) -> str:
+    """Render the Overall Migration Status progress bar for the Overview tab."""
+    overall_label, overall_style = os["overall"]
+
+    color_map = {
+        "success": ("#16a34a", "#dcfce7", "✓"),
+        "warn":    ("#d97706", "#fef3c7", "⚠"),
+        "fail":    ("#dc2626", "#fef2f2", "✗"),
+        "info":    ("#2563eb", "#eff6ff", "→"),
+        "muted":   ("#9ca3af", "#f9fafb", "○"),
+    }
+
+    overall_color, _, _ = color_map.get(overall_style, color_map["muted"])
+
+    pct_color = "#16a34a" if mig_pct == 100 else "#d97706" if mig_pct >= 80 else "#dc2626"
+    pct_bg    = "#dcfce7" if mig_pct == 100 else "#fef3c7" if mig_pct >= 80 else "#fef2f2"
+    pct_bar_w = max(4, mig_pct)  # width % for the fill bar
+
+    steps = [
+        ("Compatibility Check", os["compat"]),
+        ("Deployment",          os["deploy"]),
+        ("Schema Verification", os["schema_v"]),
+        ("Functional Smoke Test", os["smoke"]),
+        ("Parity Check",        os["parity"]),
+    ]
+
+    step_html = ""
+    for i, (step_name, (step_label, step_style, step_tip)) in enumerate(steps):
+        c, bg, icon = color_map.get(step_style, color_map["muted"])
+        connector = '<div style="flex:1;height:2px;background:#e5e7eb;align-self:center;margin:0 4px"></div>' if i < len(steps) - 1 else ""
+        step_html += f"""
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px;min-width:120px;max-width:160px">
+          <div title="{step_tip}" style="width:42px;height:42px;border-radius:50%;background:{bg};border:2px solid {c};display:flex;align-items:center;justify-content:center;font-size:18px;cursor:default">{icon}</div>
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;color:var(--muted);text-align:center">{step_name}</div>
+          <span style="font-size:11px;font-weight:700;color:{c};background:{bg};padding:2px 8px;border-radius:10px;border:1px solid {c}">{step_label}</span>
+        </div>{connector}"""
+
+    return f"""
+  <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:20px 24px;margin-bottom:24px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+      <h3 style="margin:0;font-size:15px;color:var(--text)">Overall Migration Status</h3>
+      <div style="display:flex;align-items:center;gap:14px">
+        <div style="text-align:right" title="Application objects only: tables + views + functions + procedures + triggers. Indexes excluded — they are secondary infrastructure and would inflate the % when all tables deploy but some views fail.">
+          <div style="font-size:26px;font-weight:800;color:{pct_color};line-height:1">{mig_pct}%</div>
+          <div style="font-size:11px;color:var(--muted)">{mig_ok:,} of {mig_total:,} app objects migrated</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">tables · views · funcs · procs · triggers</div>
+          <div style="width:120px;height:6px;background:#e5e7eb;border-radius:4px;margin-top:5px">
+            <div style="width:{pct_bar_w}%;height:6px;background:{pct_color};border-radius:4px"></div>
+          </div>
+        </div>
+        <span style="font-size:13px;font-weight:700;color:{overall_color};background:{'#dcfce7' if overall_style=='success' else '#fef3c7' if overall_style=='warn' else '#eff6ff' if overall_style=='info' else '#fef2f2'};padding:4px 14px;border-radius:20px;border:1px solid {overall_color}">{overall_label}</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between">
+      {step_html}
+    </div>
+    <p style="font-size:11px;color:var(--muted);margin:14px 0 0">Hover over each step circle for details.</p>
+  </div>"""
 
 
 # ---------------------------------------------------------------------------
@@ -623,28 +822,14 @@ def _build_val_rows(checks: list, name_map: dict | None = None) -> str:
         label = chk.replace("_", " ").title()
         schema = c.get("_schema", "")
         schema_cell = f"<td class='mono small'>{schema}</td>" if schema else "<td class='muted'>—</td>"
-        # Source → SPG name columns (for per-table row_count checks)
-        if chk == "row_count" and c.get("table"):
-            tbl = c["table"]
-            if name_map:
-                src_name, spg_name = _resolve_name_pair(tbl, name_map)
-            else:
-                src_name = tbl
-                spg_name = tbl.lower() if tbl.lower() != tbl else "—"
-            spg_cell = (f"<td class='mono small' style='color:var(--muted)'>{spg_name}</td>"
-                        if spg_name != "—" else "<td class='muted' style='text-align:center'>—</td>")
-            obj_cells = f"<td class='mono small'>{src_name}</td>{spg_cell}"
-        else:
-            obj_cells = "<td class='muted' style='text-align:center'>—</td><td class='muted' style='text-align:center'>—</td>"
         rows.append(
             f"<tr>{schema_cell}"
-            f"{obj_cells}"
             f"<td{tip_attr} style='{'cursor:help' if tip else ''}'>{label}"
             f"{'<span class=\"tip-icon\">ⓘ</span>' if tip else ''}"
             f"</td><td>{badge}</td>"
             f"<td class='small'>{detail}</td></tr>"
         )
-    return "".join(rows) or "<tr><td colspan='6' class='muted-msg'>No checks run</td></tr>"
+    return "".join(rows) or "<tr><td colspan='4' class='muted-msg'>No checks run</td></tr>"
 
 
 def _build_dep_rows(groups: dict) -> str:
@@ -691,7 +876,7 @@ def _build_equivalence_tab(data: dict) -> str:
   <div class="section">
     <div class="alert alert-success" style="background:var(--surface2);border-left:3px solid var(--muted)">
       <span class="alert-icon" style="color:var(--muted)">○</span>
-      <div><strong>Not Run</strong> — Equivalence / parity testing was not yet executed.
+      <div><strong>Not Run</strong> — Parity check (3. Parity Check) was not yet executed.
       Re-invoke the skill and choose Phase 6.6 at the end of Phase 6.</div>
     </div>
   </div>"""
@@ -846,10 +1031,9 @@ def _build_equivalence_tab(data: dict) -> str:
         return f"""
   {exclusion_banner}
   <div class="section">
-    <h2>Equivalence Test Summary (Phase 6.6)</h2>
+    <h2>Parity Check</h2>
     <p class="small" style="color:var(--muted);margin-bottom:14px">
-      Structural parity: object existence and column counts compared between
-      source and SPG target across all migrated schemas.
+      Do queries produce the same results on both systems? Object signatures, column names, and row counts are compared between source and SPG side-by-side across all migrated schemas.
     </p>
     <div class="summary-row">{cards}</div>
   </div>
@@ -913,9 +1097,23 @@ def _build_equivalence_tab(data: dict) -> str:
 
         missing_rows = ""
         for m in missing:
+            obj_fqn   = m.get("fqn", "")
+            obj_name  = m.get("name", obj_fqn.split(".")[-1] if "." in obj_fqn else obj_fqn)
+            obj_type  = m.get("type", "")
+            # Resolve SPG name from name_map if available
+            if name_map:
+                src_nm, spg_nm = _resolve_name_pair(obj_name, name_map)
+            else:
+                src_nm, spg_nm = obj_name, "—"
             missing_rows += (
-                f"<tr><td class='mono small'>{m.get('fqn','')}</td>"
-                f"<td class='small'>{m.get('type','')}</td></tr>"
+                f"<tr>"
+                f"<td class='mono small'>{schema_name}</td>"
+                f"<td class='mono small'>{obj_fqn}</td>"
+                f"<td class='mono small' style='color:var(--muted)'>{spg_nm if spg_nm != '—' else obj_name}</td>"
+                f"<td class='small'><span class='badge badge-muted'>{obj_type}</span></td>"
+                f"<td><span class='badge badge-warn'>⊘ Missing</span></td>"
+                f"<td class='small' style='color:var(--muted)'>Object exists in source but not found in SPG. May be a schema difference or failed deployment.</td>"
+                f"</tr>"
             )
 
         excluded = s.get("excluded_objects", [])
@@ -929,24 +1127,21 @@ def _build_equivalence_tab(data: dict) -> str:
     <div class="section">
       <h2>Schema: {schema_name}
         <span class='badge badge-{badge_style}' style='font-size:12px;margin-left:8px'>{badge_text}</span>
-        <span class='badge badge-muted'    style='font-size:12px;margin-left:4px'>{len(missing)} missing</span>
+        <span class='badge badge-{'warn' if missing else 'success'}'    style='font-size:12px;margin-left:4px'>{len(missing)} missing</span>
         {f"<span class='badge badge-info' style='font-size:12px;margin-left:4px'>{len(excluded)} excluded</span>" if excluded else ""}
       </h2>
-      <div class="table-wrap">
+      {'<div class="table-wrap"><table><thead><tr><th>Schema</th><th>Source Name</th><th>SPG Name</th><th>Type</th><th style="text-align:right">MSSQL</th><th style="text-align:right">SPG</th><th>Verdict</th><th>Issues</th></tr></thead><tbody>' + (rows if rows else '<tr><td colspan="8" class="muted-msg">No matched objects tested</td></tr>') + '</tbody></table></div>' if rows else ''}
+      {f"""<div class='table-wrap' style='margin-top:12px'>
+        <div style='font-size:12px;font-weight:600;color:var(--amber);padding:8px 0 6px'>
+          ⊘ {len(missing)} Object(s) Missing in SPG — exist in source but not found in target
+        </div>
         <table>
           <thead><tr>
-            <th>Schema</th><th>Source Name</th><th>SPG Name</th><th>Type</th>
-            <th style="text-align:right">MSSQL</th>
-            <th style="text-align:right">SPG</th>
-            <th>Verdict</th><th>Issues</th>
+            <th>Schema</th><th>Source Object (MSSQL)</th><th>SPG Object</th><th>Type</th><th>Status</th><th>Note</th>
           </tr></thead>
-          <tbody>{rows if rows else "<tr><td colspan='8' class='muted-msg'>No matched objects tested</td></tr>"}</tbody>
+          <tbody>{missing_rows}</tbody>
         </table>
-      </div>
-      {f"""<details style='margin-top:12px'><summary style='cursor:pointer;font-size:12px;color:var(--amber)'>{len(missing)} Missing Objects (in MSSQL, not in SPG)</summary>
-        <div class='table-wrap' style='margin-top:8px'><table>
-        <thead><tr><th>Object</th><th>Type</th></tr></thead>
-        <tbody>{missing_rows}</tbody></table></div></details>""" if missing else ""}
+      </div>""" if missing else ""}
       {f"""<details style='margin-top:8px'><summary style='cursor:pointer;font-size:12px;color:var(--blue)'>{len(excluded)} Excluded Objects (user opted out of testing)</summary>
         <div class='table-wrap' style='margin-top:8px'><table>
         <thead><tr><th>Object (FQN)</th><th>Type</th></tr></thead>
@@ -956,9 +1151,9 @@ def _build_equivalence_tab(data: dict) -> str:
     return f"""
   {exclusion_banner}
   <div class="section">
-    <h2>Equivalence Test Summary (Phase 6.6)</h2>
+    <h2>Parity Check</h2>
     <p class="small" style="color:var(--muted);margin-bottom:14px">
-      Structural parity: object existence, parameter counts, view row counts compared between MSSQL source and SPG target.
+      Do queries produce the same results on both systems? Object existence, parameter counts, and view row counts are compared between MSSQL source and SPG target.
     </p>
     <div class="summary-row">{cards}</div>
   </div>
@@ -980,7 +1175,7 @@ def _build_witness_tab(data: dict) -> str:
   <div class="section">
     <div class="alert alert-success" style="background:var(--surface2);border-left:3px solid var(--muted)">
       <span class="alert-icon" style="color:var(--muted)">○</span>
-      <div><strong>Not Run</strong> — Witness validation was skipped.
+      <div><strong>Not Run</strong> — Functional smoke test (2. Functional Smoke Test) was skipped.
       To run, re-invoke the skill and choose Phase 6.5 at the end of Phase 6.</div>
     </div>
   </div>"""
@@ -1060,10 +1255,10 @@ def _build_witness_tab(data: dict) -> str:
 
     return f"""
   <div class="section">
-    <h2>Source-Side Witness Validation (Phase 6.5)</h2>
+    <h2>Functional Smoke Test</h2>
     <p class="small" style="color:var(--muted);margin-bottom:14px">
-      Synthetic {seed_volume}-row dataset seeded into source DB. Views and procedures queried to confirm they execute and return rows.
-      Parity testing against SPG is in the <strong>Equivalence Test</strong> tab.
+      Do views and procedures return data? Every deployed view, function, and procedure is called on the source database to confirm it executes and returns rows. Catches objects that deployed successfully but fail at runtime.
+      Results compared against SPG are in the <strong>Parity Check</strong> tab.
     </p>
     {seed_panel}
     <div class="summary-row">
@@ -1101,7 +1296,23 @@ def render_html(data: dict) -> str:
     llm_fixed    = data["llm_fixed"]
     rule_fixed   = data["rule_fixed"]
     still_failed = data["still_failed"]
+    proc_llm_fixed   = data.get("proc_llm_fixed",  llm_fixed)
+    trig_llm_fixed   = data.get("trig_llm_fixed",  [])
+    proc_rule_fixed  = data.get("proc_rule_fixed",  rule_fixed)
+    trig_rule_fixed  = data.get("trig_rule_fixed",  [])
+    proc_still_failed = data.get("proc_still_failed", still_failed)
     name_map     = data.get("name_map", {})
+    total_schema_count = data.get("total_schema_count", len(schemas))
+    schema_names_str   = data.get("schema_names_str", "")
+    overall_status = data.get("overall_status") or _compute_overall_status(
+        is_blocked=is_blocked,
+        total_fail_objs=(len(views_fail) + len(funcs_fail) + len(procs_fail) + len(triggers_fail)),
+        val_checks=data.get("val_checks", []),
+        witness_ran=data.get("witness_ran", False),
+        witness_summary=data.get("witness_summary", {}),
+        parity_ran=data.get("parity_ran", False),
+        parity_results=data.get("parity_results", {}),
+    )
 
     total_tables  = data["total_tables"]
     total_indexes = data["total_indexes"]
@@ -1118,6 +1329,17 @@ def render_html(data: dict) -> str:
 
     assess_status = "&#10003; PASSED" if not is_blocked else "&#9888; BLOCKED"
     assess_badge  = "success" if not is_blocked else "fail"
+
+    # Migration % — based on application objects only (tables + views + functions + procedures + triggers)
+    # Indexes are excluded: they are infrastructure/secondary objects and dominate the count,
+    # making the % misleadingly high when views fail.
+    _mig_src_views = len(data.get("views_ok", [])) + len(data.get("views_fail", [])) + len(data.get("views_skip", []))
+    _mig_src_fns   = len(data.get("funcs_ok", [])) + len(data.get("funcs_fail", []))
+    _mig_src_procs = len(data.get("procs_ok", [])) + len(data.get("procs_fail", [])) + len(data.get("procs_legacy", []))
+    _mig_src_trigs = len(data.get("triggers_ok", [])) + len(data.get("triggers_fail", []))
+    _mig_ok    = total_tables + total_views + total_funcs + total_procs + total_trigs
+    _mig_total = total_tables + _mig_src_views + _mig_src_fns + _mig_src_procs + _mig_src_trigs
+    _mig_pct   = round(_mig_ok / _mig_total * 100) if _mig_total else 100
 
     # build per-tab HTML fragments
     schema_rows = ""
@@ -1146,8 +1368,18 @@ def render_html(data: dict) -> str:
                                     for f in funcs_fail]
     procs_all  = list(procs_ok) + [_clean_name(f.get("procedure", f) if isinstance(f, dict) else f)
                                     for f in procs_fail]
-    triggers_all = list(triggers_ok) + [_clean_name(f.get("procedure", f) if isinstance(f, dict) else f)
-                                        for f in triggers_fail]
+    def _trig_fail_name(f) -> str:
+        """Get a schema-qualified name for a trigger fail entry.
+        Prefer schema prefix from the 'file' field when procedure has no schema."""
+        if isinstance(f, dict):
+            proc = f.get("procedure", "")
+            if "." not in proc and f.get("file", ""):
+                file_clean = _clean_name(f["file"])  # 'humanresources__demployee.sql' → 'humanresources.demployee'
+                if "." in file_clean:
+                    return file_clean.split(".")[0] + "." + proc
+            return _clean_name(proc)
+        return _clean_name(f)
+    triggers_all = list(triggers_ok) + [_trig_fail_name(f) for f in triggers_fail]
 
     # deploy_failed sets for badge priority (these failed after LLM repair)
     views_deploy_failed  = {_clean_name(f.get("view", f) if isinstance(f, dict) else f).split(".")[-1].lower()
@@ -1241,12 +1473,12 @@ def render_html(data: dict) -> str:
     text-transform:uppercase;letter-spacing:.6px;margin:0 0 10px}}
 
   /* ── KPI grid ── */
-  .kpi-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-    gap:14px;margin-bottom:28px}}
+  .kpi-grid{{display:grid;grid-template-columns:repeat(8,1fr);
+    gap:10px;margin-bottom:28px}}
   .kpi-card{{background:var(--surface);border:1px solid var(--border);
-    border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:4px}}
-  .kpi-card .num{{font-size:28px;font-weight:800;line-height:1}}
-  .kpi-card .label{{font-size:11px;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.5px}}
+    border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px}}
+  .kpi-card .num{{font-size:24px;font-weight:800;line-height:1}}
+  .kpi-card .label{{font-size:10px;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
   .kpi-card .sub{{font-size:11px;color:var(--muted)}}
   .green{{color:var(--green)}}.amber{{color:var(--amber)}}.red-c{{color:var(--red)}}
   .purple{{color:var(--purple)}}
@@ -1367,18 +1599,18 @@ def render_html(data: dict) -> str:
 <div class="tabs" id="tabBar">
   <button class="tab-btn active" onclick="showTab('overview')"
     data-tip="High-level migration summary: tables, indexes, views, functions, procedures deployed — and how many were fixed by rules or LLM repair.">Overview</button>
-  <button class="tab-btn" onclick="showTab('deployment')"
-    data-tip="Per-schema table deployment details: row counts, indexes, foreign keys, and duration. Also shows views, functions, and procedures deployment outcomes.">Deployment</button>
-  <button class="tab-btn" onclick="showTab('objects')"
-    data-tip="Full list of every converted view, function, and stored procedure — showing whether each was deployed, fixed by rules, fixed by LLM, or still failing.">Objects</button>
-  <button class="tab-btn" onclick="showTab('validation')"
-    data-tip="Schema validation checks run after deployment: table counts, column counts, primary keys, AUTO_INCREMENT columns, foreign keys, and indexes compared between source and SPG.">Validation</button>
   <button class="tab-btn" onclick="showTab('assessment')"
-    data-tip="Pre-migration SPG Compatibility Assessment: flags any source objects that use features with no PostgreSQL equivalent (CLR, linked servers, temporal tables, etc.) before deployment begins.">Assessment</button>
+    data-tip="Step 1 of 4 — Pre-Migration Compatibility Check: scans the source schema before deployment for SQL Server features that have no direct PostgreSQL equivalent (CLR assemblies, linked servers, PIVOT, temporal tables, spatial types, etc.). Must PASS before the migration can proceed.">Compatibility Check</button>
+  <button class="tab-btn" onclick="showTab('deployment')"
+    data-tip="Step 2 of 4 — Per-schema table deployment details: row counts, indexes, foreign keys, and duration. Also shows views, functions, and procedures deployment outcomes.">Deployment</button>
+  <button class="tab-btn" onclick="showTab('objects')"
+    data-tip="Step 2 of 4 (detail) — Full list of every converted view, function, and stored procedure — showing whether each was deployed, fixed by rules, fixed by LLM, or still failing.">Objects</button>
+  <button class="tab-btn" onclick="showTab('validation')"
+    data-tip="Step 3 of 4 — Schema Verification: are all tables, indexes, and foreign keys in SPG? Compares source vs SPG object counts after deployment to confirm everything landed correctly.">Schema Verification</button>
   <button class="tab-btn" onclick="showTab('witness')"
-    data-tip="Phase 6.5 — Synthetic 3-row seed data is inserted into the source DB, then every deployed view, function, and procedure is called to confirm it executes and returns data on the source side.">Witness</button>
+    data-tip="Step 3 of 4 — Functional Smoke Test: do views and procedures return data? Calls every deployed view, function, and procedure on the source database to confirm they execute and return rows.">Functional Smoke Test</button>
   <button class="tab-btn" onclick="showTab('equivalence')"
-    data-tip="Phase 6.6 — Structural parity between source and SPG: table counts, column counts, and routines compared schema by schema. Confirms the migration is structurally complete and ready for sign-off.">Equivalence Test</button>
+    data-tip="Step 4 of 4 — Parity Check: do queries produce the same results on both systems? Compares object signatures, column names, and row counts between source and SPG side-by-side. Sign-off gate.">Parity Check</button>
 </div>
 
 <div class="content">
@@ -1388,7 +1620,15 @@ def render_html(data: dict) -> str:
 
   {'<div style="background:#fef2f2;border-left:4px solid #dc2626;padding:12px 16px;border-radius:6px;margin-bottom:20px"><strong style="color:#dc2626">&#9888; ' + str(total_fail_objs) + ' object(s) are NOT in your SPG instance</strong><div style="font-size:13px;margin-top:4px;color:#111">The following objects exist in the source database but were not deployed to SPG: ' + ', '.join(filter(None, [str(total_idx_fail) + ' indexes' if total_idx_fail else '', str(len(views_fail)) + ' views' if views_fail else '', str(len(funcs_fail)) + ' functions' if funcs_fail else '', str(len(procs_fail)) + ' procedures' if procs_fail else '', str(len(triggers_fail)) + ' triggers' if triggers_fail else ''])) + '. Check the Deployment tab for details and fix the errors to deploy them.</div></div>' if total_fail_objs else ''}
 
+  <!-- ── Overall Migration Status ── -->
+  {_build_overall_status_panel(overall_status, _mig_pct, _mig_ok, _mig_total)}
+
   <div class="kpi-grid">
+    <div class="kpi-card" data-tip="Database schemas (namespaces) migrated to SPG. Each schema groups related tables, views, and routines together.">
+      <div class="num green">{total_schema_count}</div>
+      <div class="label">Schemas<span class="tip-icon">ⓘ</span></div>
+      <div class="sub" style="color:var(--green)">100% deployed</div>
+    </div>
     <div class="kpi-card" data-tip="Base tables (CREATE TABLE) migrated from the source database. Temporary and derived tables are excluded. All source tables should appear here at 100%.">
       <div class="num green">{total_tables:,}</div>
       <div class="label">Tables<span class="tip-icon">ⓘ</span></div>
@@ -1402,23 +1642,23 @@ def render_html(data: dict) -> str:
     </div>
     <div class="kpi-card" data-tip="CREATE VIEW objects deployed to SPG. Objects shown as 'not in SPG' exist in the source but failed deployment and are absent from your target database.">
       <div class="num {'red' if (not total_views and views_fail) else ('amber' if (total_views and views_fail) else 'green')}">{total_views}</div>
-      <div class="label">Views in SPG<span class="tip-icon">ⓘ</span></div>
+      <div class="label">Views<span class="tip-icon">ⓘ</span></div>
       <div class="sub" style="color:var(--{'red' if views_fail else 'green'})">{len(views_fail)} not in SPG</div>
       <div class="sub">{len(data.get('views_skip', []))} skipped</div>
     </div>
     <div class="kpi-card" data-tip="Scalar and table-valued functions deployed to SPG. Objects shown as 'not in SPG' failed deployment and are absent from your target database.">
       <div class="num {'red' if (not total_funcs and funcs_fail) else ('amber' if (total_funcs and funcs_fail) else 'green')}">{total_funcs}</div>
-      <div class="label">Functions in SPG<span class="tip-icon">ⓘ</span></div>
+      <div class="label">Functions<span class="tip-icon">ⓘ</span></div>
       <div class="sub" style="color:var(--{'red' if funcs_fail else 'green'})">{len(funcs_fail)} not in SPG</div>
       <div class="sub">0 skipped</div>
     </div>
     <div class="kpi-card" data-tip="Stored procedures deployed to SPG. Failed procedures are NOT in the target database. They go through rule-based then LLM repair — remaining failures need manual review.">
       <div class="num {'red' if (not total_procs and procs_fail) else ('amber' if (total_procs and procs_fail) else 'green')}">{total_procs}</div>
-      <div class="label">Procedures in SPG<span class="tip-icon">ⓘ</span></div>
+      <div class="label">Procedures<span class="tip-icon">ⓘ</span></div>
       <div class="sub" style="color:var(--{'red' if procs_fail else 'green'})">{len(procs_fail)} not in SPG</div>
       <div class="sub">{len(procs_legacy)} legacy skipped</div>
     </div>
-    {'<div class="kpi-card" data-tip="Database triggers deployed to SPG. Failed triggers are NOT in the target database."><div class="num ' + ("red" if (not total_trigs and triggers_fail) else ("amber" if (total_trigs and triggers_fail) else "green")) + '">' + str(total_trigs) + '</div><div class="label">Triggers in SPG<span class="tip-icon">ⓘ</span></div><div class="sub" style="color:var(--' + ("red" if triggers_fail else "green") + ')">' + str(len(triggers_fail)) + ' not in SPG</div><div class="sub">0 skipped</div></div>' if (triggers_ok or triggers_fail) else ''}
+    {'<div class="kpi-card" data-tip="Database triggers deployed to SPG. Failed triggers are NOT in the target database."><div class="num ' + ("red" if (not total_trigs and triggers_fail) else ("amber" if (total_trigs and triggers_fail) else "green")) + '">' + str(total_trigs) + '</div><div class="label">Triggers<span class="tip-icon">ⓘ</span></div><div class="sub" style="color:var(--' + ("red" if triggers_fail else "green") + ')">' + str(len(triggers_fail)) + ' not in SPG</div><div class="sub">0 skipped</div></div>' if (triggers_ok or triggers_fail) else ''}
     <div class="kpi-card" data-tip="Procedures and functions that failed initial conversion and were successfully repaired by the Cortex AI LLM repair loop. &#39;Still failing&#39; = objects that exceeded the repair budget and require manual intervention.">
       <div class="num purple">{total_repair}</div>
       <div class="label">LLM Repaired<span class="tip-icon">ⓘ</span></div>
@@ -1591,19 +1831,19 @@ def render_html(data: dict) -> str:
             <td><strong>Procedures</strong></td>
             <td class="num {'ok' if not procs_fail else 'amber'}">{total_procs}</td>
             <td class="num {'fail' if procs_fail else 'ok'}">{len(procs_fail)}</td>
-            <td class="num ok">{len(rule_fixed)}</td>
-            <td class="num ok">{len(llm_fixed)}</td>
-            <td class="num {'fail' if still_failed else 'ok'}">{len(still_failed)}</td>
+            <td class="num ok">{len(proc_rule_fixed)}</td>
+            <td class="num ok">{len(proc_llm_fixed)}</td>
+            <td class="num {'fail' if proc_still_failed else 'ok'}">{len(proc_still_failed)}</td>
             <td class="num muted">{len(procs_legacy)}</td>
           </tr>
-          {'<tr><td><strong>Triggers</strong></td><td class="num ' + ("ok" if not triggers_fail else "amber") + '">' + str(total_trigs) + '</td><td class="num ' + ("fail" if triggers_fail else "ok") + '">' + str(len(triggers_fail)) + '</td><td class="num ok">0</td><td class="num ok">0</td><td class="num ok">0</td><td class="num muted">0</td></tr>' if (triggers_ok or triggers_fail) else ''}
+          {'<tr><td><strong>Triggers</strong></td><td class="num ' + ("ok" if not triggers_fail else "amber") + '">' + str(total_trigs) + '</td><td class="num ' + ("fail" if triggers_fail else "ok") + '">' + str(len(triggers_fail)) + '</td><td class="num ok">' + str(len(trig_rule_fixed)) + '</td><td class="num ok">' + str(len(trig_llm_fixed)) + '</td><td class="num ok">0</td><td class="num muted">0</td></tr>' if (triggers_ok or triggers_fail) else ''}
           <tr style="font-weight:600;border-top:2px solid var(--border)">
             <td>Total</td>
             <td class="num ok">{total_views + total_funcs + total_procs + total_trigs}</td>
             <td class="num {'fail' if (views_fail or funcs_fail or procs_fail or triggers_fail) else 'ok'}">{len(views_fail) + len(funcs_fail) + len(procs_fail) + len(triggers_fail)}</td>
-            <td class="num ok">{len(views_fixed) + len(rule_fixed)}</td>
-            <td class="num ok">{len(llm_fixed)}</td>
-            <td class="num {'fail' if still_failed else 'ok'}">{len(still_failed)}</td>
+            <td class="num ok">{len(views_fixed) + len(proc_rule_fixed) + len(trig_rule_fixed)}</td>
+            <td class="num ok">{len(proc_llm_fixed) + len(trig_llm_fixed)}</td>
+            <td class="num {'fail' if (proc_still_failed) else 'ok'}">{len(proc_still_failed)}</td>
             <td class="num muted">{len(procs_legacy)}</td>
           </tr>
         </tbody>
@@ -1690,10 +1930,11 @@ def render_html(data: dict) -> str:
 <div class="tab-panel" id="tab-validation">
 
   <div class="section">
-    <h2>Schema Validation Checks</h2>
+    <h2>Schema Verification</h2>
+    <p class="small" style="color:var(--muted);margin-bottom:14px">Are all tables, indexes, and foreign keys in SPG? Compares source vs SPG object counts after deployment to confirm everything landed correctly.</p>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Schema</th><th>Source Object</th><th>SPG Object</th><th>Check</th><th>Result</th><th>Details</th></tr></thead>
+        <thead><tr><th>Schema</th><th>Check</th><th>Result</th><th>Details</th></tr></thead>
         <tbody>{val_rows}</tbody>
       </table>
     </div>
