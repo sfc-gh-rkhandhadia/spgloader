@@ -292,12 +292,20 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     llm_fixed    = _to_name_list(rr.get("fixed_llm", []))
     rule_fixed   = _to_name_list(rr.get("fixed_rules", []))
     still_failed = _to_name_list(rr.get("still_failed", []))
-    # Split repair counts by type — repair_report bundles procs + trigger fns together
-    proc_llm_fixed   = [n for n in llm_fixed  if not _is_trigger_fn(n)]
+    # Split repair counts by type.
+    # repair_report bundles procs + trigger fns + functions together.
+    # Step 1: separate trigger functions.
+    # Step 2: separate scalar functions from procedures using funcs_ok as the reference set.
+    _funcs_ok_bases = {_clean_name(n).split(".")[-1].lower() for n in funcs_ok}
+    def _is_func(name: str) -> bool:
+        base = _clean_name(name).split(".")[-1].lower()
+        return base in _funcs_ok_bases
+    func_llm_fixed   = [n for n in llm_fixed  if not _is_trigger_fn(n) and _is_func(n)]
+    proc_llm_fixed   = [n for n in llm_fixed  if not _is_trigger_fn(n) and not _is_func(n)]
     trig_llm_fixed   = [n for n in llm_fixed  if _is_trigger_fn(n)]
-    proc_rule_fixed  = [n for n in rule_fixed if not _is_trigger_fn(n)]
+    proc_rule_fixed  = [n for n in rule_fixed if not _is_trigger_fn(n) and not _is_func(n)]
     trig_rule_fixed  = [n for n in rule_fixed if _is_trigger_fn(n)]
-    proc_still_failed = [n for n in still_failed if not _is_trigger_fn(n)]
+    proc_still_failed = [n for n in still_failed if not _is_trigger_fn(n) and not _is_func(n)]
 
     # Stubs (backward compat)
     stubs_report = _load_json(ws / "conversion" / "stubs_report.json")
@@ -505,6 +513,7 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "rule_fixed":      rule_fixed,
         "still_failed":    still_failed,
         "proc_llm_fixed":  proc_llm_fixed,
+        "func_llm_fixed":  func_llm_fixed,
         "trig_llm_fixed":  trig_llm_fixed,
         "proc_rule_fixed": proc_rule_fixed,
         "trig_rule_fixed": trig_rule_fixed,
@@ -1301,6 +1310,7 @@ def render_html(data: dict) -> str:
     rule_fixed   = data["rule_fixed"]
     still_failed = data["still_failed"]
     proc_llm_fixed   = data.get("proc_llm_fixed",  llm_fixed)
+    func_llm_fixed   = data.get("func_llm_fixed",  [])
     trig_llm_fixed   = data.get("trig_llm_fixed",  [])
     proc_rule_fixed  = data.get("proc_rule_fixed",  rule_fixed)
     trig_rule_fixed  = data.get("trig_rule_fixed",  [])
@@ -1827,7 +1837,7 @@ def render_html(data: dict) -> str:
             <td class="num ok">{total_funcs}</td>
             <td class="num {'fail' if funcs_fail else 'ok'}">{len(funcs_fail)}</td>
             <td class="num muted">—</td>
-            <td class="num muted">—</td>
+            <td class="num {'ok' if func_llm_fixed else 'muted'}">{len(func_llm_fixed) if func_llm_fixed else '—'}</td>
             <td class="num ok">0</td>
             <td class="num muted">0</td>
           </tr>
@@ -1846,7 +1856,7 @@ def render_html(data: dict) -> str:
             <td class="num ok">{total_views + total_funcs + total_procs + total_trigs}</td>
             <td class="num {'fail' if (views_fail or funcs_fail or procs_fail or triggers_fail) else 'ok'}">{len(views_fail) + len(funcs_fail) + len(procs_fail) + len(triggers_fail)}</td>
             <td class="num ok">{len(views_fixed) + len(proc_rule_fixed) + len(trig_rule_fixed)}</td>
-            <td class="num ok">{len(proc_llm_fixed) + len(trig_llm_fixed)}</td>
+            <td class="num ok">{len(proc_llm_fixed) + len(func_llm_fixed) + len(trig_llm_fixed)}</td>
             <td class="num {'fail' if (proc_still_failed) else 'ok'}">{len(proc_still_failed)}</td>
             <td class="num muted">{len(procs_legacy)}</td>
           </tr>
