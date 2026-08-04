@@ -255,36 +255,69 @@ uv run --project "$PG_SKILL_PARENT" python "$PG_SKILL_DIR/pg_connect.py" \
 
 If DNS has not propagated yet, the script will print `dns_error` and advise waiting 30-60s then retrying. Retry once before continuing.
 
-After READY, add `hostaddr` to bypass local DNS (the SPG hostname may not resolve on the local machine's DNS):
+After READY, add `hostaddr` to bypass local DNS (the SPG hostname may not resolve on the local machine's DNS).
 
+Set `SPGLOADER_DNS_SERVER` to a public DNS resolver before running the block below.
+Use a well-known public DNS server (e.g. Google Public DNS or Cloudflare DNS):
 ```bash
-# Get the IP
-SPG_HOST=$(grep "^host=" ~/.pg_service.conf | grep -A5 "\[<INSTANCE_NAME>\]" | head -1 | cut -d= -f2)
-SPG_IP=$(nslookup "$SPG_HOST" 8.8.8.8 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
-echo "SPG IP: $SPG_IP"
+export SPGLOADER_DNS_SERVER="<PUBLIC_DNS_IP>"   # replace with Google or Cloudflare public DNS IP
+```
 
-# Add hostaddr to the pg_service.conf entry using Python (sed is unreliable cross-platform)
-python3 - << PYEOF
-import re, pathlib
+Then run this Python block:
+# Run this Python block directly — it correctly extracts the hostname,
+# resolves it via a public DNS server, and injects hostaddr= into pg_service.conf.
+# It is idempotent: running it twice does not create duplicate entries.
+python3 - << 'PYEOF'
+import pathlib, subprocess, re, sys
+
+INSTANCE = "<INSTANCE_NAME>"   # ← substitute the real instance name
+PUBLIC_DNS_SERVER = os.environ.get("SPGLOADER_DNS_SERVER")  # must be set before running — use a public DNS server IP (e.g. Google or Cloudflare)
+
 conf = pathlib.Path("~/.pg_service.conf").expanduser()
 text = conf.read_text()
-# Insert hostaddr= after the host= line for this instance
-section = "<INSTANCE_NAME>"
+
+# --- Step 1: Extract host= from the correct [INSTANCE] section using awk ---
+awk_prog = f'/^\\[{INSTANCE}\\]/ {{ f=1; next }} f && /^host=/ {{ print substr($0,6); exit }} /^\\[/ {{ f=0 }}'
+result = subprocess.run(["awk", awk_prog, str(conf)], capture_output=True, text=True)
+spg_host = result.stdout.strip()
+if not spg_host:
+    print(f"ERROR: could not find host= for [{INSTANCE}] in pg_service.conf", file=sys.stderr)
+    sys.exit(1)
+print(f"SPG host: {spg_host}")
+
+# --- Step 2: Resolve via Google DNS (bypasses stale VPN cache) ---
+ns = subprocess.run(["nslookup", spg_host, PUBLIC_DNS_SERVER], capture_output=True, text=True)
+# Extract the last non-nameserver "Address:" line (the resolved IP)
+ip = None
+for line in reversed(ns.stdout.splitlines()):
+    m = re.match(r"Address:\s+(\d+\.\d+\.\d+\.\d+)", line)
+    if m and not line.strip().startswith(PUBLIC_DNS_SERVER):
+        ip = m.group(1); break
+if not ip:
+    print(f"ERROR: could not resolve {spg_host} via public DNS — DNS may still be propagating. Wait 30s and retry.", file=sys.stderr)
+    sys.exit(1)
+print(f"Resolved IP: {ip}")
+
+# --- Step 3: Inject hostaddr= idempotently (remove stale value first if present) ---
 lines = text.split("\n")
-result = []
-in_section = False
-hostaddr_added = False
+new_lines, in_sec, injected = [], False, False
 for line in lines:
-    result.append(line)
-    if line.strip() == f"[{section}]":
-        in_section = True; hostaddr_added = False
-    elif in_section and not hostaddr_added and line.strip().startswith("host="):
-        result.append(f"hostaddr=$SPG_IP")
-        hostaddr_added = True
-    elif line.strip().startswith("[") and line.strip() != f"[{section}]":
-        in_section = False
-conf.write_text("\n".join(result))
-print("hostaddr added")
+    stripped = line.strip()
+    if stripped == f"[{INSTANCE}]":
+        in_sec = True; injected = False; new_lines.append(line)
+    elif stripped.startswith("[") and stripped != f"[{INSTANCE}]":
+        in_sec = False; new_lines.append(line)
+    elif in_sec and stripped.startswith("hostaddr="):
+        pass  # drop stale hostaddr line (will re-add below)
+    elif in_sec and not injected and stripped.startswith("host="):
+        new_lines.append(line)
+        new_lines.append(f"hostaddr={ip}")
+        injected = True
+    else:
+        new_lines.append(line)
+
+conf.write_text("\n".join(new_lines))
+print(f"pg_service.conf updated: hostaddr={ip} injected for [{INSTANCE}]")
 PYEOF
 ```
 
