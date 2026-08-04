@@ -331,3 +331,104 @@ class TestSchemaCount:
         assert data["total_schema_count"] == 6, (
             f"Expected 6 schemas from phases.schemas.ok, got {data['total_schema_count']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# repair_procedures.py — _update_deploy_report + _write_report accumulation
+# ---------------------------------------------------------------------------
+
+SKILL_ROOT_REPAIR = Path(__file__).parent.parent
+sys.path.insert(0, str(SKILL_ROOT_REPAIR / "scripts"))
+
+from importlib import import_module as _imp
+_rp = _imp("repair_procedures")
+_update_deploy_report = _rp._update_deploy_report
+_write_report_fn      = _rp._write_report
+
+
+class TestUpdateDeployReport:
+    """_update_deploy_report moves fixed objects from failed → succeeded."""
+
+    def test_fixed_items_moved_to_succeeded(self, tmp_path):
+        report_path = tmp_path / "procedures_deploy_report.json"
+        report_path.write_text(json.dumps({
+            "succeeded": [],
+            "failed": [
+                {"procedure": "dbo.usp_A", "error": "err"},
+                {"procedure": "dbo.usp_B", "error": "err"},
+                {"procedure": "dbo.usp_C", "error": "err"},
+            ],
+        }))
+        _update_deploy_report(report_path, ["dbo.usp_A", "dbo.usp_B"])
+        result = json.loads(report_path.read_text())
+        assert len(result["succeeded"]) == 2
+        assert len(result["failed"])    == 1
+        assert result["failed"][0]["procedure"] == "dbo.usp_C"
+
+    def test_schema_prefix_optional(self, tmp_path):
+        """Match by base name when fixed list uses bare names."""
+        report_path = tmp_path / "functions_deploy_report.json"
+        report_path.write_text(json.dumps({
+            "succeeded": [],
+            "failed": [{"function": "HumanResources.fn_GetAge", "error": "e"}],
+        }))
+        _update_deploy_report(report_path, ["fn_GetAge"])
+        result = json.loads(report_path.read_text())
+        assert len(result["succeeded"]) == 1
+        assert len(result["failed"])    == 0
+
+    def test_no_op_when_already_succeeded(self, tmp_path):
+        """Items already in succeeded are not duplicated."""
+        report_path = tmp_path / "procedures_deploy_report.json"
+        report_path.write_text(json.dumps({
+            "succeeded": ["dbo.usp_A"],
+            "failed": [{"procedure": "dbo.usp_B", "error": "err"}],
+        }))
+        _update_deploy_report(report_path, ["dbo.usp_B"])
+        result = json.loads(report_path.read_text())
+        assert len(result["succeeded"]) == 2
+        assert len(result["failed"])    == 0
+
+    def test_empty_all_fixed_is_no_op(self, tmp_path):
+        report_path = tmp_path / "procedures_deploy_report.json"
+        original = {"succeeded": [], "failed": [{"procedure": "dbo.x", "error": "e"}]}
+        report_path.write_text(json.dumps(original))
+        _update_deploy_report(report_path, [])
+        result = json.loads(report_path.read_text())
+        assert result == original  # unchanged
+
+
+class TestWriteReportAccumulation:
+    """_write_report merges fixed_llm / fixed_rules across two repair passes."""
+
+    def _ws(self, tmp_path):
+        ws = tmp_path / "ws"
+        (ws / "conversion").mkdir(parents=True)
+        return ws
+
+    def test_two_passes_merge_fixed_llm(self, tmp_path):
+        ws = self._ws(tmp_path)
+        # Pass 1 — procedures
+        _write_report_fn(ws, {"fixed_rules": ["dbo.usp_A"], "fixed_llm": ["dbo.usp_B"], "still_failed": []})
+        # Pass 2 — functions (must accumulate, not overwrite)
+        _write_report_fn(ws, {"fixed_rules": [], "fixed_llm": ["dbo.fn_C"], "still_failed": []})
+        result = json.loads((ws / "conversion" / "repair_report.json").read_text())
+        assert set(result["fixed_llm"])   == {"dbo.usp_B", "dbo.fn_C"}
+        assert set(result["fixed_rules"]) == {"dbo.usp_A"}
+
+    def test_deduplication_across_passes(self, tmp_path):
+        ws = self._ws(tmp_path)
+        _write_report_fn(ws, {"fixed_rules": [], "fixed_llm": ["dbo.usp_A"], "still_failed": []})
+        # Same name appears in second pass — must not be duplicated
+        _write_report_fn(ws, {"fixed_rules": [], "fixed_llm": ["dbo.usp_A", "dbo.fn_B"], "still_failed": []})
+        result = json.loads((ws / "conversion" / "repair_report.json").read_text())
+        assert result["fixed_llm"].count("dbo.usp_A") == 1
+        assert len(result["fixed_llm"]) == 2
+
+    def test_first_pass_still_works_without_existing_file(self, tmp_path):
+        ws = self._ws(tmp_path)
+        _write_report_fn(ws, {"fixed_rules": ["r1"], "fixed_llm": ["l1"], "still_failed": ["bad"]})
+        result = json.loads((ws / "conversion" / "repair_report.json").read_text())
+        assert result["fixed_rules"] == ["r1"]
+        assert result["fixed_llm"]   == ["l1"]
+        assert result["still_failed"] == ["bad"]

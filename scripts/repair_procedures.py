@@ -546,6 +546,7 @@ def repair_procedures(
             "fixed_llm": [],
             "still_failed": still_failed_after_rules,
         }
+        _update_deploy_report(report_path, fixed_rules)
         _write_report(work_dir, repair_report)
         return repair_report
 
@@ -579,6 +580,7 @@ def repair_procedures(
             "still_failed": still_failed_after_rules,
             "llm_error": str(e),
         }
+        _update_deploy_report(report_path, fixed_rules)
         _write_report(work_dir, repair_report)
         return repair_report
 
@@ -605,12 +607,57 @@ def repair_procedures(
         "still_failed": llm_result["still_failed"],
         "llm_iterations": llm_result["fixed"],
     }
+    all_fixed = fixed_rules + repair_report["fixed_llm"]
+    _update_deploy_report(report_path, all_fixed)
     _write_report(work_dir, repair_report)
     return repair_report
 
 
+def _update_deploy_report(report_path: Path, all_fixed: list[str]) -> None:
+    """Move successfully-repaired objects from failed → succeeded in the deploy report."""
+    if not report_path.exists() or not all_fixed:
+        return
+    report = json.loads(report_path.read_text())
+    fixed_bases = {n.split(".")[-1].lower() for n in all_fixed}
+    fixed_fqns  = {n.lower() for n in all_fixed}
+    still_fail: list = []
+    newly_ok:   list[str] = []
+    for item in report.get("failed", []):
+        raw = item.get("procedure") or item.get("function") or ""
+        name = raw if isinstance(raw, str) else str(raw)
+        if name.lower() in fixed_fqns or name.split(".")[-1].lower() in fixed_bases:
+            newly_ok.append(name)
+        else:
+            still_fail.append(item)
+    report["succeeded"] = list(report.get("succeeded", [])) + newly_ok
+    report["failed"]    = still_fail
+    report_path.write_text(json.dumps(report, indent=2))
+    print(f"  Deploy report updated: {len(newly_ok)} moved to succeeded → {report_path.name}")
+
+
 def _write_report(work_dir: Path, report: dict) -> None:
+    """Write repair_report.json, accumulating results across multiple repair runs."""
     path = work_dir / "conversion" / "repair_report.json"
+    # Merge with results from any previous repair run (e.g. procs then funcs)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+            def _merge_dedup(prev: list[str], curr: list[str]) -> list[str]:
+                seen: set[str] = set()
+                merged: list[str] = []
+                for n in prev + curr:
+                    key = n.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(n)
+                return merged
+            report = {
+                **report,
+                "fixed_llm":   _merge_dedup(existing.get("fixed_llm",   []), report.get("fixed_llm",   [])),
+                "fixed_rules": _merge_dedup(existing.get("fixed_rules",  []), report.get("fixed_rules",  [])),
+            }
+        except Exception:
+            pass  # corrupt existing file — just overwrite
     path.write_text(json.dumps(report, indent=2))
     print(f"\nRepair report   : {path}")
 
