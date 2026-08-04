@@ -241,50 +241,105 @@ uv run --project "$PG_SKILL_PARENT" python "$PG_SKILL_DIR/pg_connect.py" \
 The script saves the connection to `~/.pg_service.conf` and `~/.pgpass` automatically.
 Do NOT run `--reset` after `--create` — the password is already saved.
 
-#### Step 2: Confirm the instance name
+#### Step 2: Wait for instance to be READY
 
-After creation, ask the user to confirm the instance name that was just created
-(it appears in the CREATE output).
+The instance starts in CREATING → STARTING → FINALIZING → READY state.
+Run `--ensure-ready` to wait (polls every 10s, up to 5 minutes):
+
+```bash
+uv run --project "$PG_SKILL_PARENT" python "$PG_SKILL_DIR/pg_connect.py" \
+  --snowflake-connection "$SF_SNOWFLAKE_CONNECTION" \
+  --instance-name "<INSTANCE_NAME>" \
+  --ensure-ready 2>&1
+```
+
+If DNS has not propagated yet, the script will print `dns_error` and advise waiting 30-60s then retrying. Retry once before continuing.
+
+After READY, add `hostaddr` to bypass local DNS (the SPG hostname may not resolve on the local machine's DNS):
+
+```bash
+# Get the IP
+SPG_HOST=$(grep "^host=" ~/.pg_service.conf | grep -A5 "\[<INSTANCE_NAME>\]" | head -1 | cut -d= -f2)
+SPG_IP=$(nslookup "$SPG_HOST" 8.8.8.8 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
+echo "SPG IP: $SPG_IP"
+
+# Add hostaddr to the pg_service.conf entry using Python (sed is unreliable cross-platform)
+python3 - << PYEOF
+import re, pathlib
+conf = pathlib.Path("~/.pg_service.conf").expanduser()
+text = conf.read_text()
+# Insert hostaddr= after the host= line for this instance
+section = "<INSTANCE_NAME>"
+lines = text.split("\n")
+result = []
+in_section = False
+hostaddr_added = False
+for line in lines:
+    result.append(line)
+    if line.strip() == f"[{section}]":
+        in_section = True; hostaddr_added = False
+    elif in_section and not hostaddr_added and line.strip().startswith("host="):
+        result.append(f"hostaddr=$SPG_IP")
+        hostaddr_added = True
+    elif line.strip().startswith("[") and line.strip() != f"[{section}]":
+        in_section = False
+conf.write_text("\n".join(result))
+print("hostaddr added")
+PYEOF
+```
 
 #### Step 3: Network policy — REQUIRED before connectivity test
 
-SPG instances block all inbound Postgres connections until a network policy with
-`POSTGRES_INGRESS` mode is attached.  Do NOT skip this step.
+SPG blocks all Postgres connections until a `POSTGRES_INGRESS` network policy is attached.
 
-Ask the user (via `ask_user_question`):
+Ask via `ask_user_question`:
 
-```
-To allow psql connections, a POSTGRES_INGRESS network policy must be attached.
-
-Do you have an existing Snowflake network policy for Postgres access, or should I create one?
-```
-
-**Path A — existing policy (user provides a name):**
-
-Run exactly:
-```sql
-ALTER POSTGRES INSTANCE <instance_name>
-  SET NETWORK_POLICY = '<existing_policy_name>';
+```yaml
+header: "Network policy"
+question: "A POSTGRES_INGRESS network policy must be attached to allow psql connections.
+           Do you have an existing Snowflake network policy for Postgres access?"
+options:
+  - label: "Yes — use existing policy"
+    description: "Attach an existing network policy (you'll provide the name)"
+  - label: "No — create a new policy"
+    description: "I'll create a network rule for your current IP and attach it"
 ```
 
-No network rule or `CREATE NETWORK POLICY` needed.  This is the correct and
-simplest path when the user already has a working policy.
+**Path A — use existing policy:**
+
+Ask for the policy name (text input), then run:
+```bash
+snow sql -c "$SF_SNOWFLAKE_CONNECTION" -q "
+USE ROLE ACCOUNTADMIN;
+ALTER POSTGRES INSTANCE <INSTANCE_NAME>
+  SET NETWORK_POLICY = '<EXISTING_POLICY_NAME>';"
+```
 
 **Path B — create a new policy:**
 
-Load `<SNOWFLAKE_POSTGRES_SKILL_DIR>/connect/SKILL.md` and execute the
-**Setup Network Policy** workflow in full.  That workflow generates the correct
-three-statement sequence:
-
-```sql
-CREATE NETWORK RULE ...  TYPE = IPV4  MODE = POSTGRES_INGRESS ...;
-CREATE NETWORK POLICY ... ALLOWED_NETWORK_RULE_LIST = (...);
-ALTER POSTGRES INSTANCE <instance_name> SET NETWORK_POLICY = '<policy_name>';
+Get the user's current public IP first:
+```bash
+curl -s https://checkip.amazonaws.com 2>/dev/null || curl -s https://api.ipify.org
 ```
 
-⚠️ **NEVER generate network policy SQL inline** — always use the connect
-sub-skill.  Inline SQL has historically used the wrong `MODE = INGRESS` instead
-of `MODE = POSTGRES_INGRESS`, which silently creates an unusable policy.
+Then run these three statements using `snow sql` — do NOT use `snowflake_sql_execute` (wrong account):
+```bash
+snow sql -c "$SF_SNOWFLAKE_CONNECTION" -q "
+USE ROLE ACCOUNTADMIN;
+
+CREATE NETWORK RULE IF NOT EXISTS spgloader_migration_rule
+  TYPE = IPV4
+  MODE = POSTGRES_INGRESS
+  VALUE_LIST = ('<YOUR_IP>/32');
+
+CREATE NETWORK POLICY IF NOT EXISTS spgloader_migration_policy
+  ALLOWED_NETWORK_RULE_LIST = (spgloader_migration_rule);
+
+ALTER POSTGRES INSTANCE <INSTANCE_NAME>
+  SET NETWORK_POLICY = 'spgloader_migration_policy';"
+```
+
+⚠️ The MODE must be exactly `POSTGRES_INGRESS` — `INGRESS` is a different, incompatible mode that will silently create a non-working policy. Never substitute or abbreviate this value.
 
 #### Step 4: Write target connection env
 
