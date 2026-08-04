@@ -186,13 +186,59 @@ Do you want to proceed with provisioning a new SPG instance? (yes/no)
 
 Use `ask_user_question` for this confirmation. Only continue on explicit "yes".
 
-#### Step 1: Hand off to snowflake-postgres skill
+#### Step 1: Collect instance name and compute size
 
-State: "I'll provision a new Snowflake Postgres instance. Loading the provisioning workflow now."
+Ask the user two questions in one `ask_user_question` call:
 
-Load `<SNOWFLAKE_POSTGRES_SKILL_DIR>/SKILL.md` and execute the **MANAGE → Create Instance** workflow in full.
+1. **Instance name** (text, default: `<source_db>_pg`)
+2. **Compute size** (options — use EXACT names below, these are the only valid values):
 
-The pg_connect.py `--create` script saves the connection automatically after creation.
+| Label | Compute Family | Use for |
+|---|---|---|
+| `STANDARD_L` | Standard L | Most migrations (default) |
+| `STANDARD_XL` | Standard XL | Larger databases or parallel workloads |
+| `STANDARD_2XL` | Standard 2XL | Heavy workloads |
+
+Use these EXACT option labels in ask_user_question — do NOT invent or abbreviate (e.g. STANDARD_1 is NOT valid):
+
+```
+ask_user_question:
+  questions:
+    - header: "Instance name"
+      question: "Name for the new SPG instance?"
+      type: text
+      defaultValue: "<source_db>_pg"
+    - header: "Compute size"
+      question: "What compute size for the SPG instance?"
+      type: options
+      defaultAnswer: "STANDARD_L"
+      options:
+        - label: STANDARD_L
+          description: "Standard L — recommended for most migrations"
+        - label: STANDARD_XL
+          description: "Standard XL — larger databases, more parallelism"
+        - label: STANDARD_2XL
+          description: "Standard 2XL — heavy workloads"
+```
+
+#### Step 2: Create the instance using pg_connect.py
+
+Run exactly this command with the user's answers substituted:
+
+```bash
+PG_SKILL_DIR=$(find ~/.snowflake/cortex/skills -name "pg_connect.py" -path "*/snowflake-postgres/*" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
+PG_SKILL_PARENT=$(dirname "$PG_SKILL_DIR")
+
+uv run --project "$PG_SKILL_PARENT" python "$PG_SKILL_DIR/pg_connect.py" \
+  --snowflake-connection "$SF_SNOWFLAKE_CONNECTION" \
+  --create \
+  --instance-name "<INSTANCE_NAME>" \
+  --compute-pool <COMPUTE_FAMILY> \
+  --storage 50 \
+  --postgres-version 18 2>&1
+```
+
+The script saves the connection to `~/.pg_service.conf` and `~/.pgpass` automatically.
 Do NOT run `--reset` after `--create` — the password is already saved.
 
 #### Step 2: Confirm the instance name
