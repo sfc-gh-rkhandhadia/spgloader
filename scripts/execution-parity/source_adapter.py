@@ -386,3 +386,25 @@ def build_adapter() -> SourceAdapter:
         )
 
     return SourceAdapter(source_type, conf)
+
+
+def open_source_conn(source_type: str, host: str, port, user: str,
+                     password: str, database: str, **extra) -> dict:
+    """Build a source-connection conf dict from explicit parameters.
+
+    Returns a dict (not a live connection) so callers can hand it to
+    ``SourceAdapter(source_type, conf)`` which opens its own connection
+    via ``connect()``. This mirrors the conf shape produced by ``build_adapter``.
+    """
+    source_type = (source_type or "mssql").lower()
+    conf = {
+        "host": host,
+        "port": int(port) if port else (3306 if source_type in ("mysql", "mariadb") else 1433),
+        "user": user,
+        "password": password or "",
+        "database": database,
+        "timeout": int(extra.get("timeout", 30)),
+    }
+    if source_type == "oracle":
+        conf["service_name"] = extra.get("service_name", database)
+    return conf

@@ -335,8 +335,16 @@ def _gen_indexes(indexes: list[dict]) -> list[str]:
     for idx in indexes:
         schema = idx["schema"].lower()
         table  = idx["table_name"].lower()
-        # Prefix with table OID-style hash to avoid name conflicts across schemas
-        safe_name = _safe_index_name(idx["name"])
+        # Qualify the index name with the table name so that reused index names
+        # (legal in MySQL/MSSQL, illegal in PG where index names are unique per
+        # schema) do not collide. Falls back to the bare name when it already
+        # encodes the table, keeping names short for single-table cases.
+        bare_name = idx["name"]
+        if bare_name and table and not bare_name.lower().startswith(table + "_"):
+            qualified = f"{table}_{bare_name}"
+        else:
+            qualified = bare_name
+        safe_name = _safe_index_name(qualified)
         unique = "UNIQUE " if idx.get("is_unique") else ""
         cols   = ", ".join(_quote_ident(_strip_mssql_brackets(c.split()[0]).lower()) +
                            (" DESC" if c.upper().endswith(" DESC") else "")
