@@ -781,6 +781,10 @@ def _build_val_rows(checks: list, name_map: dict | None = None) -> str:
         chk     = c.get("check", "")
         passed  = c.get("passed")
         note    = c.get("note", "")
+        # Auto-derive pass/fail from source vs spg when passed=None but counts are present.
+        # Only show "— Skipped" when there is genuinely nothing to compare.
+        if passed is None and c.get("source") is not None and c.get("spg") is not None:
+            passed = (c["source"] == c["spg"])
         if passed is None:
             badge = _badge("— Skipped", "muted")
         elif passed:
