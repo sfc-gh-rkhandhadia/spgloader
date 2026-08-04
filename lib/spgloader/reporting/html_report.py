@@ -1616,9 +1616,9 @@ def render_html(data: dict) -> str:
   <button class="tab-btn" onclick="showTab('assessment')"
     data-tip="Step 1 of 4 — Pre-Migration Compatibility Check: scans the source schema before deployment for SQL Server features that have no direct PostgreSQL equivalent (CLR assemblies, linked servers, PIVOT, temporal tables, spatial types, etc.). Must PASS before the migration can proceed.">Compatibility Check</button>
   <button class="tab-btn" onclick="showTab('deployment')"
-    data-tip="Step 2 of 4 — Database Migration Summary: shows what was created in your new Snowflake Postgres database — per-schema table counts, indexes, foreign keys, deployment time, and a summary of how many views, functions, and stored procedures were successfully migrated.">Database Migration Summary</button>
+    data-tip="Step 2 of 4 — Deployment Results: tables, indexes, and foreign keys created in your Snowflake Postgres database, plus a summary of how many views, functions, and stored procedures were successfully deployed.">Deployment Results</button>
   <button class="tab-btn" onclick="showTab('objects')"
-    data-tip="Step 2 of 4 (detail) — Database Migration Details: the complete list of every view, function, stored procedure, and trigger with its individual migration status — Deployed, Fixed by LLM, Deploy Failed, or Skipped.">Database Migration Details</button>
+    data-tip="Step 2 of 4 (detail) — Converted Objects: the complete list of every view, function, stored procedure, and trigger with its migration status — Deployed, Fixed by LLM, Deploy Failed, or Skipped.">Converted Objects</button>
   <button class="tab-btn" onclick="showTab('validation')"
     data-tip="Step 3 of 4 — Schema Verification: are all tables, indexes, and foreign keys in SPG? Compares source vs SPG object counts after deployment to confirm everything landed correctly.">Schema Verification</button>
   <button class="tab-btn" onclick="showTab('witness')"
