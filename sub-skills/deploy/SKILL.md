@@ -339,9 +339,9 @@ auto-repaired — they need manual type substitution.
 
 - `$SPGLOADER_WORK_DIR/deployment/deployment_summary.json` — table deploy results
 - `$SPGLOADER_WORK_DIR/conversion/deploy_report.json` — view deploy results
-- `$SPGLOADER_WORK_DIR/conversion/functions_deploy_report.json` — function deploy results
-- `$SPGLOADER_WORK_DIR/conversion/procedures_deploy_report.json` — procedure deploy results
-- `$SPGLOADER_WORK_DIR/conversion/repair_report.json` — LLM repair results
+- `$SPGLOADER_WORK_DIR/conversion/functions_deploy_report.json` — function deploy results (**updated in place by repair: fixed items moved from `failed[]` → `succeeded[]`**)
+- `$SPGLOADER_WORK_DIR/conversion/procedures_deploy_report.json` — procedure deploy results (**updated in place by repair: fixed items moved from `failed[]` → `succeeded[]`**)
+- `$SPGLOADER_WORK_DIR/conversion/repair_report.json` — accumulated LLM repair results across all repair passes (procs + functions merged, not overwritten)
 - Proceed to Phase 6 (validate)
 
 ## Error Handling
