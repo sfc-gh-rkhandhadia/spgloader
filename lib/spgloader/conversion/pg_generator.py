@@ -304,9 +304,19 @@ def _gen_column(col: dict, type_map: dict) -> str:
 
     if computed and computed_expr:
         # MSSQL computed column → PG GENERATED ALWAYS AS (expr) STORED
+        # First check if the expression is safely convertible; if it references
+        # MSSQL-specific functions (CONVERT, TRY_CONVERT) or schema-qualified UDFs
+        # that aren't yet deployed, fall through to a plain nullable column instead
+        # of failing the entire table.
         pg_expr = _mssql_expr_to_pg(computed_expr)
-        parts.append(f"GENERATED ALWAYS AS ({pg_expr}) STORED")
-        return " ".join(parts)
+        if _mssql_expr_is_convertible(pg_expr):
+            parts.append(f"GENERATED ALWAYS AS ({pg_expr}) STORED")
+            return " ".join(parts)
+        # Unconvertible: emit as a plain nullable column (no GENERATED clause).
+        # The expression is preserved in a comment for manual review.
+        safe_comment = computed_expr.replace('*/', '* /')[:120]
+        parts = [f"    {col_name} {pg_type} /* computed: {safe_comment} */"]
+        return parts[0]
 
     if identity:
         parts.append("GENERATED ALWAYS AS IDENTITY")
@@ -478,17 +488,49 @@ def _quote_ident(name: str) -> str:
     return name.lower()
 
 
+# MSSQL function substitutions safe to apply inside computed expressions
+_COMPUTED_FUNC_SUBS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\blen\s*\(', re.IGNORECASE),    'length('),
+    (re.compile(r'\bisnull\s*\(', re.IGNORECASE), 'coalesce('),
+    (re.compile(r'\bgetdate\s*\(\s*\)', re.IGNORECASE), 'now()'),
+]
+
+# Patterns that indicate an expression is NOT safely convertible at table-create
+# time (MSSQL-specific functions / cross-schema UDF calls that either have no PG
+# equivalent or depend on objects not yet deployed).
+_UNCONVERTIBLE_EXPR_PATTERNS: list[re.Pattern] = [
+    re.compile(r'\bCONVERT\s*\(',      re.IGNORECASE),  # CONVERT(type, expr, style)
+    re.compile(r'\bTRY_CONVERT\s*\(', re.IGNORECASE),  # TRY_CONVERT(type, expr)
+    re.compile(r'\bTRY_CAST\s*\(',    re.IGNORECASE),  # TRY_CAST
+    # UDF calls (schema.func) — not deployed yet when table is created
+    re.compile(r'\bdbo\.\w+\s*\(',   re.IGNORECASE),
+]
+
+
+def _mssql_expr_is_convertible(expr: str) -> bool:
+    """Return False if the (post-bracket-substitution) expr contains MSSQL-specific
+    constructs that cannot be executed inside a PG GENERATED column at table-create
+    time — either because they have no PG equivalent (CONVERT/TRY_CONVERT) or because
+    they reference UDFs that are deployed after tables."""
+    for pat in _UNCONVERTIBLE_EXPR_PATTERNS:
+        if pat.search(expr):
+            return False
+    return True
+
+
 def _mssql_expr_to_pg(expr: str) -> str:
     """Convert an MSSQL computed-column expression to PostgreSQL.
 
-    Applies two transformations:
+    Applies transformations in order:
       1. Strip outer parentheses SQL Server adds:  ([in]-[out])  →  [in]-[out]
       2. Replace every [bracket_identifier] with a properly double-quoted PG
          identifier, quoting reserved words automatically.
          e.g. [in] → "in", [out] → out, [Amount] → amount
+      3. Apply safe function substitutions (len→length, isnull→coalesce, etc.)
 
-    No column names are hardcoded — _quote_ident handles the full reserved-word
-    list exhaustively.
+    Callers should check _mssql_expr_is_convertible() first; if that returns
+    False the expression contains MSSQL-specific constructs (CONVERT, UDFs)
+    that cannot be represented as a PG GENERATED column.
     """
     expr = expr.strip()
     # Strip a single wrapping pair of parentheses SQL Server adds
@@ -500,6 +542,9 @@ def _mssql_expr_to_pg(expr: str) -> str:
         lambda m: _quote_ident(m.group(1)),
         expr,
     )
+    # Apply safe function substitutions
+    for pat, replacement in _COMPUTED_FUNC_SUBS:
+        expr = pat.sub(replacement, expr)
     return expr
 
 
