@@ -504,6 +504,10 @@ _UNCONVERTIBLE_EXPR_PATTERNS: list[re.Pattern] = [
     re.compile(r'\bTRY_CAST\s*\(',    re.IGNORECASE),  # TRY_CAST
     # UDF calls (schema.func) — not deployed yet when table is created
     re.compile(r'\bdbo\.\w+\s*\(',   re.IGNORECASE),
+    # MSSQL string concatenation with +  ('str' + expr or expr + 'str')
+    # PG requires || for string concat; + only works for numeric types.
+    re.compile(r"[)\w]\s*\+\s*'"),   # word/paren + 'string'
+    re.compile(r"'\s*\+\s*[(\w]"),   # 'string' + word/paren
 ]
 
 

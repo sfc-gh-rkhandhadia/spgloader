@@ -70,6 +70,16 @@ class TestComputedExprConvertibility:
         expr = _mssql_expr_to_pg("(TRY_CAST([value] AS [datetime2](7)))")
         assert not _mssql_expr_is_convertible(expr)
 
+    def test_mssql_string_concat_plus_is_unconvertible(self):
+        # payee.displayName: isnull(x,'')+' ' is MSSQL string concat; PG needs ||
+        expr = _mssql_expr_to_pg(
+            "(case when ((isnull(ltrim(rtrim([firstName])),'')+' ')+isnull(ltrim(rtrim([lastName])),''))='' "
+            "then [idAtPayer] end)"
+        )
+        assert not _mssql_expr_is_convertible(expr), (
+            "MSSQL string concat with + must fall back to plain column (PG needs ||)"
+        )
+
 
 class TestComputedExprConvertibleCases:
     """Expressions that ARE safely convertible to PG GENERATED ALWAYS AS."""
@@ -87,9 +97,12 @@ class TestComputedExprConvertibleCases:
         expr = _mssql_expr_to_pg("(left([lastName],(400)))")
         assert _mssql_expr_is_convertible(expr)
 
-    def test_string_concat_is_convertible(self):
+    def test_string_concat_is_unconvertible(self):
+        # MSSQL uses + for string concat; PG uses || — this must fall back to plain column
         expr = _mssql_expr_to_pg("([firstName] + ' ' + [lastName])")
-        assert _mssql_expr_is_convertible(expr)
+        assert not _mssql_expr_is_convertible(expr), (
+            "MSSQL string concat with + has no PG equivalent at column definition time"
+        )
 
 
 # ---------------------------------------------------------------------------
