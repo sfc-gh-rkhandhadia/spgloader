@@ -109,7 +109,7 @@ def _classify_procedure(short_name: str, rules: list[dict]) -> str | None:
 
 def _extract_proc_name(sql: str) -> str | None:
     m = re.search(
-        r'CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION)\s+(\S+)\s*\(',
+        r'CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION)\s+(["\w]+(?:\.["\w]+)?)\s*\(',
         sql, re.IGNORECASE,
     )
     if not m:
@@ -423,11 +423,12 @@ def deploy_procedures(
         else:
             deploy_sql = p["sql"]
 
+        fqn = f"{target_schema}.{p['name']}" if target_schema else p["name"]
         try:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(deploy_sql)
-            results["succeeded"].append(p["name"])
+            results["succeeded"].append(fqn)
             schema_tag = f" [{target_schema}]" if target_schema else ""
             print(f"  OK    {p['name']}{schema_tag}")
         except Exception as e:
@@ -454,7 +455,7 @@ def deploy_procedures(
                                     f'ON {tbl_ref} CASCADE'
                                 )
                                 cur.execute(deploy_sql)
-                        results["succeeded"].append(p["name"])
+                        results["succeeded"].append(fqn)
                         print(f"  OK    {p['name']}  (dropped + recreated trigger)")
                         continue
                     except Exception as e2:
@@ -462,7 +463,7 @@ def deploy_procedures(
                         err = str(e2).replace("\n", " ").strip()
 
             results["failed"].append({
-                "procedure": p["name"], "file": p["file"].name, "error": err
+                "procedure": fqn, "file": p["file"].name, "error": err
             })
             print(f"  FAIL  {p['name']}: {err[:120]}")
 

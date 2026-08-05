@@ -216,7 +216,8 @@ def _mssql_tables(cur) -> list[dict]:
             c.is_computed,
             ic.seed_value,
             ic.increment_value,
-            dc.definition               AS default_expr
+            dc.definition               AS default_expr,
+            cc.definition               AS computed_expr
         FROM sys.columns c
         JOIN sys.objects tab ON tab.object_id = c.object_id
         JOIN sys.types tp ON tp.user_type_id = c.user_type_id
@@ -225,6 +226,8 @@ def _mssql_tables(cur) -> list[dict]:
         LEFT JOIN sys.default_constraints dc
             ON dc.parent_column_id = c.column_id
             AND dc.parent_object_id = c.object_id
+        LEFT JOIN sys.computed_columns cc
+            ON cc.object_id = c.object_id AND cc.column_id = c.column_id
         WHERE tab.type = 'U' AND tab.is_ms_shipped = 0
         ORDER BY SCHEMA_NAME(tab.schema_id), tab.name, c.column_id
     """)
@@ -233,7 +236,8 @@ def _mssql_tables(cur) -> list[dict]:
     # Group by (schema, table)
     tables: dict[tuple, dict] = {}
     for (schema, table, col, type_name, max_len, prec, scale,
-         is_nullable, is_identity, is_computed, seed, increment, default_expr) in rows:
+         is_nullable, is_identity, is_computed, seed, increment,
+         default_expr, computed_expr) in rows:
         key = (schema, table)
         if key not in tables:
             tables[key] = {
@@ -242,20 +246,19 @@ def _mssql_tables(cur) -> list[dict]:
                 "columns": [],
                 "primary_key": [],
             }
-        # Skip computed columns entirely (they cannot be written to via COPY)
-        if is_computed:
-            continue
         tables[key]["columns"].append({
-            "name":        col,
-            "type_name":   type_name,
-            "max_length":  max_len,
-            "precision":   prec,
-            "scale":       scale,
-            "is_nullable": bool(is_nullable),
-            "is_identity": bool(is_identity),
-            "seed":        seed,
-            "increment":   increment,
-            "default_expr": default_expr,
+            "name":          col,
+            "type_name":     type_name,
+            "max_length":    max_len,
+            "precision":     prec,
+            "scale":         scale,
+            "is_nullable":   bool(is_nullable),
+            "is_identity":   bool(is_identity),
+            "is_computed":   bool(is_computed),
+            "computed_expr": computed_expr,   # None for regular columns
+            "seed":          seed,
+            "increment":     increment,
+            "default_expr":  default_expr,
         })
 
     # Primary keys

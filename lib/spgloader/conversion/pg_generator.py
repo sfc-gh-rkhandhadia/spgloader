@@ -291,38 +291,43 @@ def _gen_tables(tables: list[dict], type_map: dict) -> list[str]:
 
 
 def _gen_column(col: dict, type_map: dict) -> str:
-    raw_name  = col["name"]
-    col_name  = _quote_ident(raw_name.lower())
-    pg_type   = _resolve_type(col, type_map)
-    nullable  = col.get("is_nullable", True)
-    identity  = col.get("is_identity", False)
-    default   = _normalise_default(col.get("default_expr"))
-
-    # Boolean default: convert integer literals 0/1 → false/true
-    if pg_type == "boolean" and default is not None:
-        if default.strip() in ("0", "false"):
-            default = "false"
-        elif default.strip() in ("1", "true"):
-            default = "true"
-        elif default.strip() not in ("null", "NULL", "false", "true",
-                                     "FALSE", "TRUE", "false", "true"):
-            # Unrecognised boolean default — drop it to avoid syntax errors
-            default = None
-
-    # Temporal columns: drop numeric/arithmetic defaults (e.g. MSSQL date arithmetic
-    # like (((1)-(1))-(2000)) that evaluates to an integer) — not valid for timestamptz.
-    # Detect by checking the default contains ONLY digits, operators, parens, spaces
-    # (no letters = no function calls, no type names, no string literals)
-    if default is not None and pg_type in ("timestamptz", "timestamp", "date", "time"):
-        if re.match(r'^[\d()\s\-+*/\.]+$', default.strip()):
-            default = None  # integer arithmetic — not valid for temporal column
+    raw_name     = col["name"]
+    col_name     = _quote_ident(raw_name.lower())
+    pg_type      = _resolve_type(col, type_map)
+    nullable     = col.get("is_nullable", True)
+    identity     = col.get("is_identity", False)
+    computed     = col.get("is_computed", False)
+    computed_expr = col.get("computed_expr")
+    default      = _normalise_default(col.get("default_expr"))
 
     parts = [f"    {col_name} {pg_type}"]
 
+    if computed and computed_expr:
+        # MSSQL computed column → PG GENERATED ALWAYS AS (expr) STORED
+        pg_expr = _mssql_expr_to_pg(computed_expr)
+        parts.append(f"GENERATED ALWAYS AS ({pg_expr}) STORED")
+        return " ".join(parts)
+
     if identity:
         parts.append("GENERATED ALWAYS AS IDENTITY")
-    elif default is not None:
-        parts.append(f"DEFAULT {default}")
+    else:
+        # Boolean default: convert integer literals 0/1 → false/true
+        if pg_type == "boolean" and default is not None:
+            if default.strip() in ("0", "false"):
+                default = "false"
+            elif default.strip() in ("1", "true"):
+                default = "true"
+            elif default.strip() not in ("null", "NULL", "false", "true",
+                                         "FALSE", "TRUE", "false", "true"):
+                default = None
+
+        # Temporal columns: drop numeric/arithmetic defaults
+        if default is not None and pg_type in ("timestamptz", "timestamp", "date", "time"):
+            if re.match(r'^[\d()\s\-+*/\.]+$', default.strip()):
+                default = None
+
+        if default is not None:
+            parts.append(f"DEFAULT {default}")
 
     if not nullable:
         parts.append("NOT NULL")
@@ -471,6 +476,31 @@ def _quote_ident(name: str) -> str:
     if name.lower() in _PG_RESERVED or not re.match(r'^[a-z_][a-z0-9_]*$', name.lower()):
         return f'"{name.lower()}"'
     return name.lower()
+
+
+def _mssql_expr_to_pg(expr: str) -> str:
+    """Convert an MSSQL computed-column expression to PostgreSQL.
+
+    Applies two transformations:
+      1. Strip outer parentheses SQL Server adds:  ([in]-[out])  →  [in]-[out]
+      2. Replace every [bracket_identifier] with a properly double-quoted PG
+         identifier, quoting reserved words automatically.
+         e.g. [in] → "in", [out] → out, [Amount] → amount
+
+    No column names are hardcoded — _quote_ident handles the full reserved-word
+    list exhaustively.
+    """
+    expr = expr.strip()
+    # Strip a single wrapping pair of parentheses SQL Server adds
+    if expr.startswith('(') and expr.endswith(')'):
+        expr = expr[1:-1].strip()
+    # Replace every [identifier] with a properly quoted PG identifier
+    expr = re.sub(
+        r'\[([^\]]+)\]',
+        lambda m: _quote_ident(m.group(1)),
+        expr,
+    )
+    return expr
 
 
 def _safe_index_name(original: str, max_len: int = 63) -> str:

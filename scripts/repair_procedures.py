@@ -132,7 +132,7 @@ def _load_prompt_template(skill_dir: Path, template_name: str) -> str:
 
 def _extract_proc_name(sql: str) -> str | None:
     m = re.search(
-        r'CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION)\s+(\S+)\s*\(',
+        r'CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION)\s+(["\w]+(?:\.["\w]+)?)\s*\(',
         sql, re.IGNORECASE)
     if not m:
         return None

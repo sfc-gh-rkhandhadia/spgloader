@@ -25,6 +25,20 @@ def _extract_function_name(sql: str) -> str | None:
     return m.group(1).lower().rstrip('"').strip('"')
 
 
+def _schema_from_filename(f: Path) -> str | None:
+    """Return the target schema from the schema__name.sql filename convention.
+
+    Files produced by convert_objects.py for multi-schema sources (MySQL,
+    MariaDB, Oracle) use  schema__procname.sql  (double-underscore prefix).
+    Returns the schema string, or None when the convention is not present.
+    """
+    stem = f.stem  # e.g. ms__generate_case_id
+    if "__" in stem:
+        prefix = stem.split("__", 1)[0]
+        return prefix if prefix else None
+    return None
+
+
 def _extract_called_functions(sql: str, all_names: set[str]) -> set[str]:
     """Find references to other functions in this function's body."""
     refs = set()
@@ -74,15 +88,16 @@ def deploy_functions(work_dir: Path, spg_service: str, dry_run: bool = False) ->
         return {}
 
     # ── 1. Parse function names ───────────────────────────────────────────
-    functions: dict[str, dict] = {}  # name → {sql, file}
+    functions: dict[str, dict] = {}  # file_key → {sql, name, file, schema}
     for f in func_files:
         sql = f.read_text(encoding="utf-8")
         name = _extract_function_name(sql)
         if not name:
             print(f"  WARN: could not parse function name from {f.name}")
             continue
+        schema = _schema_from_filename(f)
         # Allow multiple overloads (same name, different params) by using file as key
-        functions[f.name] = {"sql": sql, "name": name, "file": f.name}
+        functions[f.name] = {"sql": sql, "name": name, "file": f.name, "schema": schema}
 
     all_names = {v["name"] for v in functions.values()}
 
@@ -111,7 +126,9 @@ def deploy_functions(work_dir: Path, spg_service: str, dry_run: bool = False) ->
     if dry_run:
         print("DRY-RUN:")
         for k in ordered:
-            print(f"  WOULD DEPLOY  {functions[k]['name']}")
+            info = functions[k]
+            schema_tag = f" [{info['schema']}]" if info.get("schema") else ""
+            print(f"  WOULD DEPLOY  {info['name']}{schema_tag}")
         return {"dry_run": True}
 
     conn = psycopg2.connect(f"service={spg_service}")
@@ -120,16 +137,27 @@ def deploy_functions(work_dir: Path, spg_service: str, dry_run: bool = False) ->
 
     for file_key in ordered:
         info = functions[file_key]
+        schema = info.get("schema")
+
+        # Inject SET search_path so the function lands in the correct schema
+        deploy_sql = info["sql"]
+        if schema:
+            deploy_sql = f'SET search_path TO "{schema}", public;\n{deploy_sql}'
+
+        # Schema-qualified name for the report entry
+        fqn = f"{schema}.{info['name']}" if schema else info["name"]
+        schema_tag = f" [{schema}]" if schema else ""
+
         try:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(info["sql"])
-            results["succeeded"].append(info["name"])
-            print(f"  OK    {info['name']}")
+                    cur.execute(deploy_sql)
+            results["succeeded"].append(fqn)
+            print(f"  OK    {info['name']}{schema_tag}")
         except Exception as e:
             conn.rollback()
             err = str(e).replace("\n", " ").strip()
-            results["failed"].append({"function": info["name"], "file": info["file"], "error": err})
+            results["failed"].append({"function": fqn, "file": info["file"], "error": err})
             print(f"  FAIL  {info['name']}: {err}")
 
     conn.close()

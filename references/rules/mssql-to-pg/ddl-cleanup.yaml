@@ -97,12 +97,19 @@ patterns:
     phase:       pre_bracket
 
   - name:        computed_column
-    description: "[col] AS (expression) — computed/virtual column; has no PG equivalent"
-    pattern:     ',?\s*\[[^\]]+\]\s+AS\s*\([^\n]+'
-    replacement: ''
-    flags:       [IGNORECASE]
+    description: "[col] AS (expression) [PERSISTED] — convert to PG GENERATED ALWAYS AS (expr) STORED"
+    pattern:     '(,?\s*\[[^\]]+\])\s+AS\s*(\([^\n]+?)(?:\s+PERSISTED)?\s*$'
+    replacement: '\1 GENERATED ALWAYS AS \2 STORED'
+    flags:       [IGNORECASE, MULTILINE]
     phase:       pre_bracket
-    note:        'Match to end of line to handle nested parens in expressions'
+    note:        >
+      Converts MSSQL computed columns to PostgreSQL GENERATED ALWAYS AS ... STORED.
+      Bracket identifiers inside the expression ([col]) are left for the bracket-
+      stripping phase that follows. Reserved-word column names (e.g. [in], [out])
+      will become bare identifiers after bracket stripping — the catalog path
+      (pg_generator._mssql_expr_to_pg) handles quoting correctly. This text-based
+      fallback emits a best-effort conversion; verify expressions that reference
+      reserved-word columns.
 
   - name:        temporal_hidden_generated
     description: "HIDDEN GENERATED keyword on temporal table columns"

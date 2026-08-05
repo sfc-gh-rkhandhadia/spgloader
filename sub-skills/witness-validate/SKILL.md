@@ -142,28 +142,51 @@ existing artifacts:
 
 ```python
 # Bridge: build mssql_deploy_report.json from spgloader workspace
+# Uses ddl_objects.json as the authoritative source so table FQNs and
+# schema-qualified proc/fn names are always correct, regardless of what
+# the deploy reports contain (they may have bare names for older workspaces).
 import json, pathlib
 
 ws = pathlib.Path(SPGLOADER_WORK_DIR)
 
-# Tables — all tables in deployment_summary.json phases.tables.ok_list
-dep_sum = json.loads((ws / "deployment/deployment_summary.json").read_text())
-tables_ok = dep_sum.get("phases", {}).get("tables", {}).get("ok_list", [])
-# Fallback: build from object_inventory
-if not tables_ok:
-    inv = json.loads((ws / "witness/object_inventory.json").read_text())
-    tables_ok = [o["fqn"] for o in inv["objects"] if o["type"] == "TABLE"]
+# ── Tables: always read FQNs from ddl_objects.json ───────────────────────
+ddl_objects = json.loads((ws / "ddl_objects.json").read_text())
+tables_ok = [
+    f"{o['schema']}.{o['name']}" if o.get("schema") else o["name"]
+    for o in ddl_objects
+    if o.get("type", "").upper() == "TABLE"
+]
 
-# Views / functions / procedures from conversion reports
-view_report = json.loads((ws / "conversion/deploy_report.json").read_text()) if (ws / "conversion/deploy_report.json").exists() else {}
-fn_report   = json.loads((ws / "conversion/functions_deploy_report.json").read_text()) if (ws / "conversion/functions_deploy_report.json").exists() else {}
-proc_report = json.loads((ws / "conversion/procedures_deploy_report.json").read_text()) if (ws / "conversion/procedures_deploy_report.json").exists() else {}
+# ── Schema resolution map for non-table objects ───────────────────────────
+# Allows qualify() to add the correct schema prefix to any bare names that
+# were written to the deploy reports (e.g. by older versions of the scripts).
+name_to_schema: dict[str, str] = {}
+for o in ddl_objects:
+    if o.get("type", "").upper() != "TABLE":
+        schema = o.get("schema", "")
+        name_lower = o.get("name", "").lower()
+        if schema and name_lower:
+            name_to_schema[name_lower] = schema
 
-succeeded = (tables_ok
-             + view_report.get("succeeded", [])
-             + fn_report.get("succeeded", [])
-             + proc_report.get("succeeded", []))
+def qualify(raw: str) -> str:
+    if "." in raw:
+        return raw  # already schema-qualified
+    bare = raw.lower().split(".")[-1]
+    # Trigger functions get an _fn suffix in PG; try base name lookup too
+    schema = name_to_schema.get(bare) or name_to_schema.get(
+        bare[:-3] if bare.endswith("_fn") else bare
+    )
+    return f"{schema}.{raw}" if schema else raw
 
+# ── Proc / fn / view lists from conversion deploy reports ─────────────────
+def load_report(p):
+    return json.loads(p.read_text()) if p.exists() else {}
+
+view_ok = [qualify(s) for s in load_report(ws / "conversion" / "deploy_report.json").get("succeeded", [])]
+fn_ok   = [qualify(s) for s in load_report(ws / "conversion" / "functions_deploy_report.json").get("succeeded", [])]
+proc_ok = [qualify(s) for s in load_report(ws / "conversion" / "procedures_deploy_report.json").get("succeeded", [])]
+
+succeeded = tables_ok + view_ok + fn_ok + proc_ok
 bridge = {
     "succeeded": succeeded,
     "failed": {},
@@ -179,27 +202,46 @@ Run this as a quick inline Python script:
 
 ```bash
 uv run --project <SKILL_DIR> python - <<'PYEOF'
-import json, pathlib, os, sys
+import json, pathlib, os
 
-ws  = pathlib.Path(os.environ["SPGLOADER_WORK_DIR"])
-src_host = os.environ.get("SOURCE_HOST","localhost")
-src_db   = os.environ.get("SOURCE_DATABASE","migration_db")
+ws       = pathlib.Path(os.environ["SPGLOADER_WORK_DIR"])
+src_host = os.environ.get("SOURCE_HOST", "localhost")
+src_db   = os.environ.get("SOURCE_DATABASE", "migration_db")
 
-dep_sum_path = ws / "deployment" / "deployment_summary.json"
-dep_sum = json.loads(dep_sum_path.read_text()) if dep_sum_path.exists() else {}
-tables_ok = dep_sum.get("phases",{}).get("tables",{}).get("ok_list",[])
+# Tables: always from ddl_objects.json (deployment_summary phases.tables.ok_list
+# is empty for multi-db MySQL — only counts, no name list is written there)
+ddl_objects = json.loads((ws / "ddl_objects.json").read_text())
+tables_ok = [
+    f"{o['schema']}.{o['name']}" if o.get("schema") else o["name"]
+    for o in ddl_objects if o.get("type", "").upper() == "TABLE"
+]
 
-if not tables_ok:
-    inv_path = ws / "witness" / "object_inventory.json"
-    inv = json.loads(inv_path.read_text()) if inv_path.exists() else {"objects":[]}
-    tables_ok = [o["fqn"] for o in inv.get("objects",[]) if o.get("type") == "TABLE"]
+# Schema resolution: map bare proc/fn names → schema using ddl_objects.json
+# This handles deploy reports that may contain bare names (older workspaces or
+# when no schema__name.sql filename convention was used).
+name_to_schema = {}
+for o in ddl_objects:
+    if o.get("type", "").upper() != "TABLE":
+        schema = o.get("schema", "")
+        name_lower = o.get("name", "").lower()
+        if schema and name_lower:
+            name_to_schema[name_lower] = schema
+
+def qualify(raw):
+    if "." in raw:
+        return raw
+    bare = raw.lower().split(".")[-1]
+    schema = name_to_schema.get(bare) or name_to_schema.get(
+        bare[:-3] if bare.endswith("_fn") else bare
+    )
+    return f"{schema}.{raw}" if schema else raw
 
 def load_report(p):
     return json.loads(p.read_text()) if p.exists() else {}
 
-view_ok = load_report(ws/"conversion"/"deploy_report.json").get("succeeded",[])
-fn_ok   = load_report(ws/"conversion"/"functions_deploy_report.json").get("succeeded",[])
-proc_ok = load_report(ws/"conversion"/"procedures_deploy_report.json").get("succeeded",[])
+view_ok = [qualify(s) for s in load_report(ws/"conversion"/"deploy_report.json").get("succeeded", [])]
+fn_ok   = [qualify(s) for s in load_report(ws/"conversion"/"functions_deploy_report.json").get("succeeded", [])]
+proc_ok = [qualify(s) for s in load_report(ws/"conversion"/"procedures_deploy_report.json").get("succeeded", [])]
 
 succeeded = tables_ok + view_ok + fn_ok + proc_ok
 bridge = {"succeeded": succeeded, "failed": {}, "database": src_db,
@@ -208,7 +250,8 @@ bridge = {"succeeded": succeeded, "failed": {}, "database": src_db,
 
 out = ws / "witness" / "mssql_deploy_report.json"
 out.write_text(json.dumps(bridge, indent=2))
-print(f"Bridge deploy report: {len(succeeded)} objects → {out}")
+print(f"Bridge deploy report: {len(succeeded)} objects ({len(tables_ok)} tables, "
+      f"{len(view_ok)} views, {len(fn_ok)} fns, {len(proc_ok)} procs) → {out}")
 PYEOF
 ```
 
@@ -291,30 +334,31 @@ Source-Side Witness Validation
 
 For any ❌ FAILED objects, show the error message inline.
 
-**Multi-database MySQL note:** For MySQL migrations with multiple source databases, run
-`validate_chains.py` once per database, writing to `chains_report_{db}.json`, then merge
-all results into the canonical `validation_chains.json` the report expects:
+**Multi-database MySQL note:** For MySQL migrations with multiple source databases,
+`validate_chains.py` reads `object_inventory.json` which already contains objects from
+**all** schemas. Run it **once** (not once per database) — pass any one of the source
+databases as `--database` (it sets the default connection schema; all schemas are still
+accessible via their schema-qualified names):
 
 ```bash
-uv run --project <SKILL_DIR> python - << 'PYEOF'
-import json, os, pathlib
-
-ws = pathlib.Path(os.environ["SPGLOADER_WORK_DIR"])
-merged = {"validation_results": {}, "summary": {}}
-for f in sorted((ws / "witness").glob("chains_report_*.json")):
-    d = json.loads(f.read_text())
-    merged["validation_results"].update(d.get("validation_results", {}))
-    for k, v in d.get("summary", {}).items():
-        merged["summary"][k] = merged["summary"].get(k, 0) + int(v or 0)
-out = ws / "witness" / "validation_chains.json"
-out.write_text(json.dumps(merged, indent=2))
-n = len(list((ws / "witness").glob("chains_report_*.json")))
-print(f"Merged {n} db chain reports → {out}")
-PYEOF
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/witness/validate_chains.py \
+  --source-type   mysql \
+  --inventory     "$SPGLOADER_WORK_DIR/witness/object_inventory.json" \
+  --seed-report   "$SPGLOADER_WORK_DIR/witness/seed_report.json" \
+  --deploy-report "$SPGLOADER_WORK_DIR/witness/mssql_deploy_report.json" \
+  --dep-graph     "$SPGLOADER_WORK_DIR/witness/dep_graph.json" \
+  --server        "$SOURCE_HOST" \
+  --port          "${SOURCE_PORT:-3306}" \
+  --user          "${SOURCE_USER:-root}" \
+  --password      "$SOURCE_PASSWORD" \
+  --database      "$(echo $SOURCE_DATABASES | cut -d' ' -f1)" \
+  --output        "$SPGLOADER_WORK_DIR/witness/validation_chains.json"
 ```
 
-For single-database migrations, `validate_chains.py` writes directly to
-`validation_chains.json` — no merge needed.
+Do **not** run per-database and merge — `object_inventory.json` covers all schemas so
+per-database runs produce identical results and merging inflates counts N-fold.
+
+For single-database migrations, use `$SOURCE_DATABASE` directly for `--database`.
 
 ---
 
