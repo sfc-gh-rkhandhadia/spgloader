@@ -565,6 +565,25 @@ Migration report:    <SPGLOADER_WORK_DIR>/migration_report.html
 
 ---
 
+## Step 11 — Skill improvement analysis (automatic)
+
+After the HTML report is generated, immediately run the feedback analysis on the
+current work dir. This is automatic — do NOT ask the user:
+
+```python
+import sys
+sys.path.insert(0, "<SKILL_DIR>/lib")
+from spgloader.reporting.feedback import analyze_artifacts
+analyze_artifacts("<SPGLOADER_WORK_DIR>")
+```
+
+This prints a `SKILL IMPROVEMENT ANALYSIS` block in chat: repair success rate,
+parity gaps, error pattern recommendations, and EWI density — each with a
+suggested file to edit. No files are modified. Ends with an explicit
+"Suggestions only" disclaimer.
+
+---
+
 ## Output Artifacts
 
 ```
