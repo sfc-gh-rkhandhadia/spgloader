@@ -65,27 +65,37 @@ def _get_spg_tables(conn, schema: str) -> set[str]:
 # View SQL helpers
 # ---------------------------------------------------------------------------
 
-def _extract_view_name(sql: str) -> str | None:
-    """Extract the fully-qualified view name from a CREATE OR REPLACE VIEW.
+def _extract_view_name(sql: str, filename: str = "") -> str | None:
+    """Extract the fully-qualified view name from a CREATE [OR REPLACE] VIEW.
 
     Handles quoted identifiers with spaces, e.g.:
       CREATE OR REPLACE VIEW dbo."order details extended" AS
       CREATE OR REPLACE VIEW "products above average price" AS
+
+    Falls back to parsing schema.name from the filename when the SQL header
+    cannot be matched — e.g. unconverted MySQL ALGORITHM=.../DEFINER=... views.
+    Filename convention: schema__viewname.sql → schema.viewname
     """
-    # Match optional schema prefix, then a quoted name (with spaces) or bare identifier
+    # Primary: match CREATE [OR REPLACE] VIEW (handles both PG and residual MySQL headers)
     m = re.search(
-        r'CREATE\s+OR\s+REPLACE\s+VIEW\s+((?:\w+\.)?(?:"[^"]+"|[\w]+))',
+        r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+((?:\w+\.)?(?:"[^"]+"|[\w]+))',
         sql, re.IGNORECASE
     )
-    if not m:
-        return None
-    name = m.group(1).lower()
-    # Normalise: strip outer quotes, keep schema prefix
-    if '.' in name:
-        schema, obj = name.split('.', 1)
-        obj = obj.strip('"')
-        return f"{schema}.{obj}"
-    return name.strip('"')
+    if m:
+        name = m.group(1).lower()
+        if '.' in name:
+            schema, obj = name.split('.', 1)
+            obj = obj.strip('"')
+            return f"{schema}.{obj}"
+        return name.strip('"')
+    # Fallback: derive from filename (schema__viewname.sql → schema.viewname)
+    if filename:
+        stem = Path(filename).stem  # e.g. "udr__stats_temp_view"
+        if "__" in stem:
+            schema, obj = stem.split("__", 1)
+            return f"{schema}.{obj}"
+        return stem or None
+    return None
 
 
 def _extract_view_refs(sql: str, all_names: set[str]) -> set[str]:
@@ -168,16 +178,18 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
     # ── 1. Parse view names and SQL ────────────────────────────────────────
     views: dict[str, dict] = {}
     skip_files = []
+    failed_files: list[dict] = []
 
     for f in view_files:
         sql = f.read_text(encoding="utf-8")
         if sql.lstrip().startswith("-- FIX-REQUIRED:"):
             skip_files.append(f.name)
             continue
-        name = _extract_view_name(sql)
+        name = _extract_view_name(sql, filename=f.name)
         if not name:
-            print(f"  WARN: could not parse view name from {f.name}, skipping")
-            skip_files.append(f.name)
+            print(f"  ERROR: could not parse view name from {f.name} — adding to failed list")
+            failed_files.append({"view": f.stem, "file": str(f),
+                                  "error": "Could not parse view name (unconverted DDL header)"})
             continue
         views[name] = {"sql": sql, "file": f.name}
 
@@ -214,21 +226,25 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
     conn = psycopg2.connect(f"service={spg_service}")
     conn.autocommit = False
 
-    # Set search_path so unqualified table references in views resolve to the
-    # source schema.  This is generic — schema comes from the workspace, not
-    # any hardcoded value.
+    # For multi-database migrations (schema__name.sql), each view may belong to
+    # a different schema.  Collect all unique schemas from the view FQNs so we
+    # can set a broad search_path that covers all of them.
+    view_schemas = sorted({v.split('.')[0] for v in views if '.' in v})
+    if not view_schemas:
+        view_schemas = [schema]
+    search_path_str = ", ".join(view_schemas) + ", public"
     with conn.cursor() as cur:
         cur.execute(
             "SELECT set_config('search_path', %s, false)",
-            (f"{schema}, public",),
+            (search_path_str,),
         )
     conn.commit()
-    print(f"search_path set : {schema}, public\n")
+    print(f"search_path set : {search_path_str}\n")
 
     # Fetch the full list of tables/views in the target schema for auto-prefix retry
     spg_tables = _get_spg_tables(conn, schema)
 
-    results = {"succeeded": [], "failed": [], "skipped": skip_files,
+    results = {"succeeded": [], "failed": failed_files, "skipped": skip_files,
                "auto_fixed": []}
 
     for name in ordered:

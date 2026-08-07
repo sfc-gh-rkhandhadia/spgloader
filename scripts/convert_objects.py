@@ -115,6 +115,18 @@ def convert_view(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
     """Convert a T-SQL / MySQL view to PostgreSQL CREATE OR REPLACE VIEW."""
     codes = []
     ddl = re.sub(r"WITH\s+SCHEMABINDING\s*", "", ddl, flags=re.IGNORECASE)
+    # MySQL: strip ALGORITHM=, DEFINER=, SQL SECURITY clauses before VIEW keyword.
+    # mysqldump exports: CREATE ALGORITHM=UNDEFINED DEFINER=`x`@`y` SQL SECURITY DEFINER VIEW
+    # Without this, the bare CREATE\s+VIEW regex below never matches.
+    ddl = re.sub(
+        r'CREATE\s+'
+        r'(?:ALGORITHM\s*=\s*\w+\s+)?'
+        r'(?:DEFINER\s*=\s*`[^`]*`@`[^`]*`\s+)?'
+        r'(?:SQL\s+SECURITY\s+\w+\s+)?'
+        r'VIEW',
+        'CREATE OR REPLACE VIEW',
+        ddl, flags=re.IGNORECASE,
+    )
     ddl = re.sub(r"CREATE\s+VIEW", "CREATE OR REPLACE VIEW", ddl, flags=re.IGNORECASE)
     ddl = strip_brackets(ddl)
     ddl = downcase_identifiers(ddl)
