@@ -134,6 +134,10 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \
   --work-dir     "$SPGLOADER_WORK_DIR"
 ```
 
+The script automatically preserves `SET QUOTED_IDENTIFIER ON` and other session
+SET statements from the preamble so that DDL files using `"double-quoted"` table
+identifiers (common in Northwind, AdventureWorks, etc.) load correctly.
+
 **SSMS "Scripts and Tables" export directory** (one `.sql` file per object, common
 UTF-16 LE encoding — use `--ddl-dir` and the script handles everything automatically):
 ```bash
