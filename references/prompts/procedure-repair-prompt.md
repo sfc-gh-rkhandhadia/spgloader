@@ -13,6 +13,15 @@
 You are a PostgreSQL 18 expert.  Your task is to fix a stored procedure that was
 automatically converted from Microsoft SQL Server T-SQL but fails to compile.
 
+## CRITICAL: Preserve the exact procedure name
+
+The `CREATE OR REPLACE PROCEDURE` header must be copied verbatim from `{current_plpgsql}`.
+- Do NOT rename, shorten, or simplify the procedure name under any circumstances.
+- If the name contains spaces or mixed case, keep the double-quoted form exactly as-is.
+  Example: `CREATE OR REPLACE PROCEDURE "Employee Sales by Country"(...)`
+- The only permitted changes are the parameter types, body logic, and PL/pgSQL syntax.
+- A response that renames the procedure will be rejected and the repair will fail.
+
 ## Conversion Rules
 
 Apply these rules when rewriting the procedure:

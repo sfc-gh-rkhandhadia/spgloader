@@ -327,15 +327,50 @@ def fix_patterns(sql: str, cfg: dict) -> tuple[str, list[str]]:
             fixes.append(f"dateadd: {n} occurrences")
 
     if cfg.get("convert_typed"):
-        # CONVERT(VarChar(N), expr) → CAST(expr AS VARCHAR(N))
-        # The basic CONVERT pattern missed types with parentheses
-        new, n = re.subn(
-            r"\bCONVERT\s*\(\s*([A-Za-z]+)\s*\(\s*(\d+)\s*\)\s*,\s*([^)]+)\)",
-            r"CAST(\3 AS \1(\2))", sql, flags=re.IGNORECASE,
+        # CONVERT(Type(N[,M]), expr) → CAST(expr AS Type(N[,M]))
+        # Uses _extract_balanced to handle nested parens in expr (e.g. NUMERIC(19,4)
+        # with expressions like ("t".UnitPrice*Quantity*(1-Discount)/100)).
+        _conv_re = re.compile(r"\bCONVERT\s*\(", re.IGNORECASE)
+        _type_re = re.compile(
+            r"\s*([A-Za-z]+)\s*\(\s*(\d+(?:\s*,\s*\d+)?)\s*\)\s*,\s*",
+            re.IGNORECASE,
         )
+        parts, pos, n = [], 0, 0
+        while True:
+            m = _conv_re.search(sql, pos)
+            if not m:
+                parts.append(sql[pos:])
+                break
+            # m.end()-1 is the position of the '(' that opens CONVERT's arg list
+            paren_start = m.end() - 1
+            if sql[paren_start] != "(":
+                parts.append(sql[pos : m.end()])
+                pos = m.end()
+                continue
+            try:
+                full_args = _extract_balanced(sql, paren_start)
+            except (ValueError, AssertionError):
+                parts.append(sql[pos : m.end()])
+                pos = m.end()
+                continue
+            type_m = _type_re.match(full_args)
+            if not type_m:
+                # Not a Type(N,M) CONVERT — leave it for other rules
+                parts.append(sql[pos : m.end()])
+                pos = m.end()
+                continue
+            type_name  = type_m.group(1)
+            type_param = re.sub(r"\s+", "", type_m.group(2))  # strip spaces: "19 , 4" → "19,4"
+            expr       = full_args[type_m.end():]
+            # end_pos = one past the closing ')' of CONVERT
+            end_pos = paren_start + len(full_args) + 2
+            parts.append(sql[pos : m.start()])
+            parts.append(f"CAST({expr} AS {type_name}({type_param}))")
+            pos = end_pos
+            n += 1
         if n:
-            sql = new
-            fixes.append(f"convert_typed: {n} CONVERT(Type(N),expr) fixed")
+            sql = "".join(parts)
+            fixes.append(f"convert_typed: {n} CONVERT(Type(N[,M]),expr) fixed")
 
     if cfg.get("cast_format_code"):
         # CAST(expr,NNN AS TEXT) → CAST(expr AS DATE)
@@ -908,6 +943,7 @@ def _fix_additional(sql: str, bit_columns: dict[str, list[str]] | None = None) -
         "iscpgatrevenuecenter", "isslb", "isactive", "isvalid",
         "isanonymous", "isonmenu", "isdefault", "isenabled",
         "isstartschedule", "iscartbulkscheduler", "isvisible", "isdeleted",
+        "discontinued",  # Northwind Products.Discontinued BIT
     }
 
     _alias_map = _build_alias_map(sql) if bit_columns else {}
@@ -939,6 +975,18 @@ def _fix_additional(sql: str, bit_columns: dict[str, list[str]] | None = None) -
             return f"{prefix}.{col} {op} {bool_val}"
         return m.group(0)
 
+    # Match `table.col = 0` and the MSSQL generated `(table.col)=0` form
+    # (Northwind wizards emit triple-nested parens like `(((col)=0))`).
+    # Two-pass approach:
+    #   Pass 1 — `(table.col)=0` pattern: the surrounding parens are part of
+    #             the column grouping only; consuming both ( and ) preserves the
+    #             outer parenthesis balance (e.g. `((( col = false ))`).
+    #   Pass 2 — `table.col = 0` plain form: catches anything pass 1 missed.
+    sql = re.sub(
+        r'\(\s*(\w+)\.(\w+)\s*\)\s*(=|!=|<>)\s*(0|1)\b',
+        _fix_bool_comparison,
+        sql, flags=re.IGNORECASE
+    )
     sql = re.sub(
         r'(\w+)\.(\w+)\s*(=|!=|<>)\s*(0|1)\b',
         _fix_bool_comparison,

@@ -10,7 +10,7 @@ Required env vars: SOURCE_TYPE (default: mssql), SOURCE_HOST (or MSSQL_HOST),
                    SPG_HOST, SPG_USER, SPG_PASSWORD
 Optional env vars: See config.py for full list.
 """
-import os, sys, re, hashlib, decimal, concurrent.futures
+import os, sys, re, hashlib, decimal, datetime as _dt, concurrent.futures
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import (MSSQL_CONF, SPG_CONF, BATCH_SIZE, OUTPUT_DIR,
                     VIEW_LOG_FILE, is_spg_system_schema, is_mssql_system_schema,
@@ -68,12 +68,38 @@ def discover_spg_views():
 # ── Per-view query ───────────────────────────────────────────────────────────
 
 def _normalize_val(v):
-    """Normalize a value for hashing — strips trailing zeros from Decimals."""
+    """Normalize a value for hashing.
+
+    MSSQL datetime  → pymssql returns naive datetime.datetime (no tzinfo)
+    SPG timestamptz → psycopg2 returns aware datetime.datetime (+00:00 when session=UTC)
+
+    Normalize by converting aware datetimes to UTC-naive so both sides hash
+    identically when they represent the same instant.  Uses astimezone(UTC)
+    so a non-UTC session offset is also handled correctly: the value is first
+    converted to its UTC equivalent, then tzinfo is stripped.
+
+    Decimal: strip trailing zeros so 32.38 and 32.3800 compare equal.
+    None: empty string (matches MSSQL NULL serialization from pymssql).
+    """
     if v is None:
         return ''
     if isinstance(v, decimal.Decimal):
         return str(v.normalize())
-    return str(v)
+    if isinstance(v, _dt.datetime):
+        if v.tzinfo is not None:
+            # Convert to UTC then strip tzinfo → UTC-naive datetime
+            v = v.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        # Truncate microseconds: MSSQL datetime has ~3ms precision; SPG may have more
+        return v.replace(microsecond=0).isoformat(sep=' ')
+    if isinstance(v, _dt.date):
+        return v.isoformat()
+    # String fallback: "1996-07-04 00:00:00.000" or "1996-07-04 00:00:00+00:00"
+    s = str(v)
+    s = re.sub(
+        r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$',
+        r'\1', s,
+    )
+    return s
 
 def _row_hash(rows):
     canon = '\n'.join('|'.join(_normalize_val(v) for v in r)

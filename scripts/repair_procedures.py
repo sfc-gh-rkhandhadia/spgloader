@@ -139,8 +139,26 @@ def _extract_proc_name(sql: str) -> str | None:
     return m.group(1).lower().rstrip('"').strip('"')
 
 
-def _extract_plpgsql_from_response(response: str) -> str | None:
-    """Extract the CREATE OR REPLACE PROCEDURE/FUNCTION block from an LLM response."""
+def _extract_plpgsql_from_response(response: str, object_type: str = "procedure") -> str | None:
+    """Extract the CREATE OR REPLACE PROCEDURE/FUNCTION/VIEW block from an LLM response.
+
+    Views are plain SQL (no $$...$$).  Procedures/functions use the $$...$$
+    language block.  Pass object_type='view' when repairing a view file so the
+    extractor looks for CREATE OR REPLACE VIEW ... ; instead of PROCEDURE.
+    """
+    if object_type == "view":
+        # Views are plain SQL ending with ';', not wrapped in $$...$$
+        fence_m = re.search(
+            r'```(?:sql)?\s*(CREATE\s+OR\s+REPLACE\s+VIEW\b.*?;)',
+            response, re.IGNORECASE | re.DOTALL)
+        if fence_m:
+            return fence_m.group(1).strip()
+        bare_m = re.search(
+            r'(CREATE\s+OR\s+REPLACE\s+VIEW\b.*?;)',
+            response, re.IGNORECASE | re.DOTALL)
+        return bare_m.group(1).strip() if bare_m else None
+
+    # Procedure / function path (original behaviour)
     # Try to find code fenced SQL
     fence_m = re.search(
         r'```(?:sql|plpgsql)?\s*(CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION).*?)```',
@@ -333,6 +351,22 @@ def _phase2_llm(
         current_sql = proc_file.read_text(encoding="utf-8", errors="replace")
         tsql = original_tsql.get(short_name, original_tsql.get(proc_name, "-- T-SQL not found"))
 
+        # Detect whether this file contains a VIEW or a PROCEDURE/FUNCTION.
+        # Views are plain SQL; the LLM prompt and extractor differ for each type.
+        _obj_type = (
+            "view"
+            if re.search(r'\bCREATE\s+(?:OR\s+REPLACE\s+)?VIEW\b', current_sql, re.IGNORECASE)
+            else "procedure"
+        )
+        # Use a view-specific prompt when repairing plain-SQL views so the LLM
+        # outputs CREATE OR REPLACE VIEW ... ; rather than a $$ procedure block.
+        _active_prompt = prompt_template
+        if _obj_type == "view":
+            _view_tpl = config.get("view_prompt_template", "view-repair-prompt.md")
+            _view_tpl_path = SKILL_DIR / "references" / "prompts" / _view_tpl
+            if _view_tpl_path.exists():
+                _active_prompt = _view_tpl_path.read_text(encoding="utf-8")
+
         print(f"\n  LLM repair: {proc_name}")
 
         # Each worker opens its own connections
@@ -348,7 +382,7 @@ def _phase2_llm(
                 print(f"    [{proc_name}] Iteration {iteration}/{max_iter} ...", end=" ", flush=True)
 
                 source_key = "original_plsql" if source_type == "oracle" else "original_tsql"
-                prompt = (prompt_template
+                prompt = (_active_prompt
                           .replace(f"{{{source_key}}}", tsql)
                           .replace("{current_plpgsql}", current_sql)
                           .replace("{pg_error}", current_error)
@@ -360,13 +394,43 @@ def _phase2_llm(
                     print(f"Cortex error: {e}")
                     break
 
-                repaired_sql = _extract_plpgsql_from_response(response)
+                repaired_sql = _extract_plpgsql_from_response(response, object_type=_obj_type)
                 if not repaired_sql:
                     print(f"could not extract PL/pgSQL from response")
                     if debug:
                         (review_dir / f"{file_name}.iter{iteration}.llm_raw.txt").write_text(
                             response, encoding="utf-8")
                     continue
+
+                # Type-flip guard: reject responses where a view file produced
+                # a PROCEDURE stub (LLM confused by the procedure-repair prompt).
+                if _obj_type == "view" and re.search(
+                    r'\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\b', repaired_sql, re.IGNORECASE
+                ):
+                    print(f"[type-guard] LLM returned PROCEDURE for VIEW file — discarding")
+                    if debug:
+                        (review_dir / f"{file_name}.iter{iteration}.llm_raw.txt").write_text(
+                            response, encoding="utf-8")
+                    continue
+
+                # Guard: LLM must not rename the procedure.
+                # Procedure names with spaces are especially at risk of being
+                # shortened (e.g. "Employee Sales by Country" → "employee").
+                _name_re = re.compile(
+                    r'CREATE\s+OR\s+REPLACE\s+PROCEDURE\s+"?([^"(\n]+?)"?\s*\(',
+                    re.IGNORECASE,
+                )
+                m_exp = _name_re.search(current_sql)
+                m_act = _name_re.search(repaired_sql)
+                if m_exp and m_act:
+                    exp_name = m_exp.group(1).strip().strip('"')
+                    act_name = m_act.group(1).strip().strip('"')
+                    if exp_name.lower() != act_name.lower():
+                        repaired_sql = _name_re.sub(
+                            f'CREATE OR REPLACE PROCEDURE "{exp_name}"(',
+                            repaired_sql, count=1,
+                        )
+                        print(f"[name-guard] restored name: {act_name!r} → {exp_name!r}")
 
                 if debug:
                     (review_dir / f"{file_name}.iter{iteration}.sql").write_text(
