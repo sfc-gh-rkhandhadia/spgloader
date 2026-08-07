@@ -225,8 +225,21 @@ def load_mssql(ddl_file: Path, database: str, password: str, container: str,
     )
     if first_obj_idx is not None and first_obj_idx > 0:
         skipped = first_obj_idx
-        processed = "GO\n".join(batches[first_obj_idx:])
+        # Preserve SET statements from preamble (QUOTED_IDENTIFIER, ANSI_NULLS, etc.)
+        # These affect how subsequent DDL is parsed by sqlcmd.
+        _SET_STMT_RE = re.compile(
+            r"^\s*SET\s+(?:QUOTED_IDENTIFIER|ANSI_NULLS|ANSI_PADDING|ANSI_WARNINGS|NOCOUNT)\s+(?:ON|OFF)\b",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        preserved_sets = []
+        for b in batches[:first_obj_idx]:
+            if _SET_STMT_RE.search(b):
+                preserved_sets.append(b.strip())
+        prefix = ("GO\n".join(preserved_sets) + "\nGO\n") if preserved_sets else ""
+        processed = prefix + "GO\n".join(batches[first_obj_idx:])
         print(f"  Stripped database-creation preamble ({skipped} batches) from DDL")
+        if preserved_sets:
+            print(f"  Preserved {len(preserved_sets)} SET statement batch(es) from preamble")
 
     if processed != content:
         # Write preprocessed file to a temp location so the original is untouched
