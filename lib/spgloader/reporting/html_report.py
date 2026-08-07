@@ -376,7 +376,14 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
             val_report = {"checks": merged_checks,
                           "source": "per-db validation files"}
     val_checks = val_report.get("checks", [])
-
+    # Backfill _schema for single-DB migrations: when checks were written without
+    # _schema (MSSQL/Oracle single-db path), use the first schema name derived
+    # from ddl_objects.json so the Schema Verification tab shows the schema name
+    # rather than an em-dash.
+    if val_checks and not any(c.get("_schema") for c in val_checks):
+        _fallback_schema = _schema_names[0] if _schema_names else ""
+        if _fallback_schema:
+            val_checks = [{**c, "_schema": _fallback_schema} for c in val_checks]
     # -- witness validation (Phase 6.5) ------------------------------------
     witness_chains = _load_json(ws / "witness" / "validation_chains.json")
     # MySQL multi-db fallback: merge per-db chains_report_{db}.json files
