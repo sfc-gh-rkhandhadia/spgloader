@@ -207,39 +207,74 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     schema_names_str   = ", ".join(_schema_names) if _schema_names else ""
 
     # -- views deployment -------------------------------------------------
-    vr = _load_json(ws / "conversion" / "deploy_report.json")
-    # fix_report.json records which SQL files were successfully TRANSFORMED by fix_views.py,
-    # NOT which views deployed to SPG. The authoritative deployment outcome is deploy_report.json
-    # (succeeded / failed / skipped / auto_fixed). Do NOT override deploy_report with fix_report.
-    # Deduplicate the failed list — multiple deploy passes can produce duplicate entries
-    # for the same XML views that consistently fail (XQuery/FOR XML incompatible with Postgres).
-    _seen_fail = set()
-    _deduped_fail = []
-    for _f in vr.get("failed", []):
-        _key = (_f.get("view", _f) if isinstance(_f, dict) else _f).lower()
-        if _key not in _seen_fail:
-            _seen_fail.add(_key)
-            _deduped_fail.append(_f)
-    vr = dict(vr, failed=_deduped_fail)
-    views_ok    = [_clean_name(n) for n in vr.get("succeeded", [])]
-    views_fail  = vr.get("failed", [])
-    views_fixed = [_clean_name(n) for n in vr.get("auto_fixed", [])]  # empty → Fixed by Rules=0
-    views_skip  = [_clean_name(n) for n in vr.get("skipped", [])]
+    # ── Layer 3: Read canonical migration_state.json when present ─────────
+    # If migration_state.json exists (written by deploy_views, deploy_functions,
+    # deploy_procedures, parallel_deploy, mysql_structural_parity), use it as
+    # the authoritative source for these sections so the report is consistent
+    # regardless of which individual files were written or in what format.
+    # Falls back to the legacy per-file reads below for older workspaces.
+    _mstate_ctx: dict | None = None
+    _mstate_path = ws / ".spgloader" / "migration_state.json"
+    if _mstate_path.exists():
+        try:
+            import sys as _sys
+            _lib = str(Path(__file__).parent.parent.parent)
+            if _lib not in _sys.path:
+                _sys.path.insert(0, _lib)
+            from spgloader.migration_state import MigrationState
+            _mstate_ctx = MigrationState(ws).to_report_context()
+        except Exception:
+            _mstate_ctx = None
+    # ──────────────────────────────────────────────────────────────────────
+
+    if _mstate_ctx:
+        views_ok   = [_clean_name(n) for n in _mstate_ctx.get("views_ok", [])]
+        views_fail = _mstate_ctx.get("views_fail", [])
+        views_fixed = []
+        views_skip = [_clean_name(n) for n in _mstate_ctx.get("views_skip", [])]
+    else:
+        vr = _load_json(ws / "conversion" / "deploy_report.json")
+        # fix_report.json records which SQL files were successfully TRANSFORMED by fix_views.py,
+        # NOT which views deployed to SPG. The authoritative deployment outcome is deploy_report.json
+        # (succeeded / failed / skipped / auto_fixed). Do NOT override deploy_report with fix_report.
+        # Deduplicate the failed list — multiple deploy passes can produce duplicate entries
+        # for the same XML views that consistently fail (XQuery/FOR XML incompatible with Postgres).
+        _seen_fail = set()
+        _deduped_fail = []
+        for _f in vr.get("failed", []):
+            _key = (_f.get("view", _f) if isinstance(_f, dict) else _f).lower()
+            if _key not in _seen_fail:
+                _seen_fail.add(_key)
+                _deduped_fail.append(_f)
+        vr = dict(vr, failed=_deduped_fail)
+        views_ok    = [_clean_name(n) for n in vr.get("succeeded", [])]
+        views_fail  = vr.get("failed", [])
+        views_fixed = [_clean_name(n) for n in vr.get("auto_fixed", [])]  # empty → Fixed by Rules=0
+        views_skip  = [_clean_name(n) for n in vr.get("skipped", [])]
 
     # -- functions deployment ---------------------------------------------
-    fr         = _load_json(ws / "conversion" / "functions_deploy_report.json")
-    if not fr.get("succeeded") and (ws / "conversion" / "functions_fix_report.json").exists():
-        fr     = _load_json(ws / "conversion" / "functions_fix_report.json")
-    funcs_ok   = [_clean_name(n) for n in fr.get("succeeded", [])]
-    funcs_fail = fr.get("failed", [])
+    if _mstate_ctx:
+        funcs_ok   = _mstate_ctx.get("funcs_ok", [])
+        funcs_fail = _mstate_ctx.get("funcs_fail", [])
+    else:
+        fr = _load_json(ws / "conversion" / "functions_deploy_report.json")
+        if not fr.get("succeeded") and (ws / "conversion" / "functions_fix_report.json").exists():
+            fr = _load_json(ws / "conversion" / "functions_fix_report.json")
+        funcs_ok   = [_clean_name(n) for n in fr.get("succeeded", [])]
+        funcs_fail = fr.get("failed", [])
 
     # -- procedures deployment --------------------------------------------
-    pr           = _load_json(ws / "conversion" / "procedures_deploy_report.json")
-    procs_ok     = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n)))
-                    for n in pr.get("succeeded", [])]
-    procs_fail   = pr.get("failed", [])
-    procs_legacy = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n)))
-                    for n in pr.get("skipped_legacy", [])]
+    if _mstate_ctx:
+        procs_ok       = _mstate_ctx.get("procs_ok", [])
+        procs_fail     = _mstate_ctx.get("procs_fail", [])
+        procs_legacy   = _mstate_ctx.get("procs_legacy", [])
+    else:
+        pr           = _load_json(ws / "conversion" / "procedures_deploy_report.json")
+        procs_ok     = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n)))
+                        for n in pr.get("succeeded", [])]
+        procs_fail   = pr.get("failed", [])
+        procs_legacy = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n)))
+                        for n in pr.get("skipped_legacy", [])]
 
     # -- separate triggers (bundled with procedures in wave 4) -------------
     ddl_objs_early = _load_json(ws / "ddl_objects.json")
@@ -382,8 +417,14 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         parity_report_md = parity_file.read_text(encoding="utf-8")[:8000]
     parity_ran = parity_file.exists() or (ws / "parity" / "parity_results.json").exists()
 
-    # Structured parity results (written by full_validation.py / mysql_structural_parity.py)
-    parity_results = _load_json(ws / "parity" / "parity_results.json")
+    # Structured parity results — prefer migration_state.json (Layer 3) over legacy files
+    if _mstate_ctx and _mstate_ctx.get("parity_results"):
+        parity_results    = _mstate_ctx["parity_results"]
+        parity_structured = True
+        parity_ran        = True
+    else:
+        # Structured parity results (written by full_validation.py / mysql_structural_parity.py)
+        parity_results = _load_json(ws / "parity" / "parity_results.json")
     parity_structured = bool(parity_results)
 
     # MySQL fallback: read parity_structural.json and convert to renderable format

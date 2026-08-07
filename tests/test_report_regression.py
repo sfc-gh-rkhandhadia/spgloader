@@ -432,3 +432,152 @@ class TestWriteReportAccumulation:
         assert result["fixed_rules"] == ["r1"]
         assert result["fixed_llm"]   == ["l1"]
         assert result["still_failed"] == ["bad"]
+
+
+# ---------------------------------------------------------------------------
+# MigrationState — Layer 1 (typed workspace contract)
+# ---------------------------------------------------------------------------
+
+class TestMigrationState:
+
+    def _ws(self, tmp_path) -> Path:
+        ws = tmp_path / "workspace"
+        (ws / ".spgloader").mkdir(parents=True)
+        (ws / "conversion" / "postgres" / "wave_2_views_fixed").mkdir(parents=True)
+        return ws
+
+    def test_record_and_reload(self, tmp_path):
+        """Data written by record_deploy_phase() survives a reload."""
+        from spgloader.migration_state import MigrationState
+        ws = self._ws(tmp_path)
+        state = MigrationState(ws)
+        state.record_deploy_phase(
+            "views",
+            succeeded=["udr.stats_temp_view"],
+            failed=[],
+            skipped=[],
+            wave_dir=None,
+        )
+        reloaded = MigrationState(ws)
+        phase = reloaded.get_phase("views")
+        assert phase is not None
+        assert phase["succeeded"] == ["udr.stats_temp_view"]
+        assert phase["failed"] == []
+        assert phase["input_file_count"] == 0   # wave_dir=None → 0
+
+    def test_postcondition_raises_on_unaccounted_file(self, tmp_path):
+        """postcondition_check raises PostconditionError when a wave file is missing."""
+        from spgloader.migration_state import MigrationState, PostconditionError
+        ws = self._ws(tmp_path)
+        wave_dir = ws / "conversion" / "postgres" / "wave_2_views_fixed"
+        # Write one SQL file in the wave dir
+        (wave_dir / "udr__stats_temp_view.sql").write_text("CREATE OR REPLACE VIEW udr.stats_temp_view AS SELECT 1;")
+
+        # succeeded/failed/skipped = 0 total, but 1 file exists → postcondition fails
+        with pytest.raises(PostconditionError, match="unaccounted"):
+            MigrationState.postcondition_check(
+                "views", wave_dir,
+                succeeded=[], failed=[], skipped=[],
+                strict=True,
+            )
+
+    def test_postcondition_passes_when_all_accounted(self, tmp_path):
+        """postcondition_check passes when input_files == accounted_for."""
+        from spgloader.migration_state import MigrationState
+        ws = self._ws(tmp_path)
+        wave_dir = ws / "conversion" / "postgres" / "wave_2_views_fixed"
+        (wave_dir / "udr__stats_temp_view.sql").write_text("CREATE OR REPLACE VIEW udr.stats_temp_view AS SELECT 1;")
+        # 1 file, 1 in succeeded → should not raise
+        MigrationState.postcondition_check(
+            "views", wave_dir,
+            succeeded=["udr.stats_temp_view"], failed=[], skipped=[],
+            strict=True,
+        )
+
+    def test_record_parity_canonical_format(self, tmp_path):
+        """record_parity() stores data that to_report_context() returns correctly."""
+        from spgloader.migration_state import MigrationState
+        ws = self._ws(tmp_path)
+        schemas = {
+            "evdas": {"tables_src": 13, "tables_spg": 13, "tables_match": 13,
+                      "routines_src": 18, "routines_spg": 18, "routines_match": 18,
+                      "views_src": 0, "views_spg": 0, "col_mismatches": [],
+                      "routines_missing": [], "only_source": [], "only_spg": [],
+                      "pass": 31, "fail": 0, "missing": 0, "spg_only": 0,
+                      "excluded_objects": [], "objects": []},
+        }
+        grand = {"pass": 31, "fail": 0, "missing": 0, "spg_only": 0}
+        state = MigrationState(ws)
+        state.record_parity("mysql", schemas, grand)
+
+        ctx = MigrationState(ws).to_report_context()
+        assert ctx is not None
+        assert ctx["parity_results"]["grand"]["pass"] == 31
+        assert ctx["parity_structured"] is True
+
+    def test_to_report_context_returns_none_when_empty(self, tmp_path):
+        """to_report_context() returns None for a workspace with no phase data."""
+        from spgloader.migration_state import MigrationState
+        ws = self._ws(tmp_path)
+        ctx = MigrationState(ws).to_report_context()
+        assert ctx is None
+
+
+# ---------------------------------------------------------------------------
+# html_report reads migration_state.json over legacy files (Layer 3)
+# ---------------------------------------------------------------------------
+
+class TestHtmlReportMigrationStatePriority:
+
+    def test_views_from_migration_state_override_deploy_report(self, report, tmp_path):
+        """When migration_state.json is present, views_ok comes from it not deploy_report."""
+        ws = _make_workspace(
+            tmp_path,
+            deploy_report={
+                # deploy_report says 0 views (stale / incorrectly populated)
+                "succeeded": [],
+                "failed": [],
+                "skipped": ["udr__stats_temp_view.sql"],
+                "auto_fixed": [],
+            },
+        )
+        # Write migration_state.json saying the view was deployed
+        (ws / ".spgloader").mkdir(parents=True, exist_ok=True)
+        import json as _json
+        (ws / ".spgloader" / "migration_state.json").write_text(_json.dumps({
+            "schema_version": 1,
+            "views": {
+                "succeeded": ["udr.stats_temp_view"],
+                "failed": [],
+                "skipped": [],
+                "input_file_count": 1,
+                "accounted_for": 1,
+            }
+        }))
+        data = report(ws)
+        assert "udr.stats_temp_view" in data["views_ok"], (
+            "migration_state.json succeeded must override deploy_report skipped"
+        )
+        assert len(data["views_skip"]) == 0, (
+            "views_skip should be empty when migration_state says view deployed"
+        )
+
+    def test_parity_from_migration_state_overrides_legacy_zero(self, report, tmp_path):
+        """When migration_state has parity, parity_structured=True and grand.pass>0."""
+        ws = _make_workspace(tmp_path)
+        (ws / ".spgloader").mkdir(parents=True, exist_ok=True)
+        import json as _json
+        (ws / ".spgloader" / "migration_state.json").write_text(_json.dumps({
+            "schema_version": 1,
+            "parity": {
+                "source_type": "mysql",
+                "schemas": {},
+                "grand": {"pass": 624, "fail": 0, "missing": 0, "spg_only": 0},
+                "_is_structural": True,
+            }
+        }))
+        data = report(ws)
+        assert data.get("parity_structured") is True
+        assert data.get("parity_ran") is True
+        pr = data.get("parity_results", {})
+        assert pr.get("grand", {}).get("pass", 0) == 624

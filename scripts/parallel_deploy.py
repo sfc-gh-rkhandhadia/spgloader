@@ -288,6 +288,30 @@ def deploy(
     except Exception:
         pass
 
+    # ── Write to canonical migration_state.json ────────────────────────────
+    try:
+        _lib_dir2 = str(Path(__file__).parent.parent / "lib")
+        if _lib_dir2 not in sys.path:
+            sys.path.insert(0, _lib_dir2)
+        from spgloader.migration_state import MigrationState
+        ws_dir2 = Path(output_path).parent.parent if output_path else None
+        if ws_dir2:
+            state = MigrationState(ws_dir2)
+            p = summary.get("phases", {})
+            state.record_tables(
+                schema=source_db,
+                tables_ok=p.get("tables", {}).get("ok", 0),
+                tables_fail=p.get("tables", {}).get("fail", 0),
+                indexes_ok=p.get("indexes", {}).get("ok", 0),
+                indexes_fail=p.get("indexes", {}).get("fail", 0),
+                fk_ok=p.get("foreign_keys", {}).get("ok", 0),
+                fk_fail=p.get("foreign_keys", {}).get("fail", 0),
+                elapsed_s=summary.get("elapsed_s", 0.0),
+            )
+    except Exception:
+        pass
+    # ──────────────────────────────────────────────────────────────────────
+
     return summary
 
 

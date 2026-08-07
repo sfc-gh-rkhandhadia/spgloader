@@ -15,6 +15,13 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+try:
+    from spgloader.migration_state import MigrationState, PostconditionError
+except ImportError:
+    MigrationState = None
+    PostconditionError = RuntimeError
+
 
 def _extract_function_name(sql: str) -> str | None:
     """Extract the fully-qualified function name from CREATE OR REPLACE FUNCTION."""
@@ -196,6 +203,30 @@ def main():
         manifest.save()
     except Exception:
         pass
+
+    # ── Write to canonical migration_state.json ────────────────────────────
+    if MigrationState is not None:
+        try:
+            wave_dir = (work_dir / "conversion" / "postgres" / "wave_3_functions_fixed")
+            if not wave_dir.exists():
+                wave_dir = work_dir / "conversion" / "postgres" / "wave_3_functions"
+            state = MigrationState(work_dir)
+            failed_norm = [
+                {"fqn": f.get("function", f) if isinstance(f, dict) else f,
+                 "error": f.get("error", "") if isinstance(f, dict) else ""}
+                for f in results.get("failed", [])
+            ]
+            state.record_deploy_phase(
+                "functions",
+                succeeded=results.get("succeeded", []),
+                failed=failed_norm,
+                skipped=[],
+                wave_dir=wave_dir,
+                strict_postcondition=True,
+            )
+        except PostconditionError as exc:
+            print(f"\n{'!'*60}\nPOSTCONDITION FAILURE: {exc}\n{'!'*60}")
+    # ──────────────────────────────────────────────────────────────────────
 
     print(f"\n{'='*60}")
     print(f"Deployed OK : {len(results.get('succeeded', []))}")

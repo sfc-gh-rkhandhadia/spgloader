@@ -21,6 +21,13 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+try:
+    from spgloader.migration_state import MigrationState, PostconditionError
+except ImportError:
+    MigrationState = None
+    PostconditionError = RuntimeError
+
 
 # ---------------------------------------------------------------------------
 # Workspace helpers
@@ -303,6 +310,35 @@ def main():
 
     report_path = work_dir / "conversion" / "deploy_report.json"
     report_path.write_text(json.dumps(results, indent=2))
+
+    # ── Write to canonical migration_state.json ────────────────────────────
+    if MigrationState is not None:
+        try:
+            wave_dir = work_dir / "conversion" / "postgres" / "wave_2_views_fixed"
+            state = MigrationState(work_dir)
+            # Normalise failed list to {fqn, error} dicts
+            failed_norm = [
+                {"fqn": f["view"] if isinstance(f, dict) else f,
+                 "error": f.get("error", "") if isinstance(f, dict) else ""}
+                for f in results.get("failed", [])
+            ]
+            state.record_deploy_phase(
+                "views",
+                succeeded=results.get("succeeded", []),
+                failed=failed_norm,
+                skipped=results.get("skipped", []),
+                wave_dir=wave_dir,
+                strict_postcondition=True,
+            )
+        except PostconditionError as exc:
+            print(f"\n{'!'*60}")
+            print(f"POSTCONDITION FAILURE: {exc}")
+            print(f"{'!'*60}")
+            print("The deploy report has been written but the migration_state.json")
+            print("was NOT updated. Fix the unaccounted files before regenerating")
+            print("the migration report.")
+            # Do not sys.exit — the deploy itself may have succeeded
+    # ──────────────────────────────────────────────────────────────────────
 
     print(f"\n{'='*60}")
     print(f"Deployed OK     : {len(results.get('succeeded', []))}")

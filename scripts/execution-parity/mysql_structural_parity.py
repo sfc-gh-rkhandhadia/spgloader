@@ -286,6 +286,25 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(parity_results, indent=2))
 
+    # ── Also write to canonical migration_state.json ───────────────────────
+    try:
+        import sys as _sys
+        _lib = str(Path(__file__).parent.parent.parent / "lib")
+        if _lib not in _sys.path:
+            _sys.path.insert(0, _lib)
+        from spgloader.migration_state import MigrationState
+        ws_dir = out.parent.parent  # parity/ → workspace root
+        if (ws_dir / ".spgloader").exists():
+            MigrationState(ws_dir).record_parity(
+                source_type=args.source_type,
+                schemas=schema_results,
+                grand={"pass": grand_pass, "fail": grand_fail,
+                       "missing": grand_missing, "spg_only": grand_spg_only},
+            )
+    except Exception:
+        pass
+    # ──────────────────────────────────────────────────────────────────────
+
     print(f"\n{'='*60}")
     print(f"PARITY SUMMARY")
     print(f"{'='*60}")
