@@ -1087,6 +1087,27 @@ def main():
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
+    # Update the object manifest with conversion state per object
+    try:
+        from spgloader.manifest import ObjectManifest
+        obj_manifest = ObjectManifest(work_dir)
+        _NEEDS_REPAIR_CODES = {"SPG-EWI-0004", "SPG-EWI-0007", "SPG-EWI-0008"}
+        for entry in manifest_entries:
+            fqn = entry["fqn"]
+            codes = set(entry.get("ewi_codes", []))
+            status = "failed" if codes & _NEEDS_REPAIR_CODES else "completed"
+            obj_manifest.set_converted(fqn, status,
+                                       artifact=entry.get("output_file", ""),
+                                       ewi_codes=entry.get("ewi_codes", []))
+        # Mark tables as extraction-completed + deployment-pending (tables skip conversion)
+        for fqn in catalog_tables + oracle_catalog_tables:
+            obj_manifest.set_converted(fqn, "skipped")
+        obj_manifest.save()
+        n_clean = sum(1 for e in manifest_entries if not (set(e.get("ewi_codes",[])) & _NEEDS_REPAIR_CODES))
+        print(f"  object_manifest  {len(manifest_entries)} updated (clean={n_clean}, needs_repair={len(manifest_entries)-n_clean})")
+    except Exception as e:
+        print(f"  object_manifest  (skipped: {e})", file=sys.stderr)
+
     # Write _conversion_metrics.json — accuracy tracking for consistent quality monitoring
     _NEEDS_REPAIR = {"SPG-EWI-0004", "SPG-EWI-0007", "SPG-EWI-0008"}
     _NEEDS_MANUAL = {"SPG-EWI-0012"}

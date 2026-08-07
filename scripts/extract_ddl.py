@@ -72,6 +72,20 @@ def main():
     for obj_type, count in sorted(counts.items()):
         print(f"  {obj_type:<20} {count}")
 
+    # Seed the object manifest (if workspace exists)
+    output_dir = Path(args.output).parent
+    meta_dir = output_dir / ".spgloader"
+    if meta_dir.exists() or (output_dir / "source_conn.env").exists():
+        try:
+            from spgloader.manifest import ObjectManifest
+            manifest = ObjectManifest(output_dir)
+            added = manifest.seed_from_ddl_objects(objects)
+            manifest.save()
+            if added:
+                print(f"  manifest         {added} objects seeded → .spgloader/object_manifest.json")
+        except Exception as e:
+            print(f"  manifest         (skipped: {e})", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()

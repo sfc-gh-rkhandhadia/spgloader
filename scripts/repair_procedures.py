@@ -610,6 +610,20 @@ def repair_procedures(
     all_fixed = fixed_rules + repair_report["fixed_llm"]
     _update_deploy_report(report_path, all_fixed)
     _write_report(work_dir, repair_report)
+
+    # Update object manifest with repair results
+    try:
+        from spgloader.manifest import ObjectManifest
+        manifest = ObjectManifest(work_dir)
+        for name in all_fixed:
+            manifest.set_repaired(name, "completed")
+        for item in llm_result.get("still_failed", []):
+            name = item.get("procedure", item) if isinstance(item, dict) else str(item)
+            manifest.set_repaired(name, "failed", error="LLM repair exhausted")
+        manifest.save()
+    except Exception:
+        pass  # manifest is optional — don't break repair flow
+
     return repair_report
 
 

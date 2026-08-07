@@ -538,6 +538,20 @@ def main() -> None:
     report_path = work_dir / "conversion" / "procedures_deploy_report.json"
     report_path.write_text(json.dumps(results, indent=2))
 
+    # Update object manifest with deployment results
+    try:
+        from spgloader.manifest import ObjectManifest
+        manifest = ObjectManifest(work_dir)
+        for name in results.get("succeeded", []):
+            manifest.set_deployed(name, "completed")
+        for item in results.get("failed", []):
+            fqn = item.get("procedure", "") if isinstance(item, dict) else str(item)
+            err = item.get("error", "") if isinstance(item, dict) else ""
+            manifest.set_deployed(fqn, "failed", error=err[:200])
+        manifest.save()
+    except Exception:
+        pass  # manifest is optional
+
     print(f"\n{'='*60}")
     print(f"Deployed OK     : {len(results.get('succeeded', []))}")
     print(f"Failed          : {len(results.get('failed', []))}")

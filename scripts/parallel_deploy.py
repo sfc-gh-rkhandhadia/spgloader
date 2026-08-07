@@ -268,6 +268,26 @@ def deploy(
             print(f"  [{r['phase']}] {r['label']}: {r.get('error','')}")
     print(f"{'='*60}")
 
+    # Update object manifest with table deployment results
+    try:
+        _lib_dir = str(Path(__file__).parent.parent / "lib")
+        if _lib_dir not in sys.path:
+            sys.path.insert(0, _lib_dir)
+        from spgloader.manifest import ObjectManifest
+        # Determine workspace from output_path or source_db
+        ws_dir = Path(output_path).parent.parent if output_path else None
+        if ws_dir and (ws_dir / ".spgloader").exists():
+            manifest = ObjectManifest(ws_dir)
+            for r in all_results:
+                if r.get("phase") == "tables":
+                    fqn = r.get("label", "")
+                    if fqn:
+                        status = "completed" if r["ok"] else "failed"
+                        manifest.set_deployed(fqn, status, error=r.get("error", "")[:200])
+            manifest.save()
+    except Exception:
+        pass
+
     return summary
 
 
