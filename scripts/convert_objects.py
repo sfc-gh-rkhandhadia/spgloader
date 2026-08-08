@@ -94,6 +94,33 @@ def downcase_identifiers(ddl: str) -> str:
     return re.sub(r'"([^"]+)"', _lower, ddl)
 
 
+_LOWERCASE_TOKENS = re.compile(
+    r"(/\*.*?\*/)"        # block comment — preserve verbatim
+    r"|(--[^\n]*)"        # line comment — preserve verbatim
+    r"|('(?:''|[^'])*')"  # single-quoted string literal — preserve verbatim
+    r'|("(?:""|[^"])*")'  # double-quoted identifier — preserve verbatim
+    r"|([A-Za-z_]\w*)",   # bare word token — lowercase
+    re.DOTALL,
+)
+
+
+def lowercase_sql_identifiers(sql: str) -> str:
+    """Lowercase all bare unquoted SQL identifiers in converted SQL.
+
+    Called as the final pass in convert_view/procedure/function/trigger so
+    object references like Products, Orders, CustomerID become products,
+    orders, customerid — matching the lowercase names parallel_deploy.py
+    creates in the target SPG schema.  String literals, double-quoted
+    identifiers (including multi-word names like "order details"), line
+    comments, and block comments are preserved verbatim.
+    """
+    def _sub(m: re.Match) -> str:
+        if m.group(5) is not None:  # bare word token
+            return m.group(5).lower()
+        return m.group(0)           # strings / comments / quoted identifiers
+    return _LOWERCASE_TOKENS.sub(_sub, sql)
+
+
 def fix_view_alias_syntax(ddl: str) -> str:
     """Fix T-SQL view-specific alias forms that are invalid in PostgreSQL."""
     ddl = re.sub(r"\bAS\s+'([^']+)'", lambda m: f'AS "{m.group(1)}"', ddl, flags=re.IGNORECASE)
@@ -133,6 +160,7 @@ def convert_view(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
     ddl, tc = apply_type_mappings(ddl, source_type)
     codes.extend(tc)
     ddl = fix_view_alias_syntax(ddl)
+    ddl = lowercase_sql_identifiers(ddl)
     ddl = ddl.strip().rstrip(";").rstrip()
     return ddl + ";", codes
 
@@ -300,6 +328,7 @@ BEGIN
     {body.strip()}
 END;
 $$;"""
+    result = lowercase_sql_identifiers(result)
     return result, codes
 
 
@@ -372,6 +401,7 @@ CREATE OR REPLACE FUNCTION {func_name}(
 ) RETURNS SETOF record LANGUAGE sql AS $$
     {return_body};
 $$;"""
+        result = lowercase_sql_identifiers(result)
         return result, codes
 
     fragment = ddl[end:] if m_start and end > 0 else ddl
@@ -430,6 +460,7 @@ BEGIN
     {body.strip()}
 END;
 $$;"""
+    result = lowercase_sql_identifiers(result)
     return result, codes
 
 
@@ -499,6 +530,7 @@ CREATE TRIGGER {trig_name.split('.')[-1]}
 {timing} {events} ON {table_name}
 FOR EACH ROW
 EXECUTE FUNCTION {fn_name}();"""
+    result = lowercase_sql_identifiers(result)
     return result, codes
 
 
