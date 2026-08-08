@@ -185,12 +185,16 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
     codes.extend(tc)
     ddl = downcase_identifiers(ddl)
 
-    m_name = re.search(r"CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+([^\s(]+)", ddl, re.IGNORECASE)
+    m_name = re.search(
+        r'CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(?:"([^"]+)"|([^\s(]+))',
+        ddl, re.IGNORECASE,
+    )
     if not m_name:
         return f"-- T-SQL procedure (manual conversion required)\n{ddl}", codes
-    proc_name = m_name.group(1).strip('"').lower()
+    raw_name = (m_name.group(1) or m_name.group(2)).strip('"').lower()
+    proc_name = f'"{raw_name}"' if ' ' in raw_name else raw_name
 
-    m_paren = re.search(r"PROCEDURE\s+[^\s(]+\s*\(", ddl, re.IGNORECASE)
+    m_paren = re.search(r'PROCEDURE\s+(?:"[^"]+"|[^\s(]+)\s*\(', ddl, re.IGNORECASE)
     if m_paren:
         start = m_paren.end()
         depth, end = 1, start
@@ -788,13 +792,17 @@ def convert_oracle_procedure(ddl: str) -> tuple[str, list[str]]:
     codes.extend(fc)
     _oracle_check_complex(ddl, codes)
 
-    name_m = re.search(r'CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(\S+)', ddl, re.IGNORECASE)
+    name_m = re.search(
+        r'CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(?:"([^"]+)"|(\S+))',
+        ddl, re.IGNORECASE,
+    )
     if not name_m:
         return f"-- Oracle procedure (manual conversion required)\n{ddl}", codes
-    proc_name = re.sub(r'["\'\(]', '', name_m.group(1)).lower()
+        _raw_oracle_name = re.sub(r"""["'(]""", '', (name_m.group(1) or name_m.group(2))).lower()
+    proc_name = f'"{_raw_oracle_name}"' if ' ' in _raw_oracle_name else _raw_oracle_name
 
     # Extract parameters (balanced parens)
-    paren_m = re.search(r'PROCEDURE\s+\S+\s*\(', ddl, re.IGNORECASE)
+    paren_m = re.search(r'PROCEDURE\s+(?:"[^"]+"|[^\s(]+)\s*\(', ddl, re.IGNORECASE)
     if paren_m:
         params_raw, after_paren_pos = _extract_balanced_parens(ddl, paren_m.end())
         post_params = ddl[after_paren_pos:]

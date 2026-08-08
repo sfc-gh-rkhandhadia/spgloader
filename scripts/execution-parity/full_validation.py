@@ -195,7 +195,7 @@ def get_spg_params(schema, name):
         """, (schema, name))
         rows = cur.fetchall(); conn.close()
         return [{'name': (r['parameter_name'] or '').lstrip('_').lower(), 'type': r['data_type'] or ''}
-                for r in rows if (r['parameter_mode'] or 'IN') == 'IN']
+                for r in rows if (r['parameter_mode'] or 'IN') in ('IN', 'INOUT')]
     except Exception as e:
         return 'ERR:%s' % str(e)[:80]
 
