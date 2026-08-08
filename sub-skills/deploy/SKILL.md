@@ -53,6 +53,7 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/parallel_deploy.py \
   --password-env "$SOURCE_PASSWORD_ENV" \
   --spg-service "$TARGET_SPG_SERVICE" \
   --workers 8 \
+  --work-dir "$SPGLOADER_WORK_DIR" \
   --output "$SPGLOADER_WORK_DIR/deployment/deployment_summary.json"
 ```
 

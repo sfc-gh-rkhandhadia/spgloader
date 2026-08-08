@@ -281,6 +281,9 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
                     if fixed:
                         sql = fixed
                         continue  # retry with prefixed SQL
+                    # No auto-fix available — fall through to attempt 1 (final)
+                    continue  # let attempt 1 run with the original SQL to collect final error
+                # attempt == 1: final failure — record once and stop
                 results["failed"].append({
                     "view": name, "file": info["file"], "error": err
                 })

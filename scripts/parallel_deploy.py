@@ -112,6 +112,29 @@ def _run_parallel(phase: str, tasks: list[dict], workers: int) -> list[dict]:
 # Main deploy orchestrator
 # ---------------------------------------------------------------------------
 
+def _install_extensions(spg_service: str, ext_sql_path: Path) -> None:
+    """Run pre_deploy_extensions.sql against SPG if the file exists and is non-empty."""
+    if not ext_sql_path.exists():
+        return
+    sql_text = ext_sql_path.read_text().strip()
+    if not sql_text:
+        return
+    stmts = [s.strip() for s in sql_text.split(";") if s.strip() and not s.strip().startswith("--")]
+    if not stmts:
+        return
+    print(f"\nInstalling extension prerequisites ({len(stmts)} statement(s)) ...")
+    conn = psycopg2.connect(f"service={spg_service}")
+    with conn:
+        with conn.cursor() as cur:
+            for stmt in stmts:
+                try:
+                    cur.execute(stmt)
+                    print(f"  OK  {stmt[:60]}")
+                except Exception as e:
+                    print(f"  WARN  {stmt[:60]}: {e}")
+    conn.close()
+
+
 def deploy(
     source_type: str,
     source_host: str,
@@ -122,6 +145,7 @@ def deploy(
     spg_service: str,
     workers: int = 8,
     output_path: str | None = None,
+    work_dir: str | None = None,
 ) -> dict:
     """
     Run all 5 deployment phases.  Returns a summary dict.
@@ -157,6 +181,16 @@ def deploy(
     # ------------------------------------------------------------------
     print("Generating PostgreSQL DDL ...")
     ddl = generate_ddl(schema_model, source_type)
+
+    # ------------------------------------------------------------------
+    # Pre-deploy: install extension prerequisites (ltree, postgis, etc.)
+    # Auto-detected from assessment/pre_deploy_extensions.sql when
+    # --work-dir is provided or derivable from --output path.
+    # ------------------------------------------------------------------
+    _wd = work_dir or (str(Path(output_path).parent.parent) if output_path else None)
+    if _wd:
+        _ext_path = Path(_wd) / "assessment" / "pre_deploy_extensions.sql"
+        _install_extensions(spg_service, _ext_path)
 
     # ------------------------------------------------------------------
     # Phase 1: Schemas (sequential)
@@ -350,6 +384,9 @@ def main() -> None:
                         help="Parallel workers for tables/indexes/FKs (default: 8)")
     parser.add_argument("--output", default=None,
                         help="Path to write deployment_summary.json")
+    parser.add_argument("--work-dir", default=None,
+                        help="spgloader workspace directory (used to auto-install "
+                             "assessment/pre_deploy_extensions.sql before table creation)")
     args = parser.parse_args()
 
     password = os.environ.get(args.password_env)
@@ -371,6 +408,7 @@ def main() -> None:
         spg_service=args.spg_service,
         workers=args.workers,
         output_path=args.output,
+        work_dir=args.work_dir,
     )
 
     sys.exit(0 if summary["total_fail"] == 0 else 1)
