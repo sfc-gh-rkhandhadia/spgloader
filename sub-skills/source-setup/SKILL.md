@@ -138,6 +138,23 @@ The script automatically preserves `SET QUOTED_IDENTIFIER ON` and other session
 SET statements from the preamble so that DDL files using `"double-quoted"` table
 identifiers (common in Northwind, AdventureWorks, etc.) load correctly.
 
+**If CSV data files are in the same directory**, add `--csv-dir` to also load data:
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/load_source_ddl.py \
+  --source-type  "$SOURCE_TYPE" \
+  --ddl-file     "/path/to/schema.sql" \
+  --database     "migration_db" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --work-dir     "$SPGLOADER_WORK_DIR" \
+  --csv-dir      "/path/to/csv_data_files"
+```
+
+The `--csv-dir` option:
+- Copies all `.csv` files into the Docker container at `/tmp/csvdata/`
+- Maps filenames to tables (e.g. `Address.csv` → `[Person].[Address]`)
+- Runs BULK INSERT with KEEPIDENTITY, tab-delimited, constraints disabled
+- Re-enables constraints after all tables are loaded
+
 **SSMS "Scripts and Tables" export directory** (one `.sql` file per object, common
 UTF-16 LE encoding — use `--ddl-dir` and the script handles everything automatically):
 ```bash

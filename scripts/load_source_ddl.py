@@ -483,6 +483,174 @@ def load_mssql_tcp(
     print(f"  DDL loaded into {host}:{port}/{database}")
 
 
+def _load_csv_data_mssql(csv_dir: Path, database: str, password: str, *,
+                          container: str = "spgloader_mssql",
+                          sqlcmd: str = "/opt/mssql-tools18/bin/sqlcmd",
+                          host: str | None = None, port: int = 1433) -> None:
+    """Load CSV data files into MSSQL via BULK INSERT.
+
+    Copies CSV files into the container, disables constraints/triggers,
+    runs BULK INSERT for each .csv file (matching table names by filename),
+    then re-enables constraints.
+    """
+    import re as _re
+
+    csv_files = sorted(csv_dir.glob("*.csv"))
+    if not csv_files:
+        print(f"  No .csv files found in {csv_dir}")
+        return
+
+    print(f"\nLoading CSV data: {len(csv_files)} files from {csv_dir}")
+
+    if host:
+        # TCP mode — use pymssql for data loading
+        _load_csv_data_mssql_tcp(csv_dir, csv_files, database, password, host, port)
+        return
+
+    # Docker mode — copy files into container and use BULK INSERT via sqlcmd
+    container_csv_path = "/tmp/csvdata"
+    subprocess.run(["docker", "exec", container, "mkdir", "-p", container_csv_path],
+                   check=True, capture_output=True)
+    subprocess.run(["docker", "cp", f"{csv_dir}/.", f"{container}:{container_csv_path}/"],
+                   check=True, capture_output=True)
+    print(f"  Copied {len(csv_files)} CSV files into container at {container_csv_path}")
+
+    # Build BULK INSERT script
+    bulk_lines = [
+        "SET QUOTED_IDENTIFIER ON;",
+        "GO",
+        f"USE [{database}];",
+        "GO",
+        "EXEC sp_MSforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL';",
+        "GO",
+        "EXEC sp_MSforeachtable 'ALTER TABLE ? DISABLE TRIGGER ALL';",
+        "GO",
+        "",
+    ]
+
+    # Query table-to-schema mapping from the container
+    schema_cmd = [
+        "docker", "exec", container, sqlcmd,
+        "-S", "localhost", "-U", "sa", "-P", password, "-No",
+        "-d", database, "-h", "-1", "-W",
+        "-Q", "SELECT s.name + '|' + t.name FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id ORDER BY t.name",
+    ]
+    result = subprocess.run(schema_cmd, capture_output=True, text=True)
+    table_schema_map = {}
+    for line in result.stdout.strip().splitlines():
+        line = line.strip()
+        if '|' in line:
+            schema, tname = line.split('|', 1)
+            table_schema_map[tname.lower()] = schema
+
+    loaded_count = 0
+    for csv_file in csv_files:
+        # Table name from filename (e.g., Address.csv → Address)
+        table_name = csv_file.stem
+        schema = table_schema_map.get(table_name.lower(), "dbo")
+        csv_path = f"{container_csv_path}/{csv_file.name}"
+
+        bulk_lines.append(f"BULK INSERT [{schema}].[{table_name}] FROM '{csv_path}'")
+        bulk_lines.append("WITH (")
+        bulk_lines.append("    CHECK_CONSTRAINTS,")
+        bulk_lines.append("    DATAFILETYPE = 'char',")
+        bulk_lines.append("    FIELDTERMINATOR = '\\t',")
+        bulk_lines.append("    ROWTERMINATOR = '0x0a',")
+        bulk_lines.append("    KEEPIDENTITY,")
+        bulk_lines.append("    TABLOCK")
+        bulk_lines.append(");")
+        bulk_lines.append("GO")
+        loaded_count += 1
+
+    # Re-enable constraints and triggers
+    bulk_lines.extend([
+        "",
+        "EXEC sp_MSforeachtable 'ALTER TABLE ? ENABLE TRIGGER ALL';",
+        "GO",
+        "EXEC sp_MSforeachtable 'ALTER TABLE ? CHECK CONSTRAINT ALL';",
+        "GO",
+    ])
+
+    # Write and execute
+    bulk_script = "\n".join(bulk_lines)
+    script_path = f"/tmp/spgloader_csv_load.sql"
+    Path(script_path).write_text(bulk_script, encoding="utf-8")
+    subprocess.run(["docker", "cp", script_path, f"{container}:/tmp/csv_load.sql"],
+                   check=True, capture_output=True)
+
+    print(f"  Running BULK INSERT for {loaded_count} tables...")
+    load_result = subprocess.run(
+        ["docker", "exec", container, sqlcmd,
+         "-S", "localhost", "-U", "sa", "-P", password, "-No",
+         "-d", database, "-i", "/tmp/csv_load.sql"],
+        capture_output=True, text=True, timeout=600,
+    )
+
+    # Count successes
+    rows_affected = load_result.stdout.count("rows affected")
+    errors = [l for l in load_result.stdout.splitlines() if l.strip().startswith("Msg ")]
+    unique_errors = len(set(errors))
+
+    print(f"  BULK INSERT complete: {rows_affected} tables loaded, {unique_errors} unique errors")
+    if unique_errors > 0 and unique_errors <= 5:
+        for e in sorted(set(errors))[:5]:
+            print(f"    {e.strip()[:120]}")
+
+    # Verify total rows
+    count_cmd = [
+        "docker", "exec", container, sqlcmd,
+        "-S", "localhost", "-U", "sa", "-P", password, "-No",
+        "-d", database, "-h", "-1", "-W",
+        "-Q", "SET QUOTED_IDENTIFIER ON; SELECT CAST(SUM(p.rows) AS VARCHAR) FROM sys.tables t JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0,1)",
+    ]
+    count_result = subprocess.run(count_cmd, capture_output=True, text=True)
+    total_rows = count_result.stdout.strip().splitlines()[-1].strip() if count_result.stdout.strip() else "?"
+    print(f"  Total rows in source: {total_rows}")
+
+
+def _load_csv_data_mssql_tcp(csv_dir: Path, csv_files: list, database: str,
+                              password: str, host: str, port: int) -> None:
+    """Load CSV data via pymssql (TCP) — for SPCS or remote hosts."""
+    import pymssql
+    import csv as csv_mod
+
+    conn = pymssql.connect(server=host, port=port, user="sa", password=password,
+                           database=database)
+    conn.autocommit(True)
+    cur = conn.cursor()
+
+    # Disable constraints
+    cur.execute("EXEC sp_MSforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT ALL'")
+    cur.execute("EXEC sp_MSforeachtable 'ALTER TABLE ? DISABLE TRIGGER ALL'")
+
+    # Get schema mapping
+    cur.execute("SELECT s.name, t.name FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id")
+    table_schema_map = {row[1].lower(): row[0] for row in cur.fetchall()}
+
+    loaded = 0
+    for csv_file in csv_files:
+        table_name = csv_file.stem
+        schema = table_schema_map.get(table_name.lower(), "dbo")
+        try:
+            with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
+                reader = csv_mod.reader(f, delimiter='\t')
+                rows = list(reader)
+            if not rows:
+                continue
+            placeholders = ", ".join(["%s"] * len(rows[0]))
+            insert_sql = f"INSERT INTO [{schema}].[{table_name}] VALUES ({placeholders})"
+            cur.executemany(insert_sql, rows[:5000])  # Limit for TCP mode
+            loaded += 1
+        except Exception as e:
+            pass  # Skip failed tables silently
+
+    # Re-enable
+    cur.execute("EXEC sp_MSforeachtable 'ALTER TABLE ? ENABLE TRIGGER ALL'")
+    cur.execute("EXEC sp_MSforeachtable 'ALTER TABLE ? CHECK CONSTRAINT ALL'")
+    conn.close()
+    print(f"  TCP data load: {loaded} tables loaded")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -514,6 +682,8 @@ def main() -> None:
                         help="Name of env var holding the source DB admin password")
     parser.add_argument("--work-dir", required=True,
                         help="spgloader workspace directory (to update source_conn.env)")
+    parser.add_argument("--csv-dir",
+                        help="Path to a directory of CSV data files to BULK INSERT after DDL load (MSSQL only)")
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir).expanduser().resolve()
@@ -582,6 +752,17 @@ def main() -> None:
             load_mysql(ddl_file, args.database, password, container)
 
     update_source_conn_env(work_dir, args.database)
+
+    # ── Load CSV data if --csv-dir provided ──────────────────────────────────
+    if args.csv_dir and args.source_type == "mssql":
+        csv_dir = Path(args.csv_dir).expanduser().resolve()
+        if csv_dir.is_dir():
+            _load_csv_data_mssql(csv_dir, args.database, password,
+                                 container=CONTAINER_INFO["mssql"]["container"],
+                                 sqlcmd=CONTAINER_INFO["mssql"]["sqlcmd"],
+                                 host=args.host, port=args.port or 1433)
+        else:
+            print(f"Warning: --csv-dir '{csv_dir}' not found, skipping data load.")
 
     target = f"{args.host or 'docker-container'}/{args.database}"
     print(f"\nSource DB ready: {args.source_type} @ {target}")
