@@ -673,6 +673,7 @@ def repair_procedures(
     }
     all_fixed = fixed_rules + repair_report["fixed_llm"]
     _update_deploy_report(report_path, all_fixed)
+    _sync_migration_state(work_dir, report_path)
     _write_report(work_dir, repair_report)
 
     # Update object manifest with repair results
@@ -689,6 +690,35 @@ def repair_procedures(
         pass  # manifest is optional — don't break repair flow
 
     return repair_report
+
+
+def _sync_migration_state(work_dir: Path, report_path: Path) -> None:
+    """Sync migration_state.json procedures section from the authoritative deploy report."""
+    state_path = work_dir / ".spgloader" / "migration_state.json"
+    if not state_path.exists() or not report_path.exists():
+        return
+    try:
+        state = json.loads(state_path.read_text())
+        report = json.loads(report_path.read_text())
+        # Only sync the section that matches this report file (procedures or functions)
+        if "procedures_deploy_report" in report_path.name:
+            key = "procedures"
+        elif "functions_deploy_report" in report_path.name:
+            key = "functions"
+        else:
+            return
+        if key not in state:
+            return
+        state[key]["succeeded"] = report.get("succeeded", [])
+        state[key]["failed"] = [
+            {"fqn": f.get("procedure", f.get("function", "")), "error": f.get("error", "")}
+            if isinstance(f, dict) else {"fqn": str(f), "error": ""}
+            for f in report.get("failed", [])
+        ]
+        state_path.write_text(json.dumps(state, indent=2))
+        print(f"  migration_state.json synced: {key} {len(state[key]['succeeded'])} OK / {len(state[key]['failed'])} failed")
+    except Exception as exc:
+        print(f"  [warn] migration_state.json sync failed: {exc}")
 
 
 def _update_deploy_report(report_path: Path, all_fixed: list[str]) -> None:
