@@ -215,7 +215,7 @@ def validate_proc(schema, name):
         issues.append('PARAM_COUNT: MSSQL=%d SPG=%d' % (len(ms_p), len(spg_p)))
         verdict = 'FAIL'
     else:
-        all_ms  = [p['name'] for p in ms_p]
+        all_ms  = [p['name'].lower() for p in ms_p]
         all_spg = [strip_p(p['name']) for p in spg_p]
         if set(all_ms) == set(all_spg) and all_ms != all_spg:
             mis = ['pos%d: MSSQL=%s SPG=%s' % (i+1, a, b) for i,(a,b) in enumerate(zip(all_ms, all_spg)) if a != b]
