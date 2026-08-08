@@ -50,9 +50,9 @@ MSSQL_TYPE_MAP: dict[str, Any] = {
     "time":             "time",
     "rowversion":       "bytea",
     "timestamp":        "bytea",     # MSSQL TIMESTAMP = rowversion, not a date type
-    "hierarchyid":      "text",
-    "geography":        "bytea",
-    "geometry":         "bytea",
+    "hierarchyid":      "ltree",
+    "geography":        "geography",
+    "geometry":         "geometry",
     "sql_variant":      "text",
     "sysname":          "text",
 }
@@ -90,14 +90,14 @@ MYSQL_TYPE_MAP: dict[str, Any] = {
     "json":          "jsonb",
     "enum":          "text",
     "set":           "text",
-    "geometry":      "bytea",
-    "point":         "bytea",
-    "linestring":    "bytea",
-    "polygon":       "bytea",
-    "multipoint":    "bytea",
-    "multilinestring": "bytea",
-    "multipolygon":  "bytea",
-    "geometrycollection": "bytea",
+    "geometry":      "geometry",
+    "point":         "geometry(Point)",
+    "linestring":    "geometry(LineString)",
+    "polygon":       "geometry(Polygon)",
+    "multipoint":    "geometry(MultiPoint)",
+    "multilinestring": "geometry(MultiLineString)",
+    "multipolygon":  "geometry(MultiPolygon)",
+    "geometrycollection": "geometry(GeometryCollection)",
 }
 
 # MariaDB shares MySQL type mapping
@@ -130,7 +130,7 @@ ORACLE_TYPE_MAP: dict[str, Any] = {
     "INTERVAL YEAR TO MONTH":               "interval",
     "INTERVAL DAY TO SECOND":               "interval",
     "XMLTYPE":           "text",
-    "SDO_GEOMETRY":      "bytea",
+    "SDO_GEOMETRY":      "geometry",
     "ROWID":             "text",
     "UROWID":            "text",
     "BOOLEAN":           "boolean",    # Oracle 23c
@@ -508,6 +508,8 @@ _UNCONVERTIBLE_EXPR_PATTERNS: list[re.Pattern] = [
     # PG requires || for string concat; + only works for numeric types.
     re.compile(r"[)\w]\s*\+\s*'"),   # word/paren + 'string'
     re.compile(r"'\s*\+\s*[(\w]"),   # 'string' + word/paren
+    # hierarchyid method calls: col.GetLevel(), col.ToString(), etc.
+    re.compile(r'\w+\.\s*(?:GetLevel|ToString|GetAncestor|GetDescendant|GetReparentedValue|IsDescendantOf)\s*\(', re.IGNORECASE),
 ]
 
 

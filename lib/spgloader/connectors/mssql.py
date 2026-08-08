@@ -208,6 +208,10 @@ def _mssql_tables(cur) -> list[dict]:
             tab.name                    AS table_name,
             c.name                      AS col_name,
             tp.name                     AS type_name,
+            CASE WHEN tp.is_user_defined = 1
+                 THEN (SELECT base.name FROM sys.types base WHERE base.user_type_id = tp.system_type_id)
+                 ELSE tp.name
+            END                         AS base_type_name,
             c.max_length,
             c.precision,
             c.scale,
@@ -235,7 +239,7 @@ def _mssql_tables(cur) -> list[dict]:
 
     # Group by (schema, table)
     tables: dict[tuple, dict] = {}
-    for (schema, table, col, type_name, max_len, prec, scale,
+    for (schema, table, col, type_name, base_type_name, max_len, prec, scale,
          is_nullable, is_identity, is_computed, seed, increment,
          default_expr, computed_expr) in rows:
         key = (schema, table)
@@ -248,7 +252,7 @@ def _mssql_tables(cur) -> list[dict]:
             }
         tables[key]["columns"].append({
             "name":          col,
-            "type_name":     type_name,
+            "type_name":     base_type_name if base_type_name else type_name,
             "max_length":    max_len,
             "precision":     prec,
             "scale":         scale,

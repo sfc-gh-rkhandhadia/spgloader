@@ -163,6 +163,7 @@ class SPGCompatibilityAssessment:
 
             # --- WARN checks ---
             self._check_spatial_types(ddl, fqn, obj_type, result, prereqs_added)
+            self._check_hierarchyid_types(ddl, fqn, obj_type, result, prereqs_added)
             self._check_oracle_packages(ddl, fqn, obj_type, source_type, result, prereqs_added)
             self._check_scheduled_jobs(ddl, fqn, obj_type, result, prereqs_added)
             self._check_foreign_data_wrappers(ddl, fqn, obj_type, result)
@@ -344,6 +345,31 @@ class SPGCompatibilityAssessment:
                     extension_prereq="postgis",
                 ))
                 prereqs_added.add("postgis")
+
+    def _check_hierarchyid_types(self, ddl, fqn, obj_type, result, prereqs_added):
+        if re.search(r'\bhierarchyid\b', ddl, re.IGNORECASE):
+            result.warn_findings.append(Finding(
+                code="SPG-WARN-010",
+                severity=EWISeverity.WARN,
+                title="hierarchyid type detected — mapped to LTREE",
+                object_fqn=fqn, object_type=obj_type,
+                detail="hierarchyid columns are mapped to LTREE. The ltree extension must be enabled. "
+                       "Computed columns using .GetLevel()/.ToString() will be emitted as plain nullable columns.",
+                auto_resolution="CREATE EXTENSION IF NOT EXISTS ltree;",
+                extension_prereq="ltree",
+            ))
+            if "ltree" not in prereqs_added:
+                result.extension_prereqs.append("ltree")
+                result.resolve_findings.append(Finding(
+                    code="SPG-RESOLVE-003",
+                    severity=EWISeverity.RESOLVE,
+                    title="Extension prerequisite: ltree",
+                    object_fqn="(pre-deploy)", object_type="schema",
+                    detail="hierarchyid types detected. Add ltree to pre-deploy script.",
+                    auto_resolution="CREATE EXTENSION IF NOT EXISTS ltree;",
+                    extension_prereq="ltree",
+                ))
+                prereqs_added.add("ltree")
 
     def _check_oracle_packages(self, ddl, fqn, obj_type, source_type, result, prereqs_added):
         if source_type == "oracle" and re.search(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\b", ddl, re.IGNORECASE):
