@@ -303,6 +303,27 @@ Phase 6.6: Parity Testing        ← pending / in_progress / completed
 | SPG CREATE | Billable resource | 2 |
 | Deploy DDL to SPG | Destructive on target | 5 |
 
+## Active connection prerequisites
+
+Both the source DB and SPG must be reachable to run Phase 6 catalog verification.
+
+| Phase | Source DB required | SPG required | Notes |
+|-------|--------------------|--------------|-------|
+| 1     | Yes (Docker/SPCS/existing) | No | Load schema into container |
+| 2     | No | Yes | Provision SPG |
+| 3–5   | Yes | Yes | Catalog extraction + deploy |
+| **6+** | **Yes** | **Yes** | **Catalog verification — live queries required** |
+
+**Text-based fallback (`CONTAINER_PLATFORM=none`) cannot satisfy Phase 6.**
+If the source was provided as a DDL file without a container, the catalog verification
+step will fail because there is no live source DB to query. The user must either:
+- Re-run Phase 1 with Docker or SPCS to load the DDL into a running container, or
+- Accept that the Catalog Verification tab in the report will show the "not available" banner.
+
+The migration can still complete without catalog verification — Phases 1–5 and the
+JSON-based validation_report.json continue to work. Catalog verification is the hybrid
+ground-truth layer on top, not a blocker.
+
 ## EWI-WARN-NO-CATALOG (text-based fallback)
 
 When `CONTAINER_PLATFORM = none`, the schema is extracted from DDL text using regex

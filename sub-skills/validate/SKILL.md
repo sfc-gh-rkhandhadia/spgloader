@@ -10,6 +10,36 @@ parent_skill: spgloader
 
 From `spgloader/SKILL.md` Phase 6. Deployment artifacts are in `$SPGLOADER_WORK_DIR`.
 
+## Prerequisites: active connections required
+
+Phase 6 requires both connections to be reachable. Check before starting:
+
+```bash
+source "$SPGLOADER_WORK_DIR/source_conn.env"
+source "$SPGLOADER_WORK_DIR/target_conn.env"
+
+# Verify source DB is active
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/extract_ddl.py \
+  --source-type "$SOURCE_TYPE" \
+  --host "$SOURCE_HOST" --port "$SOURCE_PORT" \
+  --database "$SOURCE_DATABASE" --user "$SOURCE_USER" \
+  --password-env "$SOURCE_PASSWORD_ENV" \
+  --test-connection \
+  || { echo "ERROR: Source DB not reachable — required for catalog verification"; exit 1; }
+
+# Verify SPG is active
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_to_spg.py \
+  --test-connection --spg-service "$TARGET_SPG_SERVICE" \
+  || { echo "ERROR: SPG not reachable. Resume with: ALTER POSTGRES INSTANCE $TARGET_SPG_SERVICE RESUME"; exit 1; }
+```
+
+If either connection fails, surface the error and stop. Do not proceed to catalog verification without both connections.
+
+**Note on DDL-file source path:** If the source was provided as a DDL file, it must have been
+loaded into a Docker or SPCS container in Phase 1. The text-based fallback
+(`CONTAINER_PLATFORM=none`) does not satisfy this prerequisite — there is no live source DB
+to query for catalog verification.
+
 ## Workflow
 
 ### Step 1: Load connection details
@@ -18,6 +48,33 @@ From `spgloader/SKILL.md` Phase 6. Deployment artifacts are in `$SPGLOADER_WORK_
 source "$SPGLOADER_WORK_DIR/source_conn.env"
 source "$SPGLOADER_WORK_DIR/target_conn.env"
 ```
+
+### Step 1.5: Catalog verification (hybrid layer)
+
+Run `catalog_verify.py` to produce the live source→SPG structural comparison.
+This is the **ground truth** layer — it reads directly from both catalogs,
+not from JSON deploy reports, so names and column counts are always accurate.
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/catalog_verify.py \
+  --work-dir "$SPGLOADER_WORK_DIR" \
+  --detailed-cols
+```
+
+The script:
+- Tests both connections before running (exits with a clear error if either is down)
+- Reads `ddl_objects.json` for original source names (with original casing)
+- Queries source catalog for column/parameter counts per object
+- Queries `pg_catalog` / `information_schema` on SPG for what's actually deployed
+- Cross-references `_conversion_report.json` for EWI codes and `repair_report.json` for LLM repair flags
+- Joins deploy report error messages onto missing objects so you see WHY they're absent
+- Writes `$SPGLOADER_WORK_DIR/validation/catalog_verification.json`
+
+The output populates the **Catalog Verification** tab in the HTML report, which shows:
+- Source name (original MSSQL casing) → SPG deployed name side-by-side
+- Column count match/mismatch for every table and view
+- Parameter count match for every function and procedure
+- Missing objects with the error that prevented deployment
 
 ### Step 2: SPG table count
 
@@ -169,7 +226,7 @@ SELECT * FROM <schema>.<table> LIMIT 5;
 
 ### Step 6: Generate HTML + PDF migration report
 
-Always generate both:
+Always generate both (includes Catalog Verification tab if Step 1.5 was run):
 
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/generate_report.py \
@@ -190,6 +247,7 @@ PDF report:  <SPGLOADER_WORK_DIR>/migration_report.pdf
 
 - `$SPGLOADER_WORK_DIR/validation/spg_counts.json`
 - `$SPGLOADER_WORK_DIR/validation/validation_report.json`
+- `$SPGLOADER_WORK_DIR/validation/catalog_verification.json` ← **new (hybrid layer)**
 - `$SPGLOADER_WORK_DIR/migration_report.html`
 - `$SPGLOADER_WORK_DIR/migration_report.pdf`
 - Proceed to Phase 6.5 (witness-validate)
@@ -200,6 +258,8 @@ PDF report:  <SPGLOADER_WORK_DIR>/migration_report.pdf
 |---|---|---|
 | `source_conn.env` missing | Phase 1 not completed | Reload source-setup sub-skill |
 | Cannot connect to source DB | Container stopped | Re-run `docker compose up -d` or re-test connectivity |
+| SPG connection refused | SPG suspended | `ALTER POSTGRES INSTANCE $TARGET_SPG_SERVICE RESUME;` |
 | SPG hostname DNS error | VPN DNS lag | Set `PGHOSTADDR` via Google DNS (see Step 2 note) |
+| `catalog_verify.py: $PASSWORD not set` | Source password env var missing | `export $SOURCE_PASSWORD_ENV='...'` |
 | `select count(*)` fails on SPG table | Table not deployed | Check `deployment_{db}.json` failures |
 | `deployment_{db}.json` not found | File naming mismatch | Try both `deployment_{db}.json` and `{db}_deployment.json` |

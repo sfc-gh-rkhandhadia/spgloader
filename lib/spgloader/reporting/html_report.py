@@ -359,6 +359,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
     dep_review     = _load_json(ws / "deprecated" / "deprecated_review.json")
     dep_groups     = dep_review.get("groups", {}) if isinstance(dep_review, dict) else {}
 
+    # -- catalog verification (hybrid layer — optional) --------------------
+    catalog_verif = _load_json(ws / "validation" / "catalog_verification.json")
+
     # -- validation -------------------------------------------------------
     val_report = _load_json(ws / "validation" / "validation_report.json")
     # MySQL multi-db fallback: merge per-db validation_{db}.json files
@@ -592,6 +595,8 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
         "parity_results":     parity_results,
         "parity_structured":  parity_structured,
         "equiv_filter":       equiv_filter,
+        # Catalog verification (hybrid model)
+        "catalog_verif":      catalog_verif,
         # Name mapping
         "name_map":           name_map,
         # Overall status (computed from all phases)
@@ -1334,6 +1339,170 @@ def _build_witness_tab(data: dict) -> str:
   </div>"""
 
 
+# ---------------------------------------------------------------------------
+# Catalog verification tab renderer
+# ---------------------------------------------------------------------------
+
+_STATUS_ICON = {
+    "match":          ("✓", "color:#16a34a;font-weight:600"),
+    "col_mismatch":   ("⚠", "color:#d97706;font-weight:600"),
+    "param_mismatch": ("⚠", "color:#d97706;font-weight:600"),
+    "missing":        ("✗", "color:#dc2626;font-weight:600"),
+}
+
+
+def _render_catalog_tab(catalog: dict) -> str:
+    """Render the Catalog Verification tab content from catalog_verification.json."""
+    if not catalog or not catalog.get("objects"):
+        return """
+  <div class="section">
+    <h2>Catalog Verification</h2>
+    <div style="background:#fef9c3;border-left:4px solid #ca8a04;padding:14px 18px;
+                border-radius:6px;margin-top:16px">
+      <strong style="color:#92400e">Catalog verification not available</strong>
+      <div style="font-size:13px;margin-top:6px;color:#78350f">
+        Run <code>catalog_verify.py</code> with active source DB and SPG connections
+        to populate this tab with live structural comparison data.
+        <br><br>
+        <code>uv run python scripts/catalog_verify.py --work-dir &lt;WORK_DIR&gt;</code>
+      </div>
+    </div>
+  </div>"""
+
+    summary  = catalog.get("summary", {})
+    objects  = catalog.get("objects", [])
+    source   = catalog.get("source", "")
+    target   = catalog.get("target", "")
+    gen_at   = catalog.get("generated_at", "")[:16].replace("T", " ")
+
+    # Summary bar
+    def _summary_row(label: str, obj_type: str) -> str:
+        total   = summary.get(f"{obj_type}s_total", 0)
+        if total == 0:
+            return ""
+        missing = summary.get(f"{obj_type}s_missing", 0)
+        mismatch= summary.get(f"{obj_type}s_col_mismatch",
+                  summary.get(f"{obj_type}s_param_mismatch", 0))
+        matched = total - missing - mismatch
+        ok_html = f'<span style="color:#16a34a">{matched}</span>'
+        mm_html = f' &nbsp;⚠ <span style="color:#d97706">{mismatch} mismatch</span>' if mismatch else ""
+        ms_html = f' &nbsp;✗ <span style="color:#dc2626">{missing} missing</span>'  if missing  else ""
+        return f"<tr><td>{label}</td><td>{total}</td><td>{ok_html}{mm_html}{ms_html}</td></tr>"
+
+    summary_rows = "".join([
+        _summary_row("Tables",     "table"),
+        _summary_row("Views",      "view"),
+        _summary_row("Functions",  "function"),
+        _summary_row("Procedures", "procedure"),
+        _summary_row("Triggers",   "trigger"),
+    ])
+
+    # Detail rows
+    detail_rows_html = []
+    for obj in objects:
+        src_fqn = obj.get("source_fqn", "")
+        tgt_fqn = obj.get("target_fqn") or "—"
+        # Show target only when it differs meaningfully (not just a case-fold)
+        tgt_display = ("—" if tgt_fqn.lower() == src_fqn.lower()
+                       else tgt_fqn) if tgt_fqn != "—" else "—"
+        obj_type = obj.get("type", "")
+        status   = obj.get("status", "")
+        icon, icon_style = _STATUS_ICON.get(status, ("?", ""))
+
+        # Structural column
+        if obj_type in ("table", "view"):
+            src_cnt = obj.get("source_col_count", "")
+            tgt_cnt = obj.get("target_col_count", "")
+            if status == "missing":
+                struct_html = f'<span style="color:var(--muted)">{src_cnt} cols (not deployed)</span>'
+            elif status == "col_mismatch":
+                diff = obj.get("col_diff", {})
+                only_src = diff.get("only_in_source", [])
+                only_tgt = diff.get("only_in_target", [])
+                details = []
+                if only_src:
+                    details.append(f"only in source: {', '.join(only_src[:5])}{'…' if len(only_src)>5 else ''}")
+                if only_tgt:
+                    details.append(f"only in SPG: {', '.join(only_tgt[:5])}{'…' if len(only_tgt)>5 else ''}")
+                struct_html = (f'<span style="color:#d97706">{src_cnt}→{tgt_cnt} cols</span>'
+                               + (f'<br><span style="font-size:11px;color:var(--muted)">'
+                                  + "; ".join(details) + "</span>" if details else ""))
+            else:
+                struct_html = f"{src_cnt} cols"
+        elif obj_type in ("function", "procedure"):
+            src_cnt = obj.get("source_param_count", "")
+            tgt_cnt = obj.get("target_param_count", "")
+            if status == "missing":
+                struct_html = f'<span style="color:var(--muted)">{src_cnt} params (not deployed)</span>'
+            elif status == "param_mismatch":
+                struct_html = f'<span style="color:#d97706">{src_cnt}→{tgt_cnt} params</span>'
+            else:
+                struct_html = f"{src_cnt} params" if src_cnt != "" else ""
+        else:
+            struct_html = ""
+
+        # LLM repair badge
+        repair_badge = ('<span style="font-size:10px;background:#dbeafe;color:#1d4ed8;'
+                        'padding:1px 5px;border-radius:3px;margin-left:4px">LLM</span>'
+                        if obj.get("llm_repaired") else "")
+        # Error tooltip
+        error = obj.get("error", "")
+        err_html = (f'<span title="{error[:200]}" style="cursor:help;color:#dc2626;font-size:11px">'
+                    f'⚠ {error[:60]}{"…" if len(error)>60 else ""}</span>'
+                    if error else "")
+
+        detail_rows_html.append(
+            f"<tr>"
+            f"<td style='font-size:12px'>{src_fqn}</td>"
+            f"<td style='font-size:12px;color:var(--muted)'>{tgt_display}</td>"
+            f"<td style='font-size:12px'>{obj_type}</td>"
+            f"<td style='{icon_style}'>{icon}</td>"
+            f"<td style='font-size:12px'>{struct_html}{err_html}</td>"
+            f"<td>{repair_badge}</td>"
+            f"</tr>"
+        )
+
+    detail_rows = "\n".join(detail_rows_html)
+
+    return f"""
+  <div class="section">
+    <h2>Catalog Verification
+      <span style="font-size:12px;font-weight:400;color:var(--muted);margin-left:8px">
+        Generated {gen_at} &nbsp;|&nbsp; {source} &nbsp;→&nbsp; {target}
+      </span>
+    </h2>
+    <p class="small" style="color:var(--muted);margin-bottom:14px">
+      Live catalog comparison between source DB and SPG.
+      Source→target name mapping shows how MSSQL identifiers were renamed for PostgreSQL.
+      Column/parameter counts are read directly from <code>pg_catalog</code> and the source
+      system catalog — not from deploy log files.
+    </p>
+
+    <!-- Summary -->
+    <div class="table-wrap" style="margin-bottom:20px">
+      <table>
+        <thead><tr><th>Object type</th><th>Total</th><th>Status</th></tr></thead>
+        <tbody>{summary_rows}</tbody>
+      </table>
+    </div>
+
+    <!-- Detail -->
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Source name (original casing)</th>
+          <th>SPG name</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Structural diff</th>
+          <th>Repair</th>
+        </tr></thead>
+        <tbody>{detail_rows}</tbody>
+      </table>
+    </div>
+  </div>"""
+
+
 def render_html(data: dict) -> str:
     source       = data["source_type"]
     source_db    = data["source_db"]
@@ -1669,6 +1838,8 @@ def render_html(data: dict) -> str:
     data-tip="Step 2 of 4 (detail) — Converted Objects: the complete list of every view, function, stored procedure, and trigger with its migration status — Deployed, Fixed by LLM, Deploy Failed, or Skipped.">Converted Objects</button>
   <button class="tab-btn" onclick="showTab('validation')"
     data-tip="Step 3 of 4 — Schema Verification: are all tables, indexes, and foreign keys in SPG? Compares source vs SPG object counts after deployment to confirm everything landed correctly.">Schema Verification</button>
+  <button class="tab-btn" onclick="showTab('catalog')"
+    data-tip="Catalog Verification — live source + SPG catalog comparison: confirms every deployed object exists in SPG and checks column/parameter counts match. Requires active source DB and SPG connections.">Catalog Verification</button>
   <button class="tab-btn" onclick="showTab('witness')"
     data-tip="Step 3 of 4 — Functional Smoke Test: do views and procedures return data? Calls every deployed view, function, and procedure on the source database to confirm they execute and return rows.">Functional Smoke Test</button>
   <button class="tab-btn" onclick="showTab('equivalence')"
@@ -1987,6 +2158,11 @@ def render_html(data: dict) -> str:
 
 </div><!-- /objects -->
 
+
+<!-- ═══════════════════════════ CATALOG VERIFICATION ════════════════ -->
+<div class="tab-panel" id="tab-catalog">
+{_render_catalog_tab(data.get('catalog_verif', {}))}
+</div><!-- /catalog -->
 
 <!-- ═══════════════════════════ VALIDATION ══════════════════════════ -->
 <div class="tab-panel" id="tab-validation">
