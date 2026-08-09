@@ -296,6 +296,7 @@ def deploy(
     }
 
     if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_text(json.dumps(summary, indent=2))
         print(f"\nDeployment summary: {output_path}")
 

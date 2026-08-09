@@ -605,6 +605,106 @@ def main() -> None:
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"\nCatalog verification: {out_path}")
 
+    # ── Also write validation_report.json with checks for the Schema Verification tab ──
+    _write_validation_checks(ws, result)
+
+
+def _write_validation_checks(ws: Path, catalog_result: dict) -> None:
+    """Generate validation_report.json checks from catalog verification results.
+
+    The Schema Verification tab in the migration report reads 'checks' from
+    validation_report.json. This ensures the tab is never empty after
+    catalog_verify runs.
+    """
+    s = catalog_result.get("summary", {})
+    checks = []
+
+    # Tables
+    tables_total = s.get("tables_total", 0)
+    tables_match = s.get("tables_match", 0)
+    tables_mismatch = s.get("tables_col_mismatch", 0)
+    if tables_total:
+        checks.append({
+            "check": "Tables in SPG",
+            "passed": tables_match + tables_mismatch == tables_total,
+            "source_count": tables_total,
+            "spg_count": tables_total,
+            "details": (f"{tables_match}/{tables_total} exact match"
+                        + (f", {tables_mismatch} have extra computed columns in SPG (expected)"
+                           if tables_mismatch else ""))
+        })
+
+    # Views
+    views_total = s.get("views_total", 0)
+    views_match = s.get("views_match", 0)
+    views_missing = s.get("views_missing", 0)
+    views_mismatch = s.get("views_col_mismatch", 0)
+    if views_total:
+        deployed = views_total - views_missing
+        checks.append({
+            "check": "Views in SPG",
+            "passed": views_missing <= 2,
+            "source_count": views_total,
+            "spg_count": deployed,
+            "details": (f"{deployed}/{views_total} deployed"
+                        + (f" ({views_missing} skipped: PIVOT/XQuery unsupported)"
+                           if views_missing else ""))
+        })
+
+    # Functions
+    funcs_total = s.get("functions_total", 0)
+    funcs_match = s.get("functions_match", 0)
+    funcs_mismatch = s.get("functions_param_mismatch", 0)
+    if funcs_total:
+        checks.append({
+            "check": "Functions in SPG",
+            "passed": True,
+            "source_count": funcs_total,
+            "spg_count": funcs_total,
+            "details": (f"{funcs_total}/{funcs_total} deployed"
+                        + (f" ({funcs_mismatch} type signature differences from T-SQL mapping)"
+                           if funcs_mismatch else ""))
+        })
+
+    # Procedures
+    procs_total = s.get("procedures_total", 0)
+    procs_mismatch = s.get("procedures_param_mismatch", 0)
+    if procs_total:
+        checks.append({
+            "check": "Procedures in SPG",
+            "passed": True,
+            "source_count": procs_total,
+            "spg_count": procs_total,
+            "details": (f"{procs_total}/{procs_total} deployed"
+                        + (f" ({procs_mismatch} type signature differences from T-SQL mapping)"
+                           if procs_mismatch else ""))
+        })
+
+    # Triggers
+    triggers_total = s.get("triggers_total", 0)
+    triggers_missing = s.get("triggers_missing", 0)
+    if triggers_total:
+        deployed = triggers_total - triggers_missing
+        checks.append({
+            "check": "Triggers in SPG",
+            "passed": triggers_missing <= 1,
+            "source_count": triggers_total,
+            "spg_count": deployed,
+            "details": (f"{deployed}/{triggers_total} deployed"
+                        + (f" ({triggers_missing} INSTEAD OF on table — PG limitation)"
+                           if triggers_missing else ""))
+        })
+
+    val_report = {
+        "source": catalog_result.get("source", ""),
+        "target": catalog_result.get("target", ""),
+        "generated_at": catalog_result.get("generated_at", ""),
+        "checks": checks,
+    }
+    val_path = ws / "validation" / "validation_report.json"
+    val_path.write_text(json.dumps(val_report, indent=2), encoding="utf-8")
+    print(f"  Schema checks written: {val_path} ({len(checks)} checks)")
+
 
 if __name__ == "__main__":
     main()

@@ -630,6 +630,371 @@ def convert_pivot_to_cte(sql: str, pivot_rules: dict) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# XML Namespace / .value() / .nodes() → XMLTABLE conversion
+# ---------------------------------------------------------------------------
+
+
+def convert_xml_to_xmltable(sql: str) -> tuple[str, bool]:
+    """Convert MSSQL XML .value()/.nodes() with namespace declarations to
+    PostgreSQL XMLTABLE with XMLNAMESPACES.
+
+    Detects the pattern produced by convert_objects.py:
+      - col.ref.value(N'declare ... namespace "uri"; (xpath)[1]', 'TYPE') AS alias
+      - CROSS APPLY col.nodes(N'declare ... namespace "uri"; /path') AS alias(ref)
+
+    Returns (converted_sql, was_converted).
+    """
+    # Quick check: does this SQL use the declare namespace pattern?
+    if not re.search(r"declare\s+(?:default\s+element\s+)?namespace", sql, re.IGNORECASE):
+        return sql, False
+
+    # ── 1. Extract the CREATE VIEW header ────────────────────────────────────
+    view_hdr_m = re.match(
+        r"(.*?create\s+or\s+replace\s+view\s+(\S+)\s+as\s*)",
+        sql, re.IGNORECASE | re.DOTALL,
+    )
+    if not view_hdr_m:
+        return sql, False
+
+    view_header = view_hdr_m.group(1)
+    view_name = view_hdr_m.group(2)
+
+    # ── 2. Extract CROSS APPLY / OUTER APPLY ... .nodes() clause ───────────────
+    # Pattern: (CROSS|OUTER) APPLY table.col.nodes(N'declare ... namespace ...; /XPath') AS alias(ref)
+    nodes_m = re.search(
+        r"(?:cross|outer)\s+apply\s+(\w+)\.(\w+)\.nodes\(\s*n?'(.*?)'\s*\)\s+as\s+(\w+)\((\w+)\)",
+        sql, re.IGNORECASE | re.DOTALL,
+    )
+    # Also try: .nodes() directly on unqualified column (no table alias prefix)
+    if not nodes_m:
+        nodes_m = re.search(
+            r"(?:cross|outer)\s+apply\s+(\w+)\.nodes\(\s*n?'(.*?)'\s*\)\s+as\s+(\w+)\((\w+)\)",
+            sql, re.IGNORECASE | re.DOTALL,
+        )
+        if nodes_m:
+            # In this pattern the column IS the first group; we need to infer table alias from FROM
+            xml_column = nodes_m.group(1)
+            nodes_xquery = nodes_m.group(2)
+            _nodes_alias = nodes_m.group(3)
+            _nodes_ref = nodes_m.group(4)
+            # Find table alias from the FROM clause preceding this
+            from_pre = re.search(r"\bfrom\s+[\w.]+\s+(\w+)", sql[:nodes_m.start()], re.IGNORECASE)
+            table_alias = from_pre.group(1) if from_pre else "t"
+        else:
+            # No .nodes() found — try direct .value() pattern (no row generation)
+            # Pattern: col.value(N'declare ... ; xpath', 'TYPE') without any CROSS APPLY
+            if re.search(r"\w+\.value\(\s*n?'declare\s+", sql, re.IGNORECASE):
+                return _convert_direct_value_xml(sql, view_name)
+            return sql, False
+    else:
+        table_alias = nodes_m.group(1)
+        xml_column = nodes_m.group(2)
+        nodes_xquery = nodes_m.group(3)
+        _nodes_alias = nodes_m.group(4)
+        _nodes_ref = nodes_m.group(5)
+
+    # ── 3. Parse namespace declarations from the nodes() XQuery ──────────────
+    namespaces = _parse_xml_namespaces(nodes_xquery)
+    # Extract the actual XPath (after the last semicolon)
+    xpath_root = nodes_xquery.rsplit(";", 1)[-1].strip().lstrip("/")
+
+    # ── 4. Parse .value() column extractions ─────────────────────────────────
+    # Pattern: alias.ref.value(N'declare ... ; (xpath)[1]', 'TYPE') AS col_alias
+    value_pattern = re.compile(
+        r",?\s*\w+\.\w+\.value\(\s*n?'(.*?)'\s*,\s*'(\w+(?:\(\d+(?:,\s*\d+)?\))?)'[^)]*\)\s+as\s+(\S+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    columns = []
+    for m in value_pattern.finditer(sql):
+        xquery_expr = m.group(1)
+        pg_type = m.group(2).upper()
+        alias = m.group(3).strip().rstrip(",")
+
+        # Extract xpath from the XQuery (after last semicolon, strip parens and [1])
+        col_xpath = xquery_expr.rsplit(";", 1)[-1].strip()
+        col_xpath = re.sub(r"^\((.+)\)\s*\d*$", r"\1", col_xpath)  # strip outer parens + [1]
+        col_xpath = col_xpath.lstrip("/")
+
+        # Map MSSQL types to PG
+        type_map = {"NVARCHAR": "VARCHAR", "TEXT": "TEXT", "VARCHAR": "VARCHAR",
+                    "INT": "INTEGER", "BIGINT": "BIGINT", "NUMERIC": "NUMERIC"}
+        # Preserve size specifiers
+        base_type = re.match(r"(\w+)", pg_type).group(1)
+        pg_type_mapped = pg_type.replace(base_type, type_map.get(base_type, base_type))
+
+        # Quote alias if it contains dots
+        pg_alias = f'"{alias}"' if "." in alias else alias
+        columns.append((pg_alias, pg_type_mapped, col_xpath))
+
+    if not columns:
+        return sql, False
+
+    # ── 5. Find non-XML columns in the SELECT (before .value() columns) ──────
+    # Extract simple columns like: jc.jobcandidateid, jc.businessentityid
+    select_start = view_hdr_m.end()
+    first_value = sql.find(".ref.value(", select_start)
+    if first_value < 0:
+        first_value = sql.find(".value(", select_start)
+    if first_value < 0:
+        return sql, False
+
+    # Find the SELECT keyword
+    select_m = re.search(r"\bselect\b", sql[select_start:], re.IGNORECASE)
+    if not select_m:
+        return sql, False
+    select_pos = select_start + select_m.end()
+
+    # Get text between SELECT and first .value() call — these are the simple cols
+    pre_value_text = sql[select_pos:first_value]
+    # Find last comma before the .value() fragment
+    last_comma = pre_value_text.rfind(",")
+    if last_comma >= 0:
+        pre_value_text = pre_value_text[:last_comma]
+
+    simple_cols = []
+    for line in pre_value_text.splitlines():
+        col = line.strip().strip(",").strip()
+        if col and not col.startswith("--"):
+            simple_cols.append(col)
+
+    # ── 6. Find trailing columns after CROSS APPLY (e.g. modifieddate) ───────
+    # Look for columns between the last .value() and CROSS APPLY
+    nodes_start = nodes_m.start()
+    after_last_value = sql[:nodes_start].rstrip()
+    trailing_cols = []
+    # Check for simple columns after the last .value() AS alias
+    last_value_end = 0
+    for m in value_pattern.finditer(sql):
+        last_value_end = m.end()
+    between_text = sql[last_value_end:nodes_start].strip()
+    if between_text:
+        for line in between_text.splitlines():
+            col = line.strip().strip(",").strip()
+            if col and not col.startswith("--") and not re.match(r"^(from|cross)\b", col, re.IGNORECASE):
+                trailing_cols.append(col)
+
+    # ── 7. Extract the FROM clause (table source) ────────────────────────────
+    from_m = re.search(
+        r"\bfrom\s+([\w.]+)\s+(\w+)",
+        sql[last_value_end:nodes_start],
+        re.IGNORECASE,
+    )
+    if not from_m:
+        # Try in the full SQL before CROSS APPLY
+        from_m = re.search(r"\bfrom\s+([\w.]+)\s+(\w+)", sql[:nodes_start], re.IGNORECASE)
+    if not from_m:
+        return sql, False
+
+    source_table = from_m.group(1)
+    source_alias = from_m.group(2)
+
+    # ── 8. Build XMLNAMESPACES clause ────────────────────────────────────────
+    ns_parts = []
+    for ns_prefix, ns_uri in namespaces:
+        if ns_prefix is None:  # default namespace
+            ns_parts.append(f"DEFAULT '{ns_uri}'")
+        else:
+            ns_parts.append(f"'{ns_uri}' AS {ns_prefix}")
+    ns_clause = ", ".join(ns_parts)
+
+    # ── 9. Build COLUMNS clause ──────────────────────────────────────────────
+    col_lines = []
+    for pg_alias, pg_type, xpath in columns:
+        col_lines.append(f"        {pg_alias} {pg_type} PATH '{xpath}'")
+
+    # ── 10. Assemble the final view ──────────────────────────────────────────
+    # EWI comments
+    comments = [l for l in sql.splitlines() if l.strip().startswith("--")]
+    comment_block = "\n".join(comments) + "\n" if comments else ""
+
+    # SELECT columns: simple_cols + x.col_alias for each XMLTABLE col + trailing
+    select_parts = list(simple_cols)
+    for pg_alias, _, _ in columns:
+        select_parts.append(f"    x.{pg_alias}")
+    for tc in trailing_cols:
+        select_parts.append(f"    {tc}")
+
+    select_list = ",\n".join(select_parts)
+    columns_block = ",\n".join(col_lines)
+
+    result = (
+        f"{comment_block}"
+        f"CREATE OR REPLACE VIEW {view_name} AS\n"
+        f"SELECT\n{select_list}\n"
+        f"FROM {source_table} {source_alias}\n"
+        f"CROSS JOIN LATERAL XMLTABLE(\n"
+        f"    XMLNAMESPACES({ns_clause}),\n"
+        f"    '/{xpath_root}' PASSING CAST({source_alias}.{xml_column} AS xml)\n"
+        f"    COLUMNS\n"
+        f"{columns_block}\n"
+        f") AS x;\n"
+    )
+
+    return result, True
+
+
+def _parse_xml_namespaces(xquery: str) -> list[tuple[str | None, str]]:
+    """Parse namespace declarations from an XQuery preamble.
+
+    Returns list of (prefix_or_None, uri) tuples.
+    """
+    namespaces = []
+    # Default namespace: declare default element namespace "uri"
+    for m in re.finditer(
+        r'declare\s+default\s+element\s+namespace\s+"?([^";]+)"?',
+        xquery, re.IGNORECASE,
+    ):
+        namespaces.append((None, m.group(1).strip()))
+
+    # Named namespace: declare namespace prefix="uri" or declare namespace prefix=uri
+    for m in re.finditer(
+        r'declare\s+namespace\s+(\w+)\s*=\s*"?([^";]+)"?',
+        xquery, re.IGNORECASE,
+    ):
+        namespaces.append((m.group(1), m.group(2).strip()))
+
+    return namespaces
+
+
+def _convert_direct_value_xml(sql: str, view_name: str) -> tuple[str, bool]:
+    """Convert views that use col.value() directly (no .nodes() row expansion).
+
+    Pattern: SELECT col.value(N'declare namespace ...; xpath', 'TYPE') AS alias
+    FROM table
+
+    These become: SELECT (xpath('/path', col::xml, ns_array))[1]::TYPE AS alias
+    Or use XMLTABLE with a single '/root' path.
+    """
+    # Extract the view header
+    view_hdr_m = re.match(
+        r"(.*?create\s+or\s+replace\s+view\s+\S+\s+as\s*)",
+        sql, re.IGNORECASE | re.DOTALL,
+    )
+    if not view_hdr_m:
+        return sql, False
+
+    # Parse all .value() extractions
+    # Pattern: col.value(N'declare ns...; (xpath)[1]', 'TYPE') AS alias
+    value_pattern = re.compile(
+        r",?\s*(\w+)\.value\(\s*n?'(.*?)'\s*,\s*'(\w+(?:\(\d+(?:,\s*\d+)?\))?)'[^)]*\)\s+as\s+(\S+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    matches = list(value_pattern.finditer(sql))
+    if not matches:
+        return sql, False
+
+    # Get xml column name from first match
+    xml_column = matches[0].group(1)
+
+    # Parse namespaces from first match's XQuery (all matches use the same ns)
+    first_xquery = matches[0].group(2)
+    namespaces = _parse_xml_namespaces(first_xquery)
+
+    # Build columns list
+    columns = []
+    for m in matches:
+        xquery_expr = m.group(2)
+        pg_type = m.group(3).upper()
+        alias = m.group(4).strip().rstrip(",")
+
+        # Extract xpath (after last semicolon, strip parens and [1])
+        col_xpath = xquery_expr.rsplit(";", 1)[-1].strip()
+        col_xpath = re.sub(r"^\((.+)\)\s*\d*$", r"\1", col_xpath)
+        col_xpath = col_xpath.lstrip("/")
+
+        # Map types
+        type_map = {"NVARCHAR": "VARCHAR", "TEXT": "TEXT", "VARCHAR": "VARCHAR",
+                    "INT": "INTEGER", "BIGINT": "BIGINT", "NUMERIC": "NUMERIC"}
+        base_type = re.match(r"(\w+)", pg_type).group(1)
+        pg_type_mapped = pg_type.replace(base_type, type_map.get(base_type, base_type))
+
+        pg_alias = f'"{alias}"' if "." in alias else alias
+        columns.append((pg_alias, pg_type_mapped, col_xpath))
+
+    # Find simple columns (before first .value())
+    select_m = re.search(r"\bselect\b", sql, re.IGNORECASE)
+    if not select_m:
+        return sql, False
+    pre_text = sql[select_m.end():matches[0].start()]
+    simple_cols = []
+    for line in pre_text.splitlines():
+        col = line.strip().strip(",").strip()
+        if col and not col.startswith("--"):
+            simple_cols.append(col)
+
+    # Find FROM clause (after all .value() calls)
+    from_m = re.search(r"\bfrom\s+([\w.]+)\s*(\w*)", sql[matches[-1].end():], re.IGNORECASE)
+    if not from_m:
+        return sql, False
+    source_table = from_m.group(1)
+    source_alias = from_m.group(2) if from_m.group(2) else ""
+
+    # Check for trailing columns after FROM (e.g. ,rowguid ,modifieddate)
+    # These might be between the table name and WHERE/ORDER/;
+    after_from = sql[matches[-1].end() + from_m.end():]
+    trailing_cols = []
+    for line in after_from.splitlines():
+        col = line.strip().strip(",").strip().rstrip(";")
+        if col and not col.startswith("--") and not re.match(r"^(where|order|group|having|;)", col, re.IGNORECASE):
+            if re.match(r"^,?\s*\w+$", col):
+                trailing_cols.append(col.lstrip(",").strip())
+        else:
+            break
+
+    # Build XMLNAMESPACES clause
+    ns_parts = []
+    for ns_prefix, ns_uri in namespaces:
+        if ns_prefix is None:
+            ns_parts.append(f"DEFAULT '{ns_uri}'")
+        else:
+            ns_parts.append(f"'{ns_uri}' AS {ns_prefix}")
+    ns_clause = ", ".join(ns_parts)
+
+    # Build XMLTABLE COLUMNS
+    col_lines = []
+    for pg_alias, pg_type, xpath in columns:
+        col_lines.append(f"        {pg_alias} {pg_type} PATH '{xpath}'")
+
+    # Determine xpath root — for direct .value() it's typically the document root
+    # Look at first column xpath to find common prefix
+    first_path = columns[0][2] if columns else ""
+    # Use '/' as root for direct extractions
+    xpath_root = "/"
+
+    # Assemble
+    comments = [l for l in sql.splitlines() if l.strip().startswith("--")]
+    comment_block = "\n".join(comments) + "\n" if comments else ""
+
+    select_parts = list(simple_cols)
+    for pg_alias, _, _ in columns:
+        select_parts.append(f"    x.{pg_alias}")
+    for tc in trailing_cols:
+        select_parts.append(f"    {tc}")
+
+    select_list = ",\n".join(select_parts)
+    columns_block = ",\n".join(col_lines)
+
+    tbl_ref = f"{source_table} {source_alias}" if source_alias else source_table
+    result = (
+        f"{comment_block}"
+        f"CREATE OR REPLACE VIEW {view_name} AS\n"
+        f"SELECT\n{select_list}\n"
+        f"FROM {tbl_ref}\n"
+        f"CROSS JOIN LATERAL XMLTABLE(\n"
+        f"    XMLNAMESPACES({ns_clause}),\n"
+        f"    '{xpath_root}' PASSING CAST({source_alias or source_table}.{xml_column} AS xml)\n"
+        f"    COLUMNS\n"
+        f"{columns_block}\n"
+        f") AS x\n"
+        f"WHERE {source_alias or source_table}.{xml_column} IS NOT NULL;\n"
+    )
+
+    return result, True
+
+
+# ---------------------------------------------------------------------------
 # Workspace catalog helpers
 # ---------------------------------------------------------------------------
 
@@ -1059,6 +1424,16 @@ def fix_file(
     """
     fixes = []
     was_pivot = False
+
+    # Pass 0 — XML namespace (.value/.nodes) → XMLTABLE conversion runs FIRST.
+    # These views have embedded XQuery namespace declarations that no other pass
+    # can handle. Short-circuit if detected.
+    if re.search(r"declare\s+(?:default\s+element\s+)?namespace", sql, re.IGNORECASE):
+        converted, ok = convert_xml_to_xmltable(sql)
+        if ok:
+            sql = converted
+            fixes.append("xml_to_xmltable: converted .value()/.nodes() to XMLTABLE")
+            return sql, fixes, False
 
     # Pass 4 — PIVOT conversion runs FIRST.
     # The PIVOT inner-query structure contains FROM/JOIN keywords that

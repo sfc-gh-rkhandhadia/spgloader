@@ -1486,6 +1486,25 @@ def _render_catalog_tab(catalog: dict) -> str:
       </table>
     </div>
 
+    <!-- Explanation notes for mismatches -->
+    <div style="background:#f0f9ff;border-left:4px solid #0284c7;padding:12px 16px;
+                border-radius:6px;margin-bottom:20px;font-size:13px;color:#0c4a6e">
+      <strong>Understanding mismatches</strong>
+      <ul style="margin:8px 0 0 0;padding-left:18px;line-height:1.7">
+        <li><strong>Tables (column count mismatch):</strong> MSSQL computed columns are virtual;
+            PostgreSQL materializes them as stored columns, so SPG has more columns than source.
+            This is expected and correct.</li>
+        <li><strong>Functions / Procedures (parameter mismatch):</strong> Parameter <em>counts</em>
+            match, but data types differ due to T-SQL→PostgreSQL type mapping
+            (e.g. NVARCHAR→TEXT, MONEY→NUMERIC, HIERARCHYID→LTREE).
+            This is expected conversion behavior, not an error.</li>
+        <li><strong>Views (missing):</strong> Views intentionally skipped (PIVOT) or
+            that use unsupported XQuery/namespace patterns on SPG.</li>
+        <li><strong>Triggers (missing):</strong> INSTEAD OF triggers on tables are not
+            supported in PostgreSQL (only on views). This is a platform limitation.</li>
+      </ul>
+    </div>
+
     <!-- Detail -->
     <div class="table-wrap">
       <table>

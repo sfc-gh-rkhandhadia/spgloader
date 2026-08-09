@@ -596,9 +596,18 @@ def repair_procedures(
             fixed_rules.append(item["procedure"])
             print(f"  FIXED-RULES  {item['procedure']}")
         else:
-            updated_item = {**item, "error": err}
-            still_failed_after_rules.append(updated_item)
-            print(f"  STILL-FAIL   {item['procedure']}: {err[:80]}")
+            # Detect platform limitations that should not go to LLM repair
+            if "cannot have INSTEAD OF triggers" in err or "Tables cannot have INSTEAD OF" in err:
+                err = (f'Platform limitation: INSTEAD OF trigger on table — '
+                       f'PostgreSQL only supports INSTEAD OF triggers on views. '
+                       f'Original: {err[:150]}')
+                updated_item = {**item, "error": err, "resolution": "platform_limitation"}
+                still_failed_after_rules.append(updated_item)
+                print(f"  PLATFORM-LIM {item['procedure']}: INSTEAD OF trigger on table (skipping LLM)")
+            else:
+                updated_item = {**item, "error": err}
+                still_failed_after_rules.append(updated_item)
+                print(f"  STILL-FAIL   {item['procedure']}: {err[:80]}")
 
     print(f"\nPhase 1 result: {len(fixed_rules)} fixed by rules, "
           f"{len(still_failed_after_rules)} still failing")
@@ -652,7 +661,7 @@ def repair_procedures(
         work_dir=work_dir,
         spg_conn=spg_conn,
         sf_conn=sf_conn,
-        failed_items=still_failed_after_rules,
+        failed_items=[i for i in still_failed_after_rules if i.get("resolution") != "platform_limitation"],
         original_tsql=original_tsql,
         prompt_template=prompt_template,
         config={**config, "_spg_service": spg_service},
@@ -693,30 +702,51 @@ def repair_procedures(
 
 
 def _sync_migration_state(work_dir: Path, report_path: Path) -> None:
-    """Sync migration_state.json procedures section from the authoritative deploy report."""
+    """Sync migration_state.json procedures/functions/views section from the authoritative deploy report."""
     state_path = work_dir / ".spgloader" / "migration_state.json"
     if not state_path.exists() or not report_path.exists():
         return
     try:
         state = json.loads(state_path.read_text())
         report = json.loads(report_path.read_text())
-        # Only sync the section that matches this report file (procedures or functions)
+        # Determine which section to sync based on the report filename
         if "procedures_deploy_report" in report_path.name:
             key = "procedures"
         elif "functions_deploy_report" in report_path.name:
             key = "functions"
+        elif "deploy_report" in report_path.name or "views_repair" in report_path.name:
+            key = "views"
         else:
+            # Fallback: try to detect from wave_dir context or report content
+            key = None
+        if not key:
             return
-        if key not in state:
-            return
-        state[key]["succeeded"] = report.get("succeeded", [])
-        state[key]["failed"] = [
-            {"fqn": f.get("procedure", f.get("function", "")), "error": f.get("error", "")}
-            if isinstance(f, dict) else {"fqn": str(f), "error": ""}
-            for f in report.get("failed", [])
-        ]
+        # For views, always update migration_state from the authoritative deploy report
+        if key == "views":
+            # Read the canonical deploy_report.json for views (not the temp repair report)
+            canonical = work_dir / "conversion" / "deploy_report.json"
+            if canonical.exists():
+                report = json.loads(canonical.read_text())
+            state[key] = {
+                "succeeded": report.get("succeeded", []),
+                "failed": [
+                    {"fqn": f.get("view", f.get("procedure", f.get("name", ""))) if isinstance(f, dict) else str(f),
+                     "error": f.get("error", "") if isinstance(f, dict) else ""}
+                    for f in report.get("failed", [])
+                ],
+                "skipped": report.get("skipped", []),
+            }
+        else:
+            if key not in state:
+                return
+            state[key]["succeeded"] = report.get("succeeded", [])
+            state[key]["failed"] = [
+                {"fqn": f.get("procedure", f.get("function", "")), "error": f.get("error", "")}
+                if isinstance(f, dict) else {"fqn": str(f), "error": ""}
+                for f in report.get("failed", [])
+            ]
         state_path.write_text(json.dumps(state, indent=2))
-        print(f"  migration_state.json synced: {key} {len(state[key]['succeeded'])} OK / {len(state[key]['failed'])} failed")
+        print(f"  migration_state.json synced: {key} {len(state.get(key, {}).get('succeeded', []))} OK / {len(state.get(key, {}).get('failed', []))} failed")
     except Exception as exc:
         print(f"  [warn] migration_state.json sync failed: {exc}")
 

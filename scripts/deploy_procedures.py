@@ -476,8 +476,17 @@ def deploy_procedures(
                         conn.rollback()
                         err = str(e2).replace("\n", " ").strip()
 
+            # Detect platform limitations that cannot be resolved by conversion
+            resolution = None
+            if "cannot have INSTEAD OF triggers" in err or "Tables cannot have INSTEAD OF" in err:
+                err = (f'Platform limitation: INSTEAD OF trigger on table — '
+                       f'PostgreSQL only supports INSTEAD OF triggers on views, not tables. '
+                       f'Original error: {err[:200]}')
+                resolution = "platform_limitation"
+
             results["failed"].append({
-                "procedure": fqn, "file": p["file"].name, "error": err
+                "procedure": fqn, "file": p["file"].name, "error": err,
+                **({"resolution": resolution} if resolution else {}),
             })
             print(f"  FAIL  {p['name']}: {err[:120]}")
 
