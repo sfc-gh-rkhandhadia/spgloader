@@ -699,33 +699,81 @@ def convert_xml_to_xmltable(sql: str) -> tuple[str, bool]:
     xpath_root = nodes_xquery.rsplit(";", 1)[-1].strip().lstrip("/")
 
     # ── 4. Parse .value() column extractions ─────────────────────────────────
-    # Pattern: alias.ref.value(N'declare ... ; (xpath)[1]', 'TYPE') AS col_alias
+    # Pattern A: bare  alias.ref.value(N'declare ... ; (xpath)[1]', 'TYPE') AS col_alias
     value_pattern = re.compile(
         r",?\s*\w+\.\w+\.value\(\s*n?'(.*?)'\s*,\s*'(\w+(?:\(\d+(?:,\s*\d+)?\))?)'[^)]*\)\s+as\s+(\S+)",
         re.IGNORECASE | re.DOTALL,
     )
+    # Pattern B: cast(replace(alias.ref.value(N'...'; xpath, 'TYPE') ,'Z',''), 101) AS col_alias
+    # This is the intermediate form produced by convert_objects.py when MSSQL uses
+    # CONVERT(datetime, REPLACE(.value(...), 'Z', ''), 101) to strip ISO timezone suffix.
+    # The outer cast/101 is invalid PG syntax — extract the XPath and emit as DATE XMLTABLE column.
+    convert_value_pattern = re.compile(
+        r",?\s*cast\s*\(\s*replace\s*\(\s*\w+\.\w+\.value\s*\(\s*n?'(.*?)'\s*,\s*'[^']+'\s*\)\s*(?:\s*,\s*'[^']*')*\s*\)\s*,\s*\d+\s*\)\s+as\s+(\S+)",
+        re.IGNORECASE | re.DOTALL,
+    )
 
-    columns = []
-    for m in value_pattern.finditer(sql):
-        xquery_expr = m.group(1)
-        pg_type = m.group(2).upper()
-        alias = m.group(3).strip().rstrip(",")
-
-        # Extract xpath from the XQuery (after last semicolon, strip parens and [1])
-        col_xpath = xquery_expr.rsplit(";", 1)[-1].strip()
-        col_xpath = re.sub(r"^\((.+)\)\s*\d*$", r"\1", col_xpath)  # strip outer parens + [1]
-        col_xpath = col_xpath.lstrip("/")
-
-        # Map MSSQL types to PG
+    def _mssql_type_to_pg(pg_type: str) -> str:
         type_map = {"NVARCHAR": "VARCHAR", "TEXT": "TEXT", "VARCHAR": "VARCHAR",
                     "INT": "INTEGER", "BIGINT": "BIGINT", "NUMERIC": "NUMERIC"}
-        # Preserve size specifiers
         base_type = re.match(r"(\w+)", pg_type).group(1)
-        pg_type_mapped = pg_type.replace(base_type, type_map.get(base_type, base_type))
+        return pg_type.replace(base_type, type_map.get(base_type, base_type))
 
-        # Quote alias if it contains dots
+    def _extract_xpath(xquery_expr: str) -> str:
+        col_xpath = xquery_expr.rsplit(";", 1)[-1].strip()
+        col_xpath = re.sub(r"^\((.+)\)\s*\d*$", r"\1", col_xpath)  # strip outer parens + [1]
+        # Also strip a bare trailing digit that came from [1]→1 conversion when there
+        # are no outer parens (e.g. 'DateFirstPurchase1' → 'DateFirstPurchase').
+        # The regex matches any word-based XPath ending in digits with no preceding slash.
+        col_xpath = re.sub(r"^([\w.]+)\d+$", r"\1", col_xpath)
+        return col_xpath.lstrip("/")
+
+    # Collect all matches with their start position so we preserve source column order.
+    #
+    # Problem: value_pattern uses a lazy (.*?) for the XQuery, which can bridge across
+    # the cast(replace(..., 'Z', ''), 101) wrappers that convert_objects.py generates for
+    # MSSQL CONVERT(datetime, REPLACE(.value(...), ...)) columns.  When a cast/replace
+    # column is followed by a bare .value() column, value_pattern starts inside the
+    # cast/replace wrapper and (.*?) stretches all the way to the next .value() expression,
+    # producing one cross-expression "match" and consuming the bare column's position in
+    # the string, so finditer skips the real bare match entirely.
+    #
+    # Fix: mask the cast/replace wrappers in the SQL before running value_pattern, so
+    # value_pattern only sees clean bare .value() calls.  convert_value_pattern is run on
+    # the original SQL.
+    raw_cols: list[tuple[int, str, str, str]] = []  # (start, alias, pg_type, xpath)
+
+    # Step 1: collect convert-wrapped date columns (on original SQL)
+    convert_spans: list[tuple[int, int]] = []
+    for m in convert_value_pattern.finditer(sql):
+        alias = m.group(2).strip().rstrip(",")
+        xquery = m.group(1)
+        xpath = _extract_xpath(xquery)
+        xpath = re.sub(r"\s+AS\s+\w+$", "", xpath, flags=re.IGNORECASE).strip()
+        raw_cols.append((m.start(), alias, "DATE", xpath))
+        convert_spans.append((m.start(), m.end()))
+
+    # Step 2: replace each cast/replace block with whitespace of the same length so that
+    # character positions for all subsequent bare .value() calls remain intact.
+    sql_for_value = sql
+    for span_start, span_end in sorted(convert_spans, reverse=True):
+        placeholder = " " * (span_end - span_start)
+        sql_for_value = sql_for_value[:span_start] + placeholder + sql_for_value[span_end:]
+
+    # Step 3: run value_pattern on the masked SQL — only bare .value() calls remain
+    for m in value_pattern.finditer(sql_for_value):
+        xquery_expr = m.group(1)
+        pg_type = _mssql_type_to_pg(m.group(2).upper())
+        alias = m.group(3).strip().rstrip(",")
+        raw_cols.append((m.start(), alias, pg_type, _extract_xpath(xquery_expr)))
+
+    # Sort by source position so XMLTABLE COLUMNS and SELECT list match source order
+    raw_cols.sort(key=lambda t: t[0])
+
+    columns = []
+    for _pos, alias, pg_type, col_xpath in raw_cols:
         pg_alias = f'"{alias}"' if "." in alias else alias
-        columns.append((pg_alias, pg_type_mapped, col_xpath))
+        columns.append((pg_alias, pg_type, col_xpath))
 
     if not columns:
         return sql, False

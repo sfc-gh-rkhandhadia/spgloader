@@ -617,86 +617,114 @@ def _write_validation_checks(ws: Path, catalog_result: dict) -> None:
     """Generate validation_report.json checks from catalog verification results.
 
     The Schema Verification tab in the migration report reads 'checks' from
-    validation_report.json. This ensures the tab is never empty after
-    catalog_verify runs.
+    validation_report.json. Emits per-schema checks (with _schema tag) so the
+    tab shows one row per schema rather than collapsing everything into the first
+    schema name via the html_report.py fallback.
     """
-    s = catalog_result.get("summary", {})
+    objects = catalog_result.get("objects", [])
+
+    # Group objects by schema (lower-cased for consistency)
+    by_schema: dict = {}
+    for obj in objects:
+        fqn = obj.get("source_fqn", "")
+        parts = fqn.split(".")
+        schema = parts[0].lower() if len(parts) >= 2 else "dbo"
+        by_schema.setdefault(schema, []).append(obj)
+
+    # Also read deployment_summary for global FK / index counts
+    dep_summary_path = ws / "deployment" / "deployment_summary.json"
+    fk_ok = fk_fail = idx_ok = idx_fail = 0
+    if dep_summary_path.exists():
+        dep = json.loads(dep_summary_path.read_text())
+        phases = dep.get("phases", {})
+        fk_ok   = phases.get("foreign_keys", {}).get("ok", 0)
+        fk_fail = phases.get("foreign_keys", {}).get("failed", 0)
+        idx_ok  = phases.get("indexes", {}).get("ok", 0)
+        idx_fail = phases.get("indexes", {}).get("failed", 0)
+
     checks = []
 
-    # Tables
-    tables_total = s.get("tables_total", 0)
-    tables_match = s.get("tables_match", 0)
-    tables_mismatch = s.get("tables_col_mismatch", 0)
-    if tables_total:
-        checks.append({
-            "check": "Tables in SPG",
-            "passed": tables_match + tables_mismatch == tables_total,
-            "source_count": tables_total,
-            "spg_count": tables_total,
-            "details": (f"{tables_match}/{tables_total} exact match"
-                        + (f", {tables_mismatch} have extra computed columns in SPG (expected)"
-                           if tables_mismatch else ""))
-        })
+    for schema_name in sorted(by_schema.keys()):
+        objs = by_schema[schema_name]
+        tables   = [o for o in objs if o.get("type") == "table"]
+        views    = [o for o in objs if o.get("type") == "view"]
+        procs    = [o for o in objs if o.get("type") == "procedure"]
+        fns      = [o for o in objs if o.get("type") == "function"]
+        triggers = [o for o in objs if o.get("type") == "trigger"]
 
-    # Views
-    views_total = s.get("views_total", 0)
-    views_match = s.get("views_match", 0)
-    views_missing = s.get("views_missing", 0)
-    views_mismatch = s.get("views_col_mismatch", 0)
-    if views_total:
-        deployed = views_total - views_missing
-        checks.append({
-            "check": "Views in SPG",
-            "passed": views_missing <= 2,
-            "source_count": views_total,
-            "spg_count": deployed,
-            "details": (f"{deployed}/{views_total} deployed"
-                        + (f" ({views_missing} skipped: PIVOT/XQuery unsupported)"
-                           if views_missing else ""))
-        })
+        ok_statuses = ("match", "col_mismatch")
+        t_ok   = sum(1 for o in tables   if o.get("status") in ok_statuses)
+        t_miss = sum(1 for o in tables   if o.get("status") == "missing")
+        v_ok   = sum(1 for o in views    if o.get("status") in ok_statuses)
+        v_miss = sum(1 for o in views    if o.get("status") == "missing")
+        p_ok   = sum(1 for o in procs    if o.get("status") in ("match", "param_mismatch"))
+        f_ok   = sum(1 for o in fns      if o.get("status") in ("match", "param_mismatch"))
+        tr_ok  = sum(1 for o in triggers if o.get("status") == "match")
+        tr_miss = sum(1 for o in triggers if o.get("status") == "missing")
 
-    # Functions
-    funcs_total = s.get("functions_total", 0)
-    funcs_match = s.get("functions_match", 0)
-    funcs_mismatch = s.get("functions_param_mismatch", 0)
-    if funcs_total:
-        checks.append({
-            "check": "Functions in SPG",
-            "passed": True,
-            "source_count": funcs_total,
-            "spg_count": funcs_total,
-            "details": (f"{funcs_total}/{funcs_total} deployed"
-                        + (f" ({funcs_mismatch} type signature differences from T-SQL mapping)"
-                           if funcs_mismatch else ""))
-        })
+        if tables:
+            checks.append({
+                "check": "table_count",
+                "_schema": schema_name,
+                "passed": t_miss == 0,
+                "source": len(tables),
+                "spg": t_ok,
+                "note": f"{t_ok}/{len(tables)} tables in SPG"
+                        + (f" ({t_miss} missing)" if t_miss else ""),
+            })
 
-    # Procedures
-    procs_total = s.get("procedures_total", 0)
-    procs_mismatch = s.get("procedures_param_mismatch", 0)
-    if procs_total:
-        checks.append({
-            "check": "Procedures in SPG",
-            "passed": True,
-            "source_count": procs_total,
-            "spg_count": procs_total,
-            "details": (f"{procs_total}/{procs_total} deployed"
-                        + (f" ({procs_mismatch} type signature differences from T-SQL mapping)"
-                           if procs_mismatch else ""))
-        })
+        if views:
+            checks.append({
+                "check": "view_count",
+                "_schema": schema_name,
+                "passed": v_miss == 0,
+                "source": len(views),
+                "spg": v_ok,
+                "note": f"{v_ok}/{len(views)} views in SPG"
+                        + (f" ({v_miss} missing)" if v_miss else ""),
+            })
 
-    # Triggers
-    triggers_total = s.get("triggers_total", 0)
-    triggers_missing = s.get("triggers_missing", 0)
-    if triggers_total:
-        deployed = triggers_total - triggers_missing
+        if procs or fns:
+            total = len(procs) + len(fns)
+            ok    = p_ok + f_ok
+            checks.append({
+                "check": "proc_fn_count",
+                "_schema": schema_name,
+                "passed": ok == total,
+                "source": total,
+                "spg": ok,
+                "note": f"{ok}/{total} procedures/functions in SPG",
+            })
+
+        if triggers:
+            checks.append({
+                "check": "trigger_count",
+                "_schema": schema_name,
+                "passed": tr_miss == 0,
+                "source": len(triggers),
+                "spg": tr_ok,
+                "note": f"{tr_ok}/{len(triggers)} triggers in SPG"
+                        + (f" ({tr_miss} missing)" if tr_miss else ""),
+            })
+
+    # Global FK / index checks (cross-schema — tag as 'all schemas')
+    if fk_ok + fk_fail:
         checks.append({
-            "check": "Triggers in SPG",
-            "passed": triggers_missing <= 1,
-            "source_count": triggers_total,
-            "spg_count": deployed,
-            "details": (f"{deployed}/{triggers_total} deployed"
-                        + (f" ({triggers_missing} INSTEAD OF on table — PG limitation)"
-                           if triggers_missing else ""))
+            "check": "foreign_key_count",
+            "_schema": "all schemas",
+            "passed": fk_fail == 0,
+            "source": fk_ok + fk_fail,
+            "spg": fk_ok,
+            "note": f"{fk_ok} FKs deployed" + (f" | {fk_fail} failed" if fk_fail else ""),
+        })
+    if idx_ok + idx_fail:
+        checks.append({
+            "check": "index_count",
+            "_schema": "all schemas",
+            "passed": idx_fail == 0,
+            "source": idx_ok + idx_fail,
+            "spg": idx_ok,
+            "note": f"{idx_ok} indexes deployed" + (f" | {idx_fail} failed" if idx_fail else ""),
         })
 
     val_report = {
@@ -707,7 +735,7 @@ def _write_validation_checks(ws: Path, catalog_result: dict) -> None:
     }
     val_path = ws / "validation" / "validation_report.json"
     val_path.write_text(json.dumps(val_report, indent=2), encoding="utf-8")
-    print(f"  Schema checks written: {val_path} ({len(checks)} checks)")
+    print(f"  Schema checks written: {val_path} ({len(checks)} checks across {len(by_schema)} schemas)")
 
 
 if __name__ == "__main__":
