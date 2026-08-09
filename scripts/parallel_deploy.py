@@ -119,7 +119,13 @@ def _install_extensions(spg_service: str, ext_sql_path: Path) -> None:
     sql_text = ext_sql_path.read_text().strip()
     if not sql_text:
         return
-    stmts = [s.strip() for s in sql_text.split(";") if s.strip() and not s.strip().startswith("--")]
+    # Strip comment lines BEFORE splitting by semicolon.
+    # If we filter after splitting, the first "statement" includes all leading
+    # comments PLUS the first real statement joined together — and the startswith("--")
+    # check drops the whole chunk, silently skipping the first extension (e.g. ltree).
+    clean_lines = [l for l in sql_text.splitlines() if not l.strip().startswith("--")]
+    clean_sql = "\n".join(clean_lines)
+    stmts = [s.strip() for s in clean_sql.split(";") if s.strip()]
     if not stmts:
         return
     print(f"\nInstalling extension prerequisites ({len(stmts)} statement(s)) ...")
