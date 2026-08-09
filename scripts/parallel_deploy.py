@@ -251,7 +251,8 @@ def deploy(
         {
             "spg_service": spg_service,
             "phase": "foreign_keys",
-            "label": fk["name"].lower(),
+            "label": (f"{fk.get('from_schema', '').lower()}.{fk['name'].lower()}"
+                      if fk.get("from_schema") else fk["name"].lower()),
             "sql":   sql,
         }
         for fk, sql in zip(schema_model.get("foreign_keys", []), ddl["foreign_keys"])

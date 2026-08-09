@@ -798,7 +798,7 @@ def convert_oracle_procedure(ddl: str) -> tuple[str, list[str]]:
     )
     if not name_m:
         return f"-- Oracle procedure (manual conversion required)\n{ddl}", codes
-        _raw_oracle_name = re.sub(r"""["'(]""", '', (name_m.group(1) or name_m.group(2))).lower()
+    _raw_oracle_name = re.sub(r"""["'(]""", '', (name_m.group(1) or name_m.group(2))).lower()
     proc_name = f'"{_raw_oracle_name}"' if ' ' in _raw_oracle_name else _raw_oracle_name
 
     # Extract parameters (balanced parens)

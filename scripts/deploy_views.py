@@ -257,14 +257,15 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
     for name in ordered:
         info = views[name]
         sql = info["sql"]
+        # Compute FQN once — used by both succeeded and failed paths so the
+        # schema column is always populated correctly in the HTML report.
+        fqn = name if "." in name else f"{schema}.{name}"
 
         for attempt in range(2):
             try:
                 with conn:
                     with conn.cursor() as cur:
                         cur.execute(sql)
-                # Always store as schema-qualified FQN so html_report shows the schema column correctly
-                fqn = name if "." in name else f"{schema}.{name}"
                 results["succeeded"].append(fqn)
                 if attempt > 0:
                     results["auto_fixed"].append(fqn)
@@ -283,9 +284,10 @@ def deploy_views(work_dir: Path, spg_service: str, dry_run: bool = False) -> dic
                         continue  # retry with prefixed SQL
                     # No auto-fix available — fall through to attempt 1 (final)
                     continue  # let attempt 1 run with the original SQL to collect final error
-                # attempt == 1: final failure — record once and stop
+                # attempt == 1: final failure — record once and stop using fqn so
+                # html_report can show the schema column correctly.
                 results["failed"].append({
-                    "view": name, "file": info["file"], "error": err
+                    "view": fqn, "file": info["file"], "error": err
                 })
                 print(f"  FAIL  {name}: {err}")
 

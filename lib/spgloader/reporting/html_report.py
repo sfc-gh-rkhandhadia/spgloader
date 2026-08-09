@@ -254,7 +254,7 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
 
     # -- functions deployment ---------------------------------------------
     if _mstate_ctx:
-        funcs_ok   = _mstate_ctx.get("funcs_ok", [])
+        funcs_ok   = [_clean_name(n) for n in _mstate_ctx.get("funcs_ok", [])]
         funcs_fail = _mstate_ctx.get("funcs_fail", [])
     else:
         fr = _load_json(ws / "conversion" / "functions_deploy_report.json")
@@ -265,9 +265,9 @@ def load_workspace_data(workspace_dir: str | Path) -> dict:
 
     # -- procedures deployment --------------------------------------------
     if _mstate_ctx:
-        procs_ok       = _mstate_ctx.get("procs_ok", [])
+        procs_ok       = [_clean_name(n) for n in _mstate_ctx.get("procs_ok", [])]
         procs_fail     = _mstate_ctx.get("procs_fail", [])
-        procs_legacy   = _mstate_ctx.get("procs_legacy", [])
+        procs_legacy   = [_clean_name(n) for n in _mstate_ctx.get("procs_legacy", [])]
     else:
         pr           = _load_json(ws / "conversion" / "procedures_deploy_report.json")
         procs_ok     = [_clean_name(n if isinstance(n, str) else n.get("procedure", str(n)))

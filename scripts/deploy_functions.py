@@ -151,8 +151,12 @@ def deploy_functions(work_dir: Path, spg_service: str, dry_run: bool = False) ->
         if schema:
             deploy_sql = f'SET search_path TO "{schema}", public;\n{deploy_sql}'
 
-        # Schema-qualified name for the report entry
-        fqn = f"{schema}.{info['name']}" if schema else info["name"]
+        # Schema-qualified name for the report entry.
+        # info['name'] may already contain the schema prefix (extracted from the
+        # CREATE statement), while schema comes from the filename convention.
+        # Avoid doubling: if name already has a '.', use it as-is.
+        _n = info["name"]
+        fqn = _n if "." in _n else (f"{schema}.{_n}" if schema else _n)
         schema_tag = f" [{schema}]" if schema else ""
 
         try:

@@ -430,7 +430,11 @@ def deploy_procedures(
         else:
             deploy_sql = p["sql"]
 
-        fqn = f"{target_schema}.{p['name']}" if target_schema else p["name"]
+        # p['name'] may already be schema-qualified (extracted from the CREATE
+        # statement body). Only prepend target_schema when there is no '.'
+        # to avoid double-prefixing (e.g. dbo.dbo.proc_name).
+        _n = p["name"]
+        fqn = _n if "." in _n else (f"{target_schema}.{_n}" if target_schema else _n)
         try:
             with conn:
                 with conn.cursor() as cur:
@@ -451,9 +455,12 @@ def deploy_procedures(
                 )
                 if m:
                     trig_name, tbl_name = m.group(1), m.group(2)
-                    # Use the schema-qualified table name for the DROP
+                    # Use the schema-qualified table name for the DROP.
+                    # When target_schema is None, leave unqualified so the
+                    # active search_path resolves it (avoids hardcoding dbo
+                    # which breaks MySQL/Oracle sources).
                     tbl_ref = (f'"{target_schema}".{tbl_name}'
-                               if target_schema else f'dbo.{tbl_name}')
+                               if target_schema else tbl_name)
                     try:
                         with conn:
                             with conn.cursor() as cur:

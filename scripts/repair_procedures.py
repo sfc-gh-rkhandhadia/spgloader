@@ -728,13 +728,18 @@ def _update_deploy_report(report_path: Path, all_fixed: list[str]) -> None:
     report = json.loads(report_path.read_text())
     fixed_bases = {n.split(".")[-1].lower() for n in all_fixed}
     fixed_fqns  = {n.lower() for n in all_fixed}
+    # Map bare name → full FQN from all_fixed so repaired entries always carry the schema prefix.
+    # This prevents Schema "—" in the report when the failed entry was stored without a prefix.
+    fixed_fqn_map: dict[str, str] = {n.split(".")[-1].lower(): n for n in all_fixed}
     still_fail: list = []
     newly_ok:   list[str] = []
     for item in report.get("failed", []):
         raw = item.get("procedure") or item.get("function") or ""
         name = raw if isinstance(raw, str) else str(raw)
-        if name.lower() in fixed_fqns or name.split(".")[-1].lower() in fixed_bases:
-            newly_ok.append(name)
+        base = name.split(".")[-1].lower()
+        if name.lower() in fixed_fqns or base in fixed_bases:
+            # Prefer the fully-qualified name from all_fixed; fall back to the stored name.
+            newly_ok.append(fixed_fqn_map.get(base, name))
         else:
             still_fail.append(item)
     report["succeeded"] = list(report.get("succeeded", [])) + newly_ok
