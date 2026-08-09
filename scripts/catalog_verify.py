@@ -603,13 +603,14 @@ def main() -> None:
     out_path = Path(args.output) if args.output else ws / "validation" / "catalog_verification.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    # Contract assertion
-    assert out_path.exists(), f"BUG: failed to write {out_path}"
-    assert "objects" in result and len(result["objects"]) > 0, "BUG: catalog_verification has no objects"
     print(f"\nCatalog verification: {out_path}")
 
     # ── Also write validation_report.json with checks for the Schema Verification tab ──
     _write_validation_checks(ws, result)
+
+    # ── Contract validation — raises on violation ──
+    from spgloader.workspace_validator import validate_after_catalog_verify
+    validate_after_catalog_verify(ws)
 
 
 def _write_validation_checks(ws: Path, catalog_result: dict) -> None:
@@ -706,9 +707,6 @@ def _write_validation_checks(ws: Path, catalog_result: dict) -> None:
     }
     val_path = ws / "validation" / "validation_report.json"
     val_path.write_text(json.dumps(val_report, indent=2), encoding="utf-8")
-    # Contract assertion
-    assert val_path.exists(), f"BUG: failed to write {val_path}"
-    assert len(checks) > 0, "BUG: validation_report.json has 0 checks — Schema Verification tab will be empty"
     print(f"  Schema checks written: {val_path} ({len(checks)} checks)")
 
 

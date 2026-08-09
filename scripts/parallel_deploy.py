@@ -298,10 +298,9 @@ def deploy(
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_text(json.dumps(summary, indent=2))
-        # Contract assertion: verify output matches expected schema
-        written = json.loads(Path(output_path).read_text())
-        assert "phases" in written, f"BUG: deployment_summary missing 'phases' key after write"
-        assert "tables" in written["phases"], f"BUG: deployment_summary missing phases.tables"
+        # Contract validation — runs automatically, raises on violation
+        from spgloader.workspace_validator import validate_after_deploy
+        validate_after_deploy(Path(output_path).parent.parent)
         print(f"\nDeployment summary: {output_path}")
 
     print(f"\n{'='*60}")

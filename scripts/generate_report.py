@@ -79,8 +79,9 @@ def main() -> None:
     if not ws.is_dir():
         sys.exit(f"Error: workspace directory not found: {ws}")
 
-    # ── Pre-report workspace validation ──────────────────────────────────────
-    warnings = _validate_workspace(ws)
+    # ── Pre-report workspace validation (automatic) ────────────────────────
+    from spgloader.workspace_validator import validate_before_report
+    warnings = validate_before_report(ws)
     if warnings:
         print("Workspace validation warnings:", file=sys.stderr)
         for w in warnings:
@@ -97,59 +98,6 @@ def main() -> None:
         else:
             print("PDF export failed (no output file)", file=sys.stderr)
 
-
-def _validate_workspace(ws: Path) -> list[str]:
-    """Check workspace artifacts before generating report. Returns warnings."""
-    import json as _json
-    warnings = []
-
-    # deployment_summary.json
-    ds = ws / "deployment" / "deployment_summary.json"
-    if ds.exists():
-        try:
-            d = _json.loads(ds.read_text())
-            if "phases" not in d:
-                warnings.append(f"{ds.name}: missing 'phases' key — deployment tab will show 0/0")
-            elif "tables" not in d["phases"]:
-                warnings.append(f"{ds.name}: phases.tables missing")
-        except Exception as e:
-            warnings.append(f"{ds.name}: parse error — {e}")
-    else:
-        warnings.append("deployment/deployment_summary.json not found — deployment tab will be empty")
-
-    # migration_state.json
-    ms = ws / ".spgloader" / "migration_state.json"
-    if ms.exists():
-        try:
-            d = _json.loads(ms.read_text())
-            if "views" in d and not d["views"].get("succeeded"):
-                warnings.append(f"migration_state.json: views.succeeded is empty — report may show 0 views deployed")
-        except Exception as e:
-            warnings.append(f"migration_state.json: parse error — {e}")
-
-    # validation_report.json
-    vr = ws / "validation" / "validation_report.json"
-    if vr.exists():
-        try:
-            d = _json.loads(vr.read_text())
-            if "checks" not in d or not d["checks"]:
-                warnings.append("validation_report.json: no 'checks' — Schema Verification tab will be empty")
-        except Exception as e:
-            warnings.append(f"validation_report.json: parse error — {e}")
-    else:
-        warnings.append("validation/validation_report.json not found — Schema Verification tab will be empty")
-
-    # catalog_verification.json
-    cv = ws / "validation" / "catalog_verification.json"
-    if cv.exists():
-        try:
-            d = _json.loads(cv.read_text())
-            if not d.get("objects"):
-                warnings.append("catalog_verification.json: no 'objects' — Catalog tab will show 'not available'")
-        except Exception as e:
-            warnings.append(f"catalog_verification.json: parse error — {e}")
-
-    return warnings
 
 
 if __name__ == "__main__":
