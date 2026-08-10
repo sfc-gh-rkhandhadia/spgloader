@@ -146,7 +146,11 @@ for db in databases:
                    "passed": src_t == spg_t, "source": src_t, "spg": spg_t})
 
     # Row count (0 for schema-only, actual count for live migrations)
-    db_tables = [k for k in spg_counts if k.startswith(db + ".")]
+    # Match spg_counts FQN keys case-insensitively: SPG/dep_graph keys preserve
+    # source casing (e.g. `evdas.ACT_EVT_LOG`), but SOURCE_DATABASES may differ
+    # in case — MySQL on Linux treats table names case-sensitively.
+    db_db = db.lower() + "."
+    db_tables = [k for k in spg_counts if k.lower().startswith(db_db)]
     spg_rows = sum(safe_int(spg_counts.get(t,0)) for t in db_tables)
     src_rows = mysql_q(db, "SELECT COALESCE(SUM(TABLE_ROWS),0) FROM information_schema.TABLES WHERE TABLE_SCHEMA='%s' AND TABLE_TYPE='BASE TABLE'" % db)
     checks.append({"check": "row_count_total", "_schema": db,

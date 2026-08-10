@@ -1458,6 +1458,91 @@ def _apply_view_plpgsql_rules(sql: str) -> tuple[str, list[str]]:
     return sql, fixes
 
 
+def _fix_mysql_view(sql: str) -> tuple[str, list[str]]:
+    """Apply MySQL-specific cleanup to a SnowConvert-generated PostgreSQL view.
+
+    MySQL (MariaDB) views converted for PostgreSQL commonly retain MySQL-isms
+    that break deployment on strict servers:
+
+      1. Backtick identifiers/aliases  ``dma_id`` -> dma_id  (backticks are
+         invalid PostgreSQL syntax; PG folds unquoted idents to lower-case).
+      2. Bare numeric / date-string pivot aliases such as  `AS 20171013` ->
+         quoted  `AS "20171013"`  (a purely-numeric alias is not a valid PG
+         column identifier).  Anything that is not a simple PG identifier gets
+         double-quoted.
+      3. Non-aggregated SELECT columns missing from GROUP BY (MySQL tolerates
+         this with ONLY_FULL_GROUP_BY=OFF; PostgreSQL does not) — those
+         columns are appended to GROUP BY.
+    """
+    fixes = []
+
+    # 1. Strip backtick-quoted identifiers: ``name`` -> unquoted lower-case,
+    #    or double-quoted when the inner name is not a simple PG identifier.
+    def _unquote_backtick(m: re.Match) -> str:
+        name = m.group(1)
+        if re.match(r"^[a-z_][a-z0-9_]*$", name):
+            return name
+        return f'"{name}"'
+
+    new, n = re.subn(r"`([^`]+)`", _unquote_backtick, sql)
+    if n:
+        sql = new
+        fixes.append(f"mysql_backticks: {n} backtick identifiers unquoted")
+
+    # 2. Quote bare non-identifier aliases:  AS <numeric-or-mixed> -> AS "<...>".
+    #    Leaves plain `AS lower_ident` untouched.
+    def _quote_alias(m: re.Match) -> str:
+        alias = m.group(1)
+        if re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", alias):
+            return f"AS {alias}"
+        return f'AS "{alias}"'
+
+    new, n = re.subn(
+        r"\bAS\s+([0-9][^\s,;]+|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z0-9_]+)",
+        _quote_alias, sql,
+    )
+    if n:
+        sql = new
+        fixes.append(f"mysql_quote_aliases: {n} non-identifier aliases quoted")
+
+    # 3. Complete GROUP BY with non-aggregated SELECT columns (PostgreSQL
+    #    requires every non-aggregated output column to appear in GROUP BY).
+    #    Use a greedy match up to the statement terminator ';' (or end of text)
+    #    so additions are inserted before the ';' — never mid-token.
+    sel_m = re.search(r"\bSELECT\s+(.*?)\s+FROM\b", sql, re.IGNORECASE | re.DOTALL)
+    gby_m = re.search(r"\bGROUP\s+BY\b", sql, re.IGNORECASE)
+    if sel_m and gby_m:
+        rest = sql[gby_m.end():]
+        semi = rest.find(";")
+        list_end = gby_m.end() + (semi if semi != -1 else len(rest))
+        existing_list = rest[:semi] if semi != -1 else rest
+        existing = {g.strip().strip('"').lower()
+                    for g in existing_list.split(",") if g.strip()}
+
+        def _add(key: str) -> None:
+            if key and key not in existing:
+                existing.add(key)
+                additions.append(f'"{key}"' if not re.match(r"^[a-z_][a-z0-9_]*$", key) else key)
+
+        additions = []
+        for part in re.split(r"\s*,\s*", sel_m.group(1)):
+            part = part.strip()
+            if not part or part.lower().startswith(("sum(", "max(", "min(", "count(", "avg(")):
+                continue  # skip aggregate / function-call expressions
+            alias_m = re.search(r"\bAS\s+(\S+)$", part, re.IGNORECASE)
+            if alias_m:
+                # Pivot columns like `stat_name AS "20171013"` — group by the
+                # source column, not the aliased output.
+                _add(part.split(" AS ", 1)[0].split(".")[-1].strip('"').lower())
+            elif "(" not in part:
+                _add(part.split(".")[-1].strip('"').lower())
+        if additions:
+            sql = sql[:list_end] + ", " + ", ".join(additions) + sql[list_end:]
+            fixes.append(f"mysql_group_by: added {len(additions)} non-aggregated col(s) to GROUP BY")
+
+    return sql, fixes
+
+
 def fix_file(
     sql: str,
     filename: str,
@@ -1465,11 +1550,20 @@ def fix_file(
     schema: str = "",
     known_tables: set[str] | None = None,
     bit_columns: dict[str, list[str]] | None = None,
+    source_type: str = "mssql",
 ) -> tuple[str, list[str], bool]:
     """Apply all fixes to a single view file.
 
+    For MySQL/MariaDB sources this runs the MySQL-specific cleanup
+    (_fix_mysql_view) and skips the T-SQL-specific passes that are only valid
+    for SQL Server converted output.
+
     Returns (fixed_sql, list_of_fix_descriptions, was_pivot_converted).
     """
+    if source_type in ("mysql", "mariadb"):
+        sql, fixes = _fix_mysql_view(sql)
+        return sql, fixes, False
+
     fixes = []
     was_pivot = False
 
@@ -1561,6 +1655,11 @@ def main():
         default=str(Path(__file__).parent.parent / "references" / "fix-mappings" / "view-fixes.yaml"),
         help="Path to view-fixes.yaml mapping document",
     )
+    parser.add_argument(
+        "--source-type",
+        default=os.environ.get("SOURCE_TYPE", "mssql"),
+        help="Source type: mssql | mysql | mariadb | oracle (default: $SOURCE_TYPE or mssql)",
+    )
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir).expanduser()
@@ -1608,7 +1707,7 @@ def main():
         try:
             fixed_sql, fixes, was_pivot = fix_file(
                 sql, f.name, mapping, schema=schema, known_tables=known_tables,
-                bit_columns=bit_columns,
+                bit_columns=bit_columns, source_type=args.source_type,
             )
             out_path = output_dir / f.name
             out_path.write_text(fixed_sql, encoding="utf-8")

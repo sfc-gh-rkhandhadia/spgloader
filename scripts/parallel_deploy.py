@@ -298,6 +298,7 @@ def deploy(
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_path).write_text(json.dumps(summary, indent=2))
+        _merge_canonical_summary(summary, Path(output_path), work_dir=work_dir)
         # Contract validation — runs automatically, raises on violation
         from spgloader.workspace_validator import validate_after_deploy
         validate_after_deploy(Path(output_path).parent.parent)
@@ -371,6 +372,75 @@ def _phase_counts(results: list[dict]) -> dict:
         "ok":   sum(1 for r in results if r["ok"]),
         "fail": sum(1 for r in results if not r["ok"]),
     }
+
+
+def _merge_canonical_summary(summary: dict, output_path: Path, work_dir: str | None = None) -> None:
+    """Merge this run's phases into the canonical deployment_summary.json.
+
+    parallel_deploy.py is invoked once per source database in a multi-DB
+    migration, each time with its own --output (e.g.
+    deployment/deployment_summary_<db>.json).  Without aggregation the canonical
+    deployment/deployment_summary.json is never written, so the workspace
+    contract (validate_after_deploy -> phases.{tables,indexes,foreign_keys}.ok)
+    fails.  This merges per-run phase ok/fail totals into the canonical file so
+    the aggregate always reflects every database.
+
+    Canonical target resolution:
+      1) $WORK_DIR/deployment/deployment_summary.json  (preferred, when work_dir is set)
+      2) output_path.parent.parent / deployment / deployment_summary.json
+    """
+    candidates: list[Path] = []
+    if work_dir:
+        candidates.append(Path(work_dir) / "deployment" / "deployment_summary.json")
+    # output_path convention: <ws>/deployment/deployment_summary_<db>.json
+    candidates.append(output_path.parent.parent / "deployment" / "deployment_summary.json")
+    # If the per-run output is itself the canonical name, do not merge over it.
+    candidates = [p for p in candidates if p.resolve() != output_path.resolve()]
+    if not candidates:
+        return
+    canonical = candidates[0]
+    if not canonical.parent.exists():
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+
+    agg: dict
+    if canonical.exists():
+        agg = json.loads(canonical.read_text())
+    else:
+        agg = {
+            "source_type": summary.get("source_type"),
+            "phases": {
+                "schemas":      {"ok": 0, "fail": 0},
+                "sequences":    {"ok": 0, "fail": 0},
+                "tables":       {"ok": 0, "fail": 0},
+                "indexes":      {"ok": 0, "fail": 0},
+                "foreign_keys": {"ok": 0, "fail": 0},
+            },
+            "failures": [],
+            "per_db": {},
+        }
+    agg.setdefault("phases", {})
+    agg.setdefault("failures", [])
+    agg.setdefault("per_db", {})
+
+    # Sum phase ok/fail counts across all databases.
+    for phase, counts in summary.get("phases", {}).items():
+        agg_ph = agg["phases"].setdefault(phase, {"ok": 0, "fail": 0})
+        agg_ph["ok"] = int(agg_ph.get("ok", 0)) + int(counts.get("ok", 0))
+        agg_ph["fail"] = int(agg_ph.get("fail", 0)) + int(counts.get("fail", 0))
+
+    # Track this DB's failures with its source_db tag for traceability.
+    db = summary.get("source_db") or "unknown"
+    for f in summary.get("failures", []):
+        agg["failures"].append({**f, "source_db": db})
+
+    # Keep per-db phase breakdown for reporting.
+    agg["per_db"][db] = summary.get("phases", {})
+
+    agg["source_type"] = agg.get("source_type") or summary.get("source_type")
+    agg["total_ok"] = int(agg.get("total_ok", 0)) + int(summary.get("total_ok", 0))
+    agg["total_fail"] = int(agg.get("total_fail", 0)) + int(summary.get("total_fail", 0))
+
+    canonical.write_text(json.dumps(agg, indent=2))
 
 
 # ---------------------------------------------------------------------------

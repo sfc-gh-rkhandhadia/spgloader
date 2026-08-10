@@ -32,7 +32,28 @@ SPG_DB     = os.environ["SPG_DATABASE"]
 
 SHARED_DIR = Path(os.environ.get('SHARED_DIR', os.environ.get('MSSQL_SPG_SHARED_DIR', str(Path(__file__).parent))))
 
-inv = json.loads((SHARED_DIR / "object_inventory.json").read_text())
+# Locate object_inventory.json without requiring a manual copy. Precedence:
+#   1) $SPGLOADER_WORK_DIR/witness/object_inventory.json  (spgloader witness flow)
+#   2) $SPGLOADER_WORK_DIR/validation_shared/object_inventory.json
+#   3) $SHARED_DIR/object_inventory.json                  (legacy / standalone flow)
+def _find_inventory() -> Path:
+    candidates = []
+    work = os.environ.get("SPGLOADER_WORK_DIR")
+    if work:
+        candidates += [
+            Path(work) / "witness" / "object_inventory.json",
+            Path(work) / "validation_shared" / "object_inventory.json",
+        ]
+    candidates.append(SHARED_DIR / "object_inventory.json")
+    for p in candidates:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        "object_inventory.json not found. Pass SPGLOADER_WORK_DIR (witness/ ) "
+        "or SHARED_DIR. Tried: " + ", ".join(str(p) for p in candidates)
+    )
+
+inv = json.loads(_find_inventory().read_text())
 
 def mc():
     return _adapter.connect()

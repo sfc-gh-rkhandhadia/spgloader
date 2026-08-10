@@ -317,7 +317,6 @@ def main() -> None:
 
     scur.close()
     spg_conn.close()
-    src_conn.close()
 
 
 if __name__ == "__main__":

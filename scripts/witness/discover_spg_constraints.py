@@ -90,8 +90,13 @@ def parse_constraint_def(constraint_def: str) -> dict | None:
 # SPG discovery
 # ---------------------------------------------------------------------------
 
-def fetch_check_constraints(conn, schema: str) -> dict[str, dict[str, dict]]:
-    """Query SPG for all CHECK constraints in the given schema.
+def fetch_check_constraints(conn, schemas) -> dict[str, dict[str, dict]]:
+    """Query SPG for all CHECK constraints in the given schema(s).
+
+    Arguments may be a single schema name or an iterable of schema names.
+    System schemas (pg_%, information_schema, snowflake%, lake%) are always
+    excluded so multi-DB MySQL/MariaDB migrations can be inspected by passing
+    every source schema.
 
     Returns:
         {mssql_table_fqn: {col_name_lower: rule}}
@@ -102,18 +107,15 @@ def fetch_check_constraints(conn, schema: str) -> dict[str, dict[str, dict]]:
 
     The returned FQN uses lowercase to match the lookup key used in seed_data.py
     (obj["fqn"].lower()).
-
-    A single CHECK constraint may span multiple columns (conkey array).  For
-    multi-column constraints, each participating column is associated with the
-    same parsed rule — the parser will extract the enum or range values from
-    the full constraint text regardless of which column they logically apply to.
-    Single-column constraints are the overwhelmingly common case for the Y/N
-    boolean-flag pattern.
     """
+    if isinstance(schemas, str):
+        schemas = [schemas]
+    schemas = [s for s in schemas if s.strip()]
     cur = conn.cursor()
     cur.execute(
         """
         SELECT
+            n.nspname                    AS schema_name,
             t.relname                    AS table_name,
             a.attname                    AS col_name,
             pg_get_constraintdef(c.oid)  AS constraint_def
@@ -123,10 +125,17 @@ def fetch_check_constraints(conn, schema: str) -> dict[str, dict[str, dict]]:
         JOIN pg_attribute a  ON a.attrelid    = t.oid
                              AND a.attnum      = ANY(c.conkey)
         WHERE c.contype = 'c'
-          AND n.nspname  = %s
+          AND (%(schema_filter)s)
+          AND n.nspname NOT LIKE 'pg~_%%' ESCAPE '~'
+          AND n.nspname NOT LIKE 'information_schema'
+          AND n.nspname NOT LIKE 'snowflake~_%%' ESCAPE '~'
+          AND n.nspname NOT LIKE 'lake~_%%' ESCAPE '~'
         ORDER BY t.relname, a.attname
-        """,
-        (schema,),
+        """.replace(
+            "%(schema_filter)s",
+            "n.nspname = ANY(%s)" if schemas else "TRUE",
+        ),
+        (schemas,) if schemas else (),
     )
     rows = cur.fetchall()
     cur.close()
@@ -134,13 +143,14 @@ def fetch_check_constraints(conn, schema: str) -> dict[str, dict[str, dict]]:
     result: dict[str, dict[str, dict]] = {}
     unparseable = []
 
-    for table_name, col_name, constraint_def in rows:
+    for schema_name, table_name, col_name, constraint_def in rows:
         rule = parse_constraint_def(constraint_def)
         if rule is None:
-            unparseable.append((table_name, col_name, constraint_def))
+            unparseable.append((f"{schema_name}.{table_name}", col_name, constraint_def))
             continue
-        # Use lowercase FQN so seed_data.py lookups are case-insensitive
-        fqn = f"dbo.{table_name.lower()}"
+        # Prefix with the schema actually inspected (NOT hardcoded dbo) and
+        # lowercase so seed_data.py lookups are case-insensitive.
+        fqn = f"{schema_name}.{table_name.lower()}"
         result.setdefault(fqn, {})[col_name.lower()] = rule
 
     if unparseable:
@@ -164,12 +174,16 @@ def main() -> None:
     p.add_argument("--spg-user",     required=True)
     p.add_argument("--spg-password", required=True)
     p.add_argument("--spg-database", required=True)
-    p.add_argument("--schema",       default="dbo",
-                   help="SPG schema to inspect (default: dbo)")
-    p.add_argument("--output",       required=True,
-                   help="Path to write spg_column_constraints.json")
+    p.add_argument("--schema",       default="",
+                   help="Comma-separated SPG schemas to inspect. Empty = all "
+                        "non-system schemas. (Default: all)")
+    p.add_argument("--output",
+                   default="spg_column_constraints.json",
+                   help="Path to write spg_column_constraints.json "
+                        "(default: ./spg_column_constraints.json)")
     args = p.parse_args()
 
+    schemas = [s.strip() for s in args.schema.split(",") if s.strip()]
     print(f"Connecting to SPG {args.spg_host}/{args.spg_database}…")
     conn = psycopg2.connect(
         host=args.spg_host,
@@ -181,8 +195,8 @@ def main() -> None:
         connect_timeout=30,
     )
 
-    print(f"  Discovering CHECK constraints in schema '{args.schema}'…")
-    constraints = fetch_check_constraints(conn, args.schema)
+    print(f"  Discovering CHECK constraints in schema(s) '{', '.join(schemas) or 'ALL'}'…")
+    constraints = fetch_check_constraints(conn, schemas)
     conn.close()
 
     total_rules = sum(len(v) for v in constraints.values())
@@ -198,7 +212,7 @@ def main() -> None:
                 print(f"    {tbl_fqn}.{col}: range [{rule['min']}, {rule['max']}]")
 
     output = {
-        "schema":       args.schema,
+        "schema":       schemas or ["all"],
         "spg_host":     args.spg_host,
         "spg_database": args.spg_database,
         "generated_at": datetime.now(timezone.utc).isoformat(),

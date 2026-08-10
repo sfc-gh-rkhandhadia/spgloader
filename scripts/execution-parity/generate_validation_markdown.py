@@ -234,73 +234,142 @@ EXCL_LIKE    = (
     "AND n.nspname NOT LIKE 'extension%'"
 )
 
-mc  = _src.connect()
-msc = mc.cursor(as_dict=True)
-msc.execute(
-    "SELECT s.name AS sc, t.name AS nm FROM sys.tables t "
-    "JOIN sys.schemas s ON t.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,t.name")
-ms_tables = msc.fetchall()
-msc.execute(
-    "SELECT s.name AS sc, i.name AS nm FROM sys.indexes i "
-    "JOIN sys.tables t ON i.object_id=t.object_id "
-    "JOIN sys.schemas s ON t.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') AND i.name IS NOT NULL "
-    "ORDER BY s.name,i.name")
-ms_indexes = msc.fetchall()
-msc.execute(
-    "SELECT s.name AS sc, tp.name AS nm FROM sys.types tp "
-    "JOIN sys.schemas s ON tp.schema_id=s.schema_id "
-    "WHERE tp.is_user_defined=1 ORDER BY s.name,tp.name")
-ms_types = msc.fetchall()
-msc.execute(
-    "SELECT DISTINCT s.name AS sc FROM sys.schemas s "
-    "JOIN sys.objects o ON o.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') "
-    "AND o.type NOT IN ('S','IT','SQ','X','RF') ORDER BY s.name")
-ms_schemas = msc.fetchall()
+# ── Source structural discovery (source-type aware) ─────────────────────────
+# Every list is [{'sc': schema, 'nm': name}, ...] so downstream comparisons and
+# struct_counts() work uniformly for MSSQL, MySQL/MariaDB, and Oracle.
+_src_type = _src.source_type
+ms_tables = ms_indexes = ms_types = ms_schemas = []
+ms_views_struct = ms_procs_struct = ms_funcs_struct = ms_trigs_struct = []
+ms_constraints = ms_fks = []
 
-# Additional structural objects: views, procedures, functions, triggers, constraints
-msc.execute(
-    "SELECT s.name AS sc, v.name AS nm FROM sys.views v "
-    "JOIN sys.schemas s ON v.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,v.name")
-ms_views_struct = msc.fetchall()
-
-msc.execute(
-    "SELECT s.name AS sc, p.name AS nm FROM sys.procedures p "
-    "JOIN sys.schemas s ON p.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,p.name")
-ms_procs_struct = msc.fetchall()
-
-msc.execute(
-    "SELECT s.name AS sc, o.name AS nm FROM sys.objects o "
-    "JOIN sys.schemas s ON o.schema_id=s.schema_id "
-    "WHERE o.type IN ('FN','TF','IF') AND s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,o.name")
-ms_funcs_struct = msc.fetchall()
-
-msc.execute(
-    "SELECT s.name AS sc, t.name AS nm FROM sys.triggers t "
-    "JOIN sys.objects o ON t.parent_id=o.object_id "
-    "JOIN sys.schemas s ON o.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,t.name")
-ms_trigs_struct = msc.fetchall()
-
-msc.execute(
-    "SELECT s.name AS sc, k.name AS nm FROM sys.key_constraints k "
-    "JOIN sys.objects o ON k.parent_object_id=o.object_id "
-    "JOIN sys.schemas s ON o.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') "
-    "AND k.type IN ('PK','UQ') ORDER BY s.name,k.name")
-ms_constraints = msc.fetchall()
-
-msc.execute(
-    "SELECT s.name AS sc, fk.name AS nm FROM sys.foreign_keys fk "
-    "JOIN sys.schemas s ON fk.schema_id=s.schema_id "
-    "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,fk.name")
-ms_fks = msc.fetchall()
-
-mc.close()
+mc = _src.connect()
+try:
+    if _src_type in ("mysql", "mariadb"):
+        _sys = "('information_schema','performance_schema','mysql','sys')"
+        cur = mc.cursor(dictionary=True)
+        cur.execute(f"SELECT TABLE_SCHEMA AS sc, TABLE_NAME AS nm "
+                    f"FROM information_schema.tables WHERE TABLE_TYPE='BASE TABLE' "
+                    f"AND TABLE_SCHEMA NOT IN {_sys} ORDER BY TABLE_SCHEMA,TABLE_NAME")
+        ms_tables = cur.fetchall()
+        cur.execute(f"SELECT TABLE_SCHEMA AS sc, INDEX_NAME AS nm FROM information_schema.statistics "
+                    f"WHERE INDEX_NAME!='PRIMARY' AND TABLE_SCHEMA NOT IN {_sys} "
+                    f"GROUP BY TABLE_SCHEMA, INDEX_NAME ORDER BY TABLE_SCHEMA,INDEX_NAME")
+        ms_indexes = cur.fetchall()
+        ms_types = []  # MySQL has no catalog-queryable user-defined types source-side
+        cur.execute(f"SELECT DISTINCT TABLE_SCHEMA AS sc FROM information_schema.tables "
+                    f"WHERE TABLE_SCHEMA NOT IN {_sys} ORDER BY TABLE_SCHEMA")
+        ms_schemas = cur.fetchall()
+        cur.execute(f"SELECT TABLE_SCHEMA AS sc, TABLE_NAME AS nm FROM information_schema.views "
+                    f"WHERE TABLE_SCHEMA NOT IN {_sys} ORDER BY TABLE_SCHEMA,TABLE_NAME")
+        ms_views_struct = cur.fetchall()
+        cur.execute(f"SELECT ROUTINE_SCHEMA AS sc, ROUTINE_NAME AS nm FROM information_schema.routines "
+                    f"WHERE ROUTINE_TYPE='PROCEDURE' AND ROUTINE_SCHEMA NOT IN {_sys} "
+                    f"ORDER BY ROUTINE_SCHEMA,ROUTINE_NAME")
+        ms_procs_struct = cur.fetchall()
+        cur.execute(f"SELECT ROUTINE_SCHEMA AS sc, ROUTINE_NAME AS nm FROM information_schema.routines "
+                    f"WHERE ROUTINE_TYPE='FUNCTION' AND ROUTINE_SCHEMA NOT IN {_sys} "
+                    f"ORDER BY ROUTINE_SCHEMA,ROUTINE_NAME")
+        ms_funcs_struct = cur.fetchall()
+        cur.execute(f"SELECT TRIGGER_SCHEMA AS sc, TRIGGER_NAME AS nm FROM information_schema.triggers "
+                    f"WHERE TRIGGER_SCHEMA NOT IN {_sys} ORDER BY TRIGGER_SCHEMA,TRIGGER_NAME")
+        ms_trigs_struct = cur.fetchall()
+        cur.execute(f"SELECT CONSTRAINT_SCHEMA AS sc, CONSTRAINT_NAME AS nm "
+                    f"FROM information_schema.table_constraints "
+                    f"WHERE CONSTRAINT_TYPE IN ('PRIMARY KEY','UNIQUE') AND CONSTRAINT_SCHEMA NOT IN {_sys} "
+                    f"ORDER BY CONSTRAINT_SCHEMA,CONSTRAINT_NAME")
+        ms_constraints = cur.fetchall()
+        cur.execute(f"SELECT CONSTRAINT_SCHEMA AS sc, CONSTRAINT_NAME AS nm "
+                    f"FROM information_schema.table_constraints "
+                    f"WHERE CONSTRAINT_TYPE='FOREIGN KEY' AND CONSTRAINT_SCHEMA NOT IN {_sys} "
+                    f"ORDER BY CONSTRAINT_SCHEMA,CONSTRAINT_NAME")
+        ms_fks = cur.fetchall()
+    elif _src_type == "mssql":
+        msc = mc.cursor(as_dict=True)
+        msc.execute(
+            "SELECT s.name AS sc, t.name AS nm FROM sys.tables t "
+            "JOIN sys.schemas s ON t.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,t.name")
+        ms_tables = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, i.name AS nm FROM sys.indexes i "
+            "JOIN sys.tables t ON i.object_id=t.object_id "
+            "JOIN sys.schemas s ON t.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') AND i.name IS NOT NULL "
+            "ORDER BY s.name,i.name")
+        ms_indexes = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, tp.name AS nm FROM sys.types tp "
+            "JOIN sys.schemas s ON tp.schema_id=s.schema_id "
+            "WHERE tp.is_user_defined=1 ORDER BY s.name,tp.name")
+        ms_types = msc.fetchall()
+        msc.execute(
+            "SELECT DISTINCT s.name AS sc FROM sys.schemas s "
+            "JOIN sys.objects o ON o.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') "
+            "AND o.type NOT IN ('S','IT','SQ','X','RF') ORDER BY s.name")
+        ms_schemas = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, v.name AS nm FROM sys.views v "
+            "JOIN sys.schemas s ON v.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,v.name")
+        ms_views_struct = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, p.name AS nm FROM sys.procedures p "
+            "JOIN sys.schemas s ON p.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,p.name")
+        ms_procs_struct = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, o.name AS nm FROM sys.objects o "
+            "JOIN sys.schemas s ON o.schema_id=s.schema_id "
+            "WHERE o.type IN ('FN','TF','IF') AND s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,o.name")
+        ms_funcs_struct = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, t.name AS nm FROM sys.triggers t "
+            "JOIN sys.objects o ON t.parent_id=o.object_id "
+            "JOIN sys.schemas s ON o.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,t.name")
+        ms_trigs_struct = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, k.name AS nm FROM sys.key_constraints k "
+            "JOIN sys.objects o ON k.parent_object_id=o.object_id "
+            "JOIN sys.schemas s ON o.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') "
+            "AND k.type IN ('PK','UQ') ORDER BY s.name,k.name")
+        ms_constraints = msc.fetchall()
+        msc.execute(
+            "SELECT s.name AS sc, fk.name AS nm FROM sys.foreign_keys fk "
+            "JOIN sys.schemas s ON fk.schema_id=s.schema_id "
+            "WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA') ORDER BY s.name,fk.name")
+        ms_fks = msc.fetchall()
+    else:
+        # Oracle: best-effort tables/schemas; other categories left empty to
+        # avoid crashing the report generator on catalog differences.
+        cur = mc.cursor()
+        cur.execute(
+            "SELECT OWNER AS sc, TABLE_NAME AS nm FROM ALL_TABLES "
+            "WHERE OWNER NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP') ORDER BY OWNER,TABLE_NAME")
+        ms_tables = [{'sc': r[0], 'nm': r[1]} for r in cur.fetchall()]
+        cur.execute(
+            "SELECT DISTINCT OWNER AS sc FROM ALL_TABLES "
+            "WHERE OWNER NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP') ORDER BY OWNER")
+        ms_schemas = [{'sc': r[0], 'nm': ''} for r in cur.fetchall()]
+        _cur = mc.cursor()
+        _cur.execute(
+            "SELECT OWNER AS sc, OBJECT_NAME AS nm FROM ALL_VIEWS "
+            "WHERE OWNER NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP') ORDER BY OWNER,OBJECT_NAME")
+        ms_views_struct = [{'sc': r[0], 'nm': r[1]} for r in _cur.fetchall()]
+        _cur.execute(
+            "SELECT OWNER AS sc, OBJECT_NAME AS nm FROM ALL_PROCEDURES "
+            "WHERE OBJECT_TYPE='PROCEDURE' AND OWNER NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP') "
+            "ORDER BY OWNER,OBJECT_NAME")
+        ms_procs_struct = [{'sc': r[0], 'nm': r[1]} for r in _cur.fetchall()]
+        _cur.execute(
+            "SELECT OWNER AS sc, OBJECT_NAME AS nm FROM ALL_PROCEDURES "
+            "WHERE OBJECT_TYPE='FUNCTION' AND OWNER NOT IN ('SYS','SYSTEM','OUTLN','DBSNMP') "
+            "ORDER BY OWNER,OBJECT_NAME")
+        ms_funcs_struct = [{'sc': r[0], 'nm': r[1]} for r in _cur.fetchall()]
+finally:
+    mc.close()
 
 sc2  = psycopg2.connect(**SPG_CONF)
 sc2c = sc2.cursor(cursor_factory=psycopg2.extras.RealDictCursor)

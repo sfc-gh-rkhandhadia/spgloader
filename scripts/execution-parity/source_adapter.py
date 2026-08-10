@@ -174,6 +174,52 @@ class SourceAdapter:
             conn.close()
 
     # ------------------------------------------------------------------
+    # Compatibility shims (used by mysql_structural_parity.py)
+    # ------------------------------------------------------------------
+    def list_tables(self, schema: str) -> set[str]:
+        """Return table names (lowercased) in schema (base tables only)."""
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = %s AND table_type = 'BASE TABLE'
+            """, (schema,))
+            return {r[0].lower() for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+    def list_views(self, schema: str) -> set[str]:
+        """Return view names (lowercased) in schema."""
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT table_name FROM information_schema.views
+                WHERE table_schema = %s
+            """, (schema,))
+            return {r[0].lower() for r in cur.fetchall()}
+        finally:
+            conn.close()
+
+    def column_count(self, schema: str, table: str) -> int:
+        """Return column count for schema.table."""
+        conn = self.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+            """, (schema, table))
+            return int(cur.fetchone()[0] or 0)
+        finally:
+            conn.close()
+
+    def list_routines(self, schema: str) -> list[dict]:
+        """Return [{'name': ...}] for procs + functions (alias of get_routines)."""
+        return self.get_routines(schema)
+
+    # ------------------------------------------------------------------
     # Parameter introspection
     # ------------------------------------------------------------------
     def get_parameters(self, schema: str, routine_name: str) -> list[dict]:
