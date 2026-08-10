@@ -1,22 +1,25 @@
 ---
 name: spgloader
-description: "Migrate MSSQL, MySQL, MariaDB, or Oracle databases to Snowflake Postgres (SPG).
+description: "Migrate MSSQL or MySQL databases to Snowflake Postgres (SPG).
   Includes a mandatory SPG Compatibility Assessment guardrail that scans DDL
   against Snowflake Postgres-specific rules before conversion begins.
-  Handles source environment setup (existing, Docker, or SPCS), SPG provisioning,
+  Handles source environment setup (existing or Docker), SPG provisioning,
   catalog-based schema extraction, SPG compatibility assessment,
   catalog-driven parallel table deployment, LLM-based object conversion with EWI
   annotations, deployment, and validation.
   Triggers: migrate to snowflake postgres, spgloader, mssql to spg,
-  mysql to spg, mariadb to spg, oracle to spg, database migration to postgres,
-  source ddl to snowflake postgres, convert mssql mysql mariadb oracle to postgres."
+  mysql to spg, database migration to postgres,
+  source ddl to snowflake postgres, convert mssql mysql to postgres.
+  Note: MariaDB, Oracle, and SPCS support are planned for the next release."
 ---
 
 # spgloader — Multi-Source to Snowflake Postgres Migration
 
 ## Overview
 
-spgloader migrates **MSSQL, MySQL, MariaDB, or Oracle** databases to Snowflake Postgres (SPG).
+spgloader migrates **MSSQL or MySQL** databases to Snowflake Postgres (SPG).
+
+> **Coming next release:** MariaDB, Oracle, and SPCS (Snowpark Container Services) support.
 
 For **tables and schemas** the skill uses a **catalog-based extractor** — reading `sys.*`,
 `INFORMATION_SCHEMA.*`, or `ALL_*` views directly from the live source database.
@@ -37,13 +40,15 @@ See `references/migration-overview.md` for conversion paths, source support matr
 
 Ask the user with a single `ask_user_question` call (4 questions):
 
-1. **Source DB type** (options): MSSQL | MySQL | MariaDB | Oracle
-2. **Source DB version** (text): default per type: MSSQL → `2022`, MySQL → `8.0`, MariaDB → `10.11`, Oracle → `23c`
+1. **Source DB type** (options): MSSQL | MySQL
+2. **Source DB version** (text): default per type: MSSQL → `2022`, MySQL → `8.0`
+
+> **Disabled this release:** MariaDB and Oracle are not yet supported. If the user asks for them, respond: "MariaDB and Oracle support is planned for the next release. Currently supported: MSSQL and MySQL."
 3. **Source input** (options): "Connect to live source database" | "Provide DDL file" | "Paste DDL directly"
 4. **Target SPG** (options): "Use existing SPG instance" | "Provision new SPG"
 
 Store answers as:
-- `SOURCE_TYPE` — mssql | mysql | mariadb | oracle
+- `SOURCE_TYPE` — mssql | mysql
 - `SOURCE_VERSION` — version string
 - `SOURCE_INPUT` — live | file | paste
 - `TARGET_SPG` — existing | new
@@ -76,15 +81,16 @@ database container and extract directly from the catalog.
 
 Which container platform is available?
   Docker  — deploy a local container on this machine (recommended)
-  SPCS    — deploy on Snowpark Container Services (Snowflake-hosted)
   Neither — use Python text-based conversion (known gaps: FKs and indexes
             will not be migrated; IDENTITY detection via regex only)
+
+> **Disabled this release:** SPCS is not yet supported. If the user asks for SPCS, respond: "SPCS container deployment is planned for the next release. Currently only Docker is supported."
 ```
 
-Store as `CONTAINER_PLATFORM` — docker | spcs | none
+Store as `CONTAINER_PLATFORM` — docker | none
 
-**If CONTAINER_PLATFORM = docker or spcs:**
-- Set `SOURCE_ENV = docker` or `SOURCE_ENV = spcs`
+**If CONTAINER_PLATFORM = docker:**
+- Set `SOURCE_ENV = docker`
 - Phase 1 will deploy the source DB container and load the DDL file **or directory**
 - Use `--ddl-dir` when the source is an SSMS export directory; `--ddl-file` for a single combined file
 - Phase 3 will extract from the live catalog
@@ -124,7 +130,7 @@ Execute phases in order. Load each sub-skill, execute its full workflow, then co
 
 | Phase | Sub-skill | Description |
 |-------|-----------|-------------|
-| 1 | `sub-skills/source-setup/SKILL.md` | Connect or deploy source DB (Docker or SPCS) |
+| 1 | `sub-skills/source-setup/SKILL.md` | Connect or deploy source DB (Docker only this release) |
 | 2 | `sub-skills/target-setup/SKILL.md` | Connect or provision SPG |
 | 3 | `sub-skills/ddl-extract/SKILL.md` | Extract schema (catalog or file) + build dep graph |
 | **3.5** | **`sub-skills/assess/SKILL.md`** | **SPG Compatibility Assessment (GUARDRAIL)** |

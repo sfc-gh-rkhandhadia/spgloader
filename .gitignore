@@ -60,3 +60,8 @@ migration_report.pdf
 
 # Logs
 *.log
+
+# Feedback loop (local/per-machine data, never commit)
+feedback_export.jsonl
+feedback_ledger.jsonl
+aggregated/
