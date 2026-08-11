@@ -1,4 +1,9 @@
 # MariaDB → Snowflake Postgres Migration
+
+> **⛔ DISABLED THIS RELEASE.** Do NOT execute this sub-skill. If routed here,
+> stop and respond: "MariaDB support is planned for the next release. Currently
+> supported: MSSQL and MySQL." Then return to the parent skill.
+
 **Source entry-point for MariaDB 10.x / 11.x migrations.**
 MariaDB is treated as a MySQL dialect — most rules, scripts, and prompts are shared.
 This sub-skill documents the differences.

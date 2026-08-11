@@ -1,4 +1,9 @@
 # Oracle → Snowflake Postgres Migration
+
+> **⛔ DISABLED THIS RELEASE.** Do NOT execute this sub-skill. If routed here,
+> stop and respond: "Oracle support is planned for the next release. Currently
+> supported: MSSQL and MySQL." Then return to the parent skill.
+
 **Source entry-point for Oracle Database 12c / 19c / 21c migrations.**
 This sub-skill documents every source-specific detail for Oracle migrations.
 

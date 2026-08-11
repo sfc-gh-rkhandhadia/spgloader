@@ -18,9 +18,12 @@ From `spgloader/SKILL.md` Phase 1.
 | SOURCE_ENV | Workflow |
 |------------|----------|
 | `docker`   | [Docker section](#docker) — deploy local container |
-| `spcs`     | [SPCS section](#spcs) — deploy Snowflake-hosted container |
+| `spcs`     | **⛔ DISABLED this release** — respond: "SPCS is planned for the next release. Use Docker instead." |
 | `existing` | [Existing section](#existing) — connect to running DB |
 | `none`     | Skip this phase — no container; text-based fallback in Phase 3 |
+
+> **Guard:** If `SOURCE_TYPE` is `oracle` or `mariadb`, stop immediately and respond
+> with the appropriate disabled message from the Feature Flags table in the parent SKILL.md.
 
 ---
 

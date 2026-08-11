@@ -15,6 +15,25 @@ description: "Migrate MSSQL or MySQL databases to Snowflake Postgres (SPG).
 
 # spgloader — Multi-Source to Snowflake Postgres Migration
 
+## Feature Flags (Current Release)
+
+**CRITICAL — Read before executing any phase.** The following features are DISABLED
+for this release. The code and documentation remain in place for the next release.
+Do NOT offer, execute, or route to disabled features. If a user requests them,
+respond with the stated message.
+
+| Feature | Status | If user asks, respond with: |
+|---------|--------|----------------------------|
+| **MariaDB** source | DISABLED | "MariaDB support is planned for the next release. Currently supported: MSSQL and MySQL." |
+| **Oracle** source | DISABLED | "Oracle support is planned for the next release. Currently supported: MSSQL and MySQL." |
+| **SPCS** container platform | DISABLED | "SPCS container deployment is planned for the next release. Currently only Docker is supported." |
+
+**How to re-enable:** Change the Status column above to ENABLED and remove the
+disable guards from Phase 0 questions. No code changes needed — all Oracle,
+MariaDB, and SPCS logic remains intact in sub-skills and scripts.
+
+---
+
 ## Overview
 
 spgloader migrates **MSSQL or MySQL** databases to Snowflake Postgres (SPG).
@@ -41,9 +60,8 @@ See `references/migration-overview.md` for conversion paths, source support matr
 Ask the user with a single `ask_user_question` call (4 questions):
 
 1. **Source DB type** (options): MSSQL | MySQL
+   *(MariaDB and Oracle are DISABLED — see Feature Flags above. Do NOT include them as options.)*
 2. **Source DB version** (text): default per type: MSSQL → `2022`, MySQL → `8.0`
-
-> **Disabled this release:** MariaDB and Oracle are not yet supported. If the user asks for them, respond: "MariaDB and Oracle support is planned for the next release. Currently supported: MSSQL and MySQL."
 3. **Source input** (options): "Connect to live source database" | "Provide DDL file" | "Paste DDL directly"
 4. **Target SPG** (options): "Use existing SPG instance" | "Provision new SPG"
 
@@ -84,10 +102,11 @@ Which container platform is available?
   Neither — use Python text-based conversion (known gaps: FKs and indexes
             will not be migrated; IDENTITY detection via regex only)
 
-> **Disabled this release:** SPCS is not yet supported. If the user asks for SPCS, respond: "SPCS container deployment is planned for the next release. Currently only Docker is supported."
+*(SPCS is DISABLED — see Feature Flags above. Do NOT include it as an option.)*
 ```
 
 Store as `CONTAINER_PLATFORM` — docker | none
+*(SPCS is DISABLED this release. If user selects SPCS somehow, reject and explain.)*
 
 **If CONTAINER_PLATFORM = docker:**
 - Set `SOURCE_ENV = docker`
@@ -304,8 +323,8 @@ Phase 6.6: Parity Testing        ← pending / in_progress / completed
 | Action | Why | Phase |
 |--------|-----|-------|
 | BLOCK findings in assessment | Migration incompatible with SPG | 3.5 |
-| Docker Oracle image pull | Requires `docker login container-registry.oracle.com` | 1 |
-| SPCS compute pool creation | Billable resource | 1 |
+| Docker Oracle image pull | Requires `docker login container-registry.oracle.com` | 1 | *(DISABLED this release)* |
+| SPCS compute pool creation | Billable resource | 1 | *(DISABLED this release)* |
 | SPG CREATE | Billable resource | 2 |
 | Deploy DDL to SPG | Destructive on target | 5 |
 
@@ -315,7 +334,7 @@ Both the source DB and SPG must be reachable to run Phase 6 catalog verification
 
 | Phase | Source DB required | SPG required | Notes |
 |-------|--------------------|--------------|-------|
-| 1     | Yes (Docker/SPCS/existing) | No | Load schema into container |
+| 1     | Yes (Docker/existing) | No | Load schema into container *(SPCS disabled)* |
 | 2     | No | Yes | Provision SPG |
 | 3–5   | Yes | Yes | Catalog extraction + deploy |
 | **6+** | **Yes** | **Yes** | **Catalog verification — live queries required** |
@@ -323,7 +342,7 @@ Both the source DB and SPG must be reachable to run Phase 6 catalog verification
 **Text-based fallback (`CONTAINER_PLATFORM=none`) cannot satisfy Phase 6.**
 If the source was provided as a DDL file without a container, the catalog verification
 step will fail because there is no live source DB to query. The user must either:
-- Re-run Phase 1 with Docker or SPCS to load the DDL into a running container, or
+- Re-run Phase 1 with Docker to load the DDL into a running container, or
 - Accept that the Catalog Verification tab in the report will show the "not available" banner.
 
 The migration can still complete without catalog verification — Phases 1–5 and the
@@ -341,7 +360,7 @@ conversions. The following gaps apply and are annotated in the output:
   - Foreign keys: NOT migrated (cannot be reliably parsed from DDL text)
   - Secondary indexes: NOT migrated (not present in DDL text exports)
   - IDENTITY detection: regex-based only (may miss edge cases)
-  Recommendation: load the DDL file into a Docker or SPCS container
+  Recommendation: load the DDL file into a Docker container
   and re-run to get full structural fidelity.
   Data copy uses copy_source_data.py (pymssql/mysql-connector over TCP) — pgloader is not used.
 ```
@@ -411,7 +430,7 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/generate_report.py \
 - Type mappings: `TINYINT(N) UNSIGNED`, `INT(N) UNSIGNED`, etc. (with size modifier) map to
   `SMALLINT` / `BIGINT` before the bare-type rules fire.
 
-### Oracle
+### Oracle *(DISABLED this release — do not execute Oracle flows)*
 - `_oracle_tables` joins `ALL_OBJECTS` (OBJECT_TYPE=\'TABLE\') to exclude views and synonyms
   from the column-level DDL extraction.
 - `copy_oracle_data.py` sets `session_replication_role = replica` for the duration of the bulk
@@ -453,7 +472,7 @@ source "$SPGLOADER_WORK_DIR/source_conn.env"
 # Provides: SOURCE_CONTAINER (if Docker was used)
 ```
 
-### Step 2 — Drop the source environment (Docker or SPCS)
+### Step 2 — Drop the source environment (Docker)
 
 **Docker:**
 ```bash
@@ -462,6 +481,7 @@ if [ -n "$SOURCE_CONTAINER" ]; then
 fi
 ```
 
+<!-- DISABLED THIS RELEASE: SPCS teardown (re-enable when SPCS is enabled in Feature Flags)
 **SPCS** (if `SPCS_SERVICE` is set in `source_conn.env`):
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/teardown_spcs_source.py \
@@ -469,6 +489,7 @@ uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/teardown_spcs_source.py 
 ```
 
 This reads `SPCS_SERVICE` and `SPCS_POOL` from `source_conn.env` and drops both resources.
+-->
 
 ### Step 3 — Drop the SPG instance
 
