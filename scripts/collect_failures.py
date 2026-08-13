@@ -280,12 +280,11 @@ def main():
 
     entries = collect_failures(work_dir, tester=args.tester, scenario=args.scenario)
 
-    if not entries:
-        print("No failures found in workspace artifacts.")
-        return
-
     export_jsonl(entries, output)
-    print(f"Collected {len(entries)} failures → {output}")
+    if not entries:
+        print(f"No failures found — empty feedback_export.jsonl written → {output}")
+    else:
+        print(f"Collected {len(entries)} failures → {output}")
 
 
 if __name__ == "__main__":

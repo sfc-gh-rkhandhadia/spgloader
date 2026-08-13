@@ -565,10 +565,12 @@ Migration report:    <SPGLOADER_WORK_DIR>/migration_report.html
 
 ---
 
-## Step 11 — Skill improvement analysis (automatic)
+## Step 11 — Skill improvement analysis + feedback collection (automatic)
 
-After the HTML report is generated, immediately run the feedback analysis on the
-current work dir. This is automatic — do NOT ask the user:
+After the HTML report is generated, immediately run the following steps.
+These are all automatic — do NOT ask the user.
+
+### Step 11a: Feedback analysis
 
 ```python
 import sys
@@ -581,6 +583,41 @@ This prints a `SKILL IMPROVEMENT ANALYSIS` block in chat: repair success rate,
 parity gaps, error pattern recommendations, and EWI density — each with a
 suggested file to edit. No files are modified. Ends with an explicit
 "Suggestions only" disclaimer.
+
+### Step 11b: Collect failures → feedback_export.jsonl
+
+Run `collect_failures.py` to extract all repair failures and parity gaps into a
+standardised JSONL file. This always runs — even if repair was 100% successful,
+the file is written (with zero entries) so downstream tooling has a consistent artifact.
+
+```bash
+uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/collect_failures.py \
+  "$SPGLOADER_WORK_DIR" \
+  --tester  "$(snow connection show -c $TARGET_SNOWFLAKE_CONNECTION --format json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"user\",\"\"))' 2>/dev/null || echo 'unknown')" \
+  --scenario "$(basename $SPGLOADER_WORK_DIR)" 2>&1
+```
+
+Confirm the file was written:
+```bash
+ls -lh "$SPGLOADER_WORK_DIR/feedback_export.jsonl" 2>&1 && \
+  python3 -c "
+lines = open('$SPGLOADER_WORK_DIR/feedback_export.jsonl').readlines()
+print(f'feedback_export.jsonl: {len(lines)} entr{\"y\" if len(lines)==1 else \"ies\"}')"
+```
+
+### Step 11c: Upload to shared drive (if configured)
+
+If `SPGLOADER_FEEDBACK_DIR` is set in the environment, upload the file:
+
+```bash
+if [ -n "$SPGLOADER_FEEDBACK_DIR" ]; then
+  uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/upload_feedback.py \
+    "$SPGLOADER_WORK_DIR" \
+    --feedback-dir "$SPGLOADER_FEEDBACK_DIR" 2>&1
+else
+  echo "SPGLOADER_FEEDBACK_DIR not set — feedback saved locally at $SPGLOADER_WORK_DIR/feedback_export.jsonl"
+fi
+```
 
 ---
 
@@ -595,9 +632,10 @@ $SPGLOADER_WORK_DIR/
 │   ├── mssql_deploy_report.json    ← bridge file from spgloader artifacts
 │   ├── seed_report.json            ← seeding results (stub if skipped)
 │   └── validation_chains.json      ← view/proc/fn confirmation results
-└── parity/
-    ├── parity_report.md            ← sign-off report
-    └── migration_signoff.pptx      ← PowerPoint (if requested)
+├── parity/
+│   ├── parity_report.md            ← sign-off report
+│   └── migration_signoff.pptx      ← PowerPoint (if requested)
+└── feedback_export.jsonl           ← repair failures + parity gaps (Step 11b)
 ```
 
 ---
