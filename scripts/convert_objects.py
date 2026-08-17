@@ -15,6 +15,21 @@ import re
 import sys
 from pathlib import Path
 
+
+def _split_params(s: str) -> list[str]:
+    """Split parameter list on commas at parenthesis depth 0 only."""
+    parts, depth, start = [], 0, 0
+    for i, c in enumerate(s):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif c == ',' and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+    parts.append(s[start:])
+    return [p for p in parts if p.strip()]
+
 # Resolve lib path
 SKILL_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_DIR / "lib"))
@@ -227,14 +242,23 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
         )
 
     body_text = ddl[body_start:].strip() if body_start > 0 else ddl
-    body_m = re.search(r"(?:^|\n)\s*BEGIN\b\s*(.+)", body_text, re.IGNORECASE | re.DOTALL)
+    # Strip MySQL routine characteristics between ) and BEGIN
+    body_text = re.sub(
+        r'\b(READS\s+SQL\s+DATA|MODIFIES\s+SQL\s+DATA|CONTAINS\s+SQL|NO\s+SQL'
+        r'|NOT\s+DETERMINISTIC|DETERMINISTIC|SQL\s+SECURITY\s+\w+'
+        r"|LANGUAGE\s+SQL|LANGUAGE\s+PLPGSQL"
+        r"|COMMENT\s+'[^']*')\s*",
+        '', body_text, flags=re.IGNORECASE,
+    )
+    # Handle MySQL labeled blocks (proc: BEGIN) and bare BEGIN
+    body_m = re.search(r"(?:^|\n)\s*(?:\w+\s*:\s*)?BEGIN\b\s*(.+)", body_text, re.IGNORECASE | re.DOTALL)
     if body_m:
         body = body_m.group(1).strip()
     else:
         body = body_text
 
     params = []
-    for param in re.split(r",\s*", params_raw):
+    for param in _split_params(params_raw):
         param = param.strip()
         if not param:
             continue
@@ -251,6 +275,7 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
         param = re.sub(r"\s+=\s*.+$", "", param)
         param = re.sub(r"\bAS\b\s+", "", param, flags=re.IGNORECASE)
         param = re.sub(r"@(\w+)", r"\1", param)
+        param = re.sub(r"\s+UNSIGNED\b", "", param, flags=re.IGNORECASE)  # strip any residual UNSIGNED
         params.append(f"    {mode} {param.strip()}")
 
     body = re.sub(r"\bSET\s+NOCOUNT\s+ON\s*;?", "", body, flags=re.IGNORECASE)
@@ -381,7 +406,7 @@ def convert_function(ddl: str, source_type: str = "mssql") -> tuple[str, list[st
         params_raw = ddl[start:end-1].strip()
 
     params = []
-    for param in re.split(r",\s*", params_raw, flags=re.DOTALL):
+    for param in _split_params(params_raw):
         param = param.strip()
         if not param:
             continue
