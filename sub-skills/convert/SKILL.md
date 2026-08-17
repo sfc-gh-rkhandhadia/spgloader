@@ -219,7 +219,8 @@ Output: `conversion/postgres/wave_2_views/`, `wave_3_functions/`, `wave_4_proced
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/fix_views.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
-  --mapping "<SKILL_DIR>/references/fix-mappings/view-fixes.yaml"
+  --mapping "<SKILL_DIR>/references/fix-mappings/view-fixes.yaml" \
+  --source-type "$SOURCE_TYPE"
 ```
 Output: `conversion/postgres/wave_2_views_fixed/`
 

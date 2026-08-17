@@ -70,7 +70,8 @@ current (commit 8160bc4+).
 ```bash
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/fix_views.py \
   --work-dir "$SPGLOADER_WORK_DIR" \
-  --mapping "<SKILL_DIR>/references/fix-mappings/view-fixes.yaml"
+  --mapping "<SKILL_DIR>/references/fix-mappings/view-fixes.yaml" \
+  --source-type "$SOURCE_TYPE"
 
 uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/deploy_views.py \
   --work-dir "$SPGLOADER_WORK_DIR" \

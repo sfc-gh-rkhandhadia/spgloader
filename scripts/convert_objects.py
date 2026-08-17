@@ -320,7 +320,7 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
                   body, flags=re.IGNORECASE)
     body = re.sub(r"@(\w+)", r"\1", body)
     body = re.sub(r"\bGO\b", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"^\s*BEGIN\s*\n?", "", body, flags=re.IGNORECASE)
+    body = re.sub(r"^\s*BEGIN\s*;?\s*\n?", "", body, flags=re.IGNORECASE)
     body = re.sub(r"\n?\s*END\s*;?\s*$", "", body.strip(), flags=re.IGNORECASE)
 
     param_str = ",\n".join(params) if params else ""
@@ -389,8 +389,13 @@ def convert_function(ddl: str, source_type: str = "mssql") -> tuple[str, list[st
         param = re.sub(r"@(\w+)", r"\1", param)
         params.append(f"    IN {param.strip()}")
 
-    ret_m = re.search(r"RETURNS\s+(\w[\w\s(),.]+?)(?:WITH\s+SCHEMABINDING|AS\b|BEGIN\b|\Z)",
-                      ddl, re.IGNORECASE)
+    ret_m = re.search(
+        r"RETURNS\s+(\w[\w\s(),.]+?)"
+        r"(?:WITH\s+SCHEMABINDING|AS\b|BEGIN\b"
+        r"|READS\s+SQL\b|MODIFIES\s+SQL\b|CONTAINS\s+SQL\b|NO\s+SQL\b"
+        r"|DETERMINISTIC\b|NOT\s+DETERMINISTIC\b|SQL\s+SECURITY\b|COMMENT\s+'|\Z)",
+        ddl, re.IGNORECASE,
+    )
     return_type_raw = ret_m.group(1).strip() if ret_m else "void"
     is_stvf = return_type_raw.upper().startswith("TABLE")
 
@@ -452,7 +457,7 @@ $$;"""
     body = re.sub(r"\bELSE\s+IF\b", "ELSIF", body, flags=re.IGNORECASE)
     body = re.sub(r"\bWHILE\s+([^\n]+)\n(\s+)(?!LOOP)", r"WHILE \1 LOOP\n\2", body, flags=re.IGNORECASE)
     body = re.sub(r"\bGO\b", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"^\s*BEGIN\s*$", "", body, flags=re.IGNORECASE | re.MULTILINE)
+    body = re.sub(r"^\s*BEGIN\s*;?\s*$", "", body, flags=re.IGNORECASE | re.MULTILINE)
     body = re.sub(r"\s*END\s*;?\s*$", "", body.strip(), flags=re.IGNORECASE)
 
     declare_section = "\nDECLARE\n" + "\n".join(declare_lines) if declare_lines else ""
