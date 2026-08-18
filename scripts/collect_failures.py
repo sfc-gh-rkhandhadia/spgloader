@@ -29,8 +29,13 @@ _ERROR_PATTERNS: list[tuple[str, str]] = [
     (r"column .+ does not exist",          "column_does_not_exist"),
     (r"relation .+ does not exist",        "relation_does_not_exist"),
     (r"function .+ does not exist",        "function_does_not_exist"),
+    # More specific type patterns before the generic fallback
+    (r'type "(count|rowcount|_row_count)" does not exist', "rowcount_conversion_bug"),
     (r"type .+ does not exist",            "type_does_not_exist"),
+    # Code fence leak in LLM response extractor — must be before generic syntax_error
+    (r"syntax error at or near.+`",        "code_fence_leak"),
     (r"syntax error at or near",           "syntax_error"),
+    (r"cannot use return query in a non.setof", "non_setof_return_query"),
     (r"unterminated .* quoted",            "unterminated_quoted_identifier"),
     (r"division by zero",                  "division_by_zero"),
     (r"cursor",                            "cursor_loop"),
@@ -68,14 +73,19 @@ def _read_json(path: Path) -> dict | list:
 
 def _get_spgloader_version(work_dir: Path) -> str:
     """Try to determine the spgloader version from git or state file."""
-    # Check migration_state.json for version
-    state_file = work_dir / "migration_state.json"
-    if state_file.exists():
-        try:
-            state = json.loads(state_file.read_text())
-            return state.get("spgloader_version", "unknown")
-        except Exception:
-            pass
+    # Check .spgloader/migration_state.json first, then root
+    for candidate in [
+        work_dir / ".spgloader" / "migration_state.json",
+        work_dir / "migration_state.json",
+    ]:
+        if candidate.exists():
+            try:
+                state = json.loads(candidate.read_text())
+                ver = state.get("spgloader_version", "")
+                if ver:
+                    return ver
+            except Exception:
+                pass
     # Try git
     try:
         import subprocess
@@ -92,17 +102,35 @@ def _get_spgloader_version(work_dir: Path) -> str:
 
 
 def _get_source_info(work_dir: Path) -> tuple[str, str]:
-    """Get source_type and source_version from migration state."""
-    state_file = work_dir / "migration_state.json"
-    if state_file.exists():
+    """Get source_type and source_version from source_conn.env or migration state."""
+    # Preferred: read SOURCE_TYPE from source_conn.env (written by source-setup)
+    env_file = work_dir / "source_conn.env"
+    if env_file.exists():
         try:
-            state = json.loads(state_file.read_text())
-            return (
-                state.get("source_type", "unknown"),
-                state.get("source_version", "unknown"),
-            )
+            src_type = src_ver = ""
+            for line in env_file.read_text().splitlines():
+                if line.startswith("SOURCE_TYPE="):
+                    src_type = line.split("=", 1)[1].strip()
+                elif line.startswith("SOURCE_VERSION="):
+                    src_ver = line.split("=", 1)[1].strip()
+            if src_type:
+                return (src_type, src_ver or "unknown")
         except Exception:
             pass
+    # Fallback: check .spgloader/migration_state.json, then root
+    for candidate in [
+        work_dir / ".spgloader" / "migration_state.json",
+        work_dir / "migration_state.json",
+    ]:
+        if candidate.exists():
+            try:
+                state = json.loads(candidate.read_text())
+                t = state.get("source_type", "")
+                v = state.get("source_version", "")
+                if t:
+                    return (t, v or "unknown")
+            except Exception:
+                pass
     return ("unknown", "unknown")
 
 

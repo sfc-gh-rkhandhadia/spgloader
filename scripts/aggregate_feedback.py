@@ -42,6 +42,21 @@ FIX_ROUTING: dict[str, dict] = {
         "target_file": "references/rules/{source}-to-pg/type-mappings.yaml",
         "fix_hint": "Add type mapping for custom/UDT type or mark as out-of-scope",
     },
+    "rowcount_conversion_bug": {
+        "fix_type": "script",
+        "target_file": "scripts/convert_objects.py",
+        "fix_hint": "Add @@ROWCOUNT → GET DIAGNOSTICS var = ROW_COUNT; before generic @var stripping in convert_procedure and convert_trigger",
+    },
+    "code_fence_leak": {
+        "fix_type": "script",
+        "target_file": "scripts/repair_procedures.py",
+        "fix_hint": "Strip trailing ``` fences from bare-path extraction in _extract_plpgsql_from_response",
+    },
+    "non_setof_return_query": {
+        "fix_type": "prompt",
+        "target_file": "references/prompts/procedure-repair-prompt.md",
+        "fix_hint": "LLM must change RETURNS void → RETURNS SETOF record when introducing RETURN QUERY; add explicit rule to prompt",
+    },
     "syntax_error": {
         "fix_type": "rule",
         "target_file": "references/rules/{source}-to-pg/plpgsql-fixes.yaml",
