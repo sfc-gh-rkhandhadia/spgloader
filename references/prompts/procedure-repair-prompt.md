@@ -48,6 +48,10 @@ Apply these rules when rewriting the procedure:
 **RETURN**
 - Procedures cannot return values in PostgreSQL: `RETURN expr` → `RETURN;`
 - `RETURN(expr)` → `RETURN;`
+- **`RETURN QUERY` requires a `SETOF` return type.** If you introduce `RETURN QUERY SELECT ...` you MUST also change the function header from `RETURNS void` (or any scalar type) to `RETURNS SETOF record`. Failing to do so causes: `cannot use RETURN QUERY in a non-SETOF function`.
+  - Example fix — change header: `RETURNS void LANGUAGE plpgsql` → `RETURNS SETOF record LANGUAGE plpgsql`
+  - Then use: `RETURN QUERY SELECT col1, col2, ... FROM ...;`
+  - Add `RETURN;` at the end of the function body (required after the last `RETURN QUERY`).
 
 **Data types**
 - `nvarchar(n)`, `varchar(n)`, `nchar(n)`, `char(n)`, `ntext` → `text`

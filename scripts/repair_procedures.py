@@ -169,7 +169,11 @@ def _extract_plpgsql_from_response(response: str, object_type: str = "procedure"
     bare_m = re.search(r'(CREATE\s+OR\s+REPLACE\s+(?:PROCEDURE|FUNCTION)\b.*)',
                        response, re.IGNORECASE | re.DOTALL)
     if bare_m:
-        return bare_m.group(1).strip()
+        extracted = bare_m.group(1).strip()
+        # Strip any trailing markdown code fences that escaped the $$...$$
+        # extractor (LLM sometimes wraps the entire response in ```...```)
+        extracted = re.sub(r'\s*```+\s*$', '', extracted).strip()
+        return extracted or None
     return None
 
 

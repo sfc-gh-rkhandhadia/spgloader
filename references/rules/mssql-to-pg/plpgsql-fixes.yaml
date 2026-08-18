@@ -275,6 +275,19 @@ body_transforms:
     description: "Residual @rowcount that was not lowercased → _row_count"
     pattern:     '@rowcount\b'
     replacement: '_row_count'
+
+  - name:        set_var_rowcount
+    description: "SET @var = @@ROWCOUNT → GET DIAGNOSTICS var = ROW_COUNT; (repair fallback if convert missed it)"
+    # Catches the pattern after @-stripping left @ROWCOUNT with a stray @
+    pattern:     '\b(\w+)\s*:=\s*_row_count\s*;?'
+    replacement: 'GET DIAGNOSTICS \1 = ROW_COUNT;'
+    flags:       [IGNORECASE]
+
+  - name:        single_quoted_alias
+    description: "AS 'ColumnName' → AS \"ColumnName\"  (T-SQL single-quoted aliases are invalid in PG)"
+    # Covers SELECT col AS 'Alias' patterns inside procedure/function bodies
+    pattern:     '\bAS\s+''([^'']+)'''
+    replacement: 'AS "\1"'
     flags:       [IGNORECASE]
     procedure_only: true
 

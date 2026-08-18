@@ -312,6 +312,15 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
                   r"RAISE EXCEPTION '%', \1;", body, flags=re.IGNORECASE)
     body = re.sub(r"\bPRINT\s+(.+?);", r"RAISE NOTICE '%', \1;", body, flags=re.IGNORECASE)
     body = re.sub(r"@@TRANCOUNT", "0 /*@@TRANCOUNT*/", body, flags=re.IGNORECASE)
+    # @@ROWCOUNT — must be handled BEFORE the generic @var stripper consumes one @
+    # Pattern: SET @var = @@ROWCOUNT → GET DIAGNOSTICS var = ROW_COUNT;
+    body = re.sub(
+        r"\bSET\s+@?(\w+)\s*=\s*@@ROWCOUNT\s*;?",
+        r"GET DIAGNOSTICS \1 = ROW_COUNT;",
+        body, flags=re.IGNORECASE,
+    )
+    # Single-quoted column aliases (T-SQL: AS 'ColumnName') → double-quoted (PG: AS "ColumnName")
+    body = re.sub(r"\bAS\s+'([^']+)'", r'AS "\1"', body, flags=re.IGNORECASE)
     body = re.sub(r"@PROCID", "NULL /*@PROCID*/", body, flags=re.IGNORECASE)
     body = re.sub(r"\bOBJECT_NAME\s*\([^)]+\)", "NULL /*OBJECT_NAME*/", body, flags=re.IGNORECASE)
     body = re.sub(r"\bEXEC\s+sp_executesql\s+", "EXECUTE ", body, flags=re.IGNORECASE)
@@ -547,6 +556,14 @@ def convert_trigger(ddl: str, source_type: str = "mssql") -> tuple[str, list[str
     body = re.sub(r"\bGO\b", "", body, flags=re.IGNORECASE)
     body = re.sub(r"^\s*BEGIN\s*", "", body, flags=re.IGNORECASE)
     body = re.sub(r"\s*END\s*;?\s*$", "", body.strip(), flags=re.IGNORECASE)
+    # @@ROWCOUNT — must be handled before the generic @var stripper consumes one @
+    body = re.sub(
+        r"\bSET\s+@?(\w+)\s*=\s*@@ROWCOUNT\s*;?",
+        r"GET DIAGNOSTICS \1 = ROW_COUNT;",
+        body, flags=re.IGNORECASE,
+    )
+    # Single-quoted column aliases (T-SQL: AS 'Name') → double-quoted (PG: AS "Name")
+    body = re.sub(r"\bAS\s+'([^']+)'", r'AS "\1"', body, flags=re.IGNORECASE)
     body = re.sub(r"@(\w+)", r"\1", body)
     body = re.sub(r"\bINSERTED\b", "new_table", body, flags=re.IGNORECASE)
     body = re.sub(r"\bDELETED\b", "old_table", body, flags=re.IGNORECASE)
