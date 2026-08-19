@@ -1,6 +1,6 @@
 ---
 name: spgloader
-description: "Migrate MSSQL or MySQL databases to Snowflake Postgres (SPG).
+description: "Migrate MSSQL, MySQL, or MariaDB databases to Snowflake Postgres (SPG).
   Includes a mandatory SPG Compatibility Assessment guardrail that scans DDL
   against Snowflake Postgres-specific rules before conversion begins.
   Handles source environment setup (existing or Docker), SPG provisioning,
@@ -8,9 +8,9 @@ description: "Migrate MSSQL or MySQL databases to Snowflake Postgres (SPG).
   catalog-driven parallel table deployment, LLM-based object conversion with EWI
   annotations, deployment, and validation.
   Triggers: migrate to snowflake postgres, spgloader, mssql to spg,
-  mysql to spg, database migration to postgres,
-  source ddl to snowflake postgres, convert mssql mysql to postgres.
-  Note: MariaDB, Oracle, and SPCS support are planned for the next release."
+  mysql to spg, mariadb to spg, database migration to postgres,
+  source ddl to snowflake postgres, convert mssql mysql mariadb to postgres.
+  Note: Oracle and SPCS support are planned for the next release."
 ---
 
 # spgloader — Multi-Source to Snowflake Postgres Migration
@@ -24,8 +24,8 @@ respond with the stated message.
 
 | Feature | Status | If user asks, respond with: |
 |---------|--------|----------------------------|
-| **MariaDB** source | DISABLED | "MariaDB support is planned for the next release. Currently supported: MSSQL and MySQL." |
-| **Oracle** source | DISABLED | "Oracle support is planned for the next release. Currently supported: MSSQL and MySQL." |
+| **MariaDB** source | ENABLED | |
+| **Oracle** source | DISABLED | "Oracle support is planned for the next release. Currently supported: MSSQL, MySQL, and MariaDB." |
 | **SPCS** container platform | DISABLED | "SPCS container deployment is planned for the next release. Currently only Docker is supported." |
 
 **How to re-enable:** Change the Status column above to ENABLED and remove the
@@ -36,9 +36,9 @@ MariaDB, and SPCS logic remains intact in sub-skills and scripts.
 
 ## Overview
 
-spgloader migrates **MSSQL or MySQL** databases to Snowflake Postgres (SPG).
+spgloader migrates **MSSQL, MySQL, and MariaDB** databases to Snowflake Postgres (SPG).
 
-> **Coming next release:** MariaDB, Oracle, and SPCS (Snowpark Container Services) support.
+> **Coming next release:** Oracle and SPCS (Snowpark Container Services) support.
 
 For **tables and schemas** the skill uses a **catalog-based extractor** — reading `sys.*`,
 `INFORMATION_SCHEMA.*`, or `ALL_*` views directly from the live source database.
@@ -59,14 +59,14 @@ See `references/migration-overview.md` for conversion paths, source support matr
 
 Ask the user with a single `ask_user_question` call (4 questions):
 
-1. **Source DB type** (options): MSSQL | MySQL
-   *(MariaDB and Oracle are DISABLED — see Feature Flags above. Do NOT include them as options.)*
-2. **Source DB version** (text): default per type: MSSQL → `2022`, MySQL → `8.0`
+1. **Source DB type** (options): MSSQL | MySQL | MariaDB
+   *(Oracle is DISABLED — see Feature Flags above. Do NOT include it as an option.)*
+2. **Source DB version** (text): default per type: MSSQL → `2022`, MySQL → `8.0`, MariaDB → `10.11`
 3. **Source input** (options): "Connect to live source database" | "Provide DDL file" | "Paste DDL directly"
 4. **Target SPG** (options): "Use existing SPG instance" | "Provision new SPG"
 
 Store answers as:
-- `SOURCE_TYPE` — mssql | mysql
+- `SOURCE_TYPE` — mssql | mysql | mariadb
 - `SOURCE_VERSION` — version string
 - `SOURCE_INPUT` — live | file | paste
 - `TARGET_SPG` — existing | new

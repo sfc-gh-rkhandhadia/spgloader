@@ -22,7 +22,7 @@ From `spgloader/SKILL.md` Phase 1.
 | `existing` | [Existing section](#existing) — connect to running DB |
 | `none`     | Skip this phase — no container; text-based fallback in Phase 3 |
 
-> **Guard:** If `SOURCE_TYPE` is `oracle` or `mariadb`, stop immediately and respond
+> **Guard:** If `SOURCE_TYPE` is `oracle`, stop immediately and respond
 > with the appropriate disabled message from the Feature Flags table in the parent SKILL.md.
 
 ---
