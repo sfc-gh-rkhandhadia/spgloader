@@ -6,10 +6,11 @@ See `SKILL.md` for the orchestration workflow.
 ## Source Database Support Matrix
 
 | Source | Tables + Data | Views | Functions | Procedures | Triggers | Notes |
-|---|---|---|---|---|---|---|
-| **MSSQL** | ✅ pgloader | ✅ rule-based | ✅ rule-based | ⚠️ best-effort | ⚠️ best-effort | Validated with SQL Server 2022 |
-| **MySQL** | ✅ pgloader | ✅ rule-based | ⚠️ best-effort | ⚠️ best-effort | ⚠️ best-effort | Experimental — test before production use |
-| **Oracle** | ⚠️ LLM only | ⚠️ LLM only | ⚠️ LLM only | ⚠️ LLM only | ⚠️ LLM only | Experimental — orafce extension recommended |
+|---|---|---|---|---|---|
+| **MSSQL** | ✅ catalog | ✅ rule-based | ✅ rule-based | ⚠️ best-effort | ⚠️ best-effort | Validated with SQL Server 2022 |
+| **MySQL** | ✅ catalog | ✅ rule-based | ⚠️ best-effort | ⚠️ best-effort | ⚠️ best-effort | Validated with MySQL 8.0 (Sakila) |
+| **MariaDB** | ✅ catalog | ✅ rule-based | ⚠️ best-effort | ⚠️ best-effort | ⚠️ best-effort | Uses MySQL wire protocol; validated with MariaDB 10.4 |
+| **Oracle** | ⚠️ LLM only | ⚠️ LLM only | ⚠️ LLM only | ⚠️ LLM only | ⚠️ LLM only | Disabled this release |
 
 - ✅ = validated in production use
 - ⚠️ = best-effort; results require review before deploying to production
@@ -18,9 +19,9 @@ See `SKILL.md` for the orchestration workflow.
 
 | Path | Objects | Sources | Script |
 |---|---|---|---|
-| **pgloader** | Tables + data | MSSQL, MySQL | `gen_pgloader_config.py` |
-| **Rule-based** | Views | MSSQL, MySQL | `convert_objects.py` → `fix_views.py` |
-| **Rule-based** | Functions | MSSQL, MySQL | `convert_objects.py` → `fix_functions.py` |
+| **catalog** | Tables + data | MSSQL, MySQL, MariaDB | `parallel_deploy.py` + `copy_source_data.py` |
+| **Rule-based** | Views | MSSQL, MySQL, MariaDB | `convert_objects.py` → `fix_views.py` |
+| **Rule-based** | Functions | MSSQL, MySQL, MariaDB | `convert_objects.py` → `fix_functions.py` |
 | **LLM** | All objects | Oracle | `convert_objects.py` (LLM path) |
 | **LLM** | Complex procs/triggers | Any source | Manual + `convert_objects.py` |
 

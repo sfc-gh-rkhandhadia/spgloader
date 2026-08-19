@@ -140,6 +140,9 @@ Phase 4A  parallel_deploy.py (8 workers)
    │
 Phase 4B  convert_objects.py (views, functions, procedures, triggers)
            Rule-based conversion: type-mappings.yaml, function-substitutions.yaml
+           MySQL/MariaDB view extras (applied before type-mappings):
+             - _convert_group_concat(): balanced-paren parser → GROUP_CONCAT(... SEPARATOR '...') → string_agg(...)
+             - charset introducer stripping: _utf8mb4'str' / _utf8'str' → 'str'
            fix_views.py (6 YAML-driven passes)
            fix_functions.py
    │

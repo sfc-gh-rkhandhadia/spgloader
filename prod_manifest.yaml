@@ -3,15 +3,16 @@
 # Update version, stage, and certified_sources fields before each release.
 
 name: spgloader
-version: "1.0.0"
+version: "1.1.0"
 stage: "preview"          # draft | preview | ga
 author: "Snowflake SE"
 description: >
-  Migrate MSSQL, MySQL, or Oracle databases to Snowflake Postgres (SPG).
+  Migrate MSSQL, MySQL, or MariaDB databases to Snowflake Postgres (SPG).
   Includes a mandatory SPG Compatibility Assessment guardrail that scans DDL
   against Snowflake Postgres-specific rules before conversion begins.
   Handles Docker-based source setup, SPG provisioning, DDL extraction,
-  rule-based object conversion with EWI annotations, deployment, and validation.
+  catalog-based parallel table deployment, rule-based object conversion with
+  EWI annotations, deployment, and validation.
 
 # Minimum CoCo version required
 min_coco_version: "1.0.0"
@@ -21,17 +22,22 @@ certified_sources:
   - name: mssql
     versions: ["2019", "2022"]
     objects: [tables, views, functions, stored_procedures, triggers]
-    data_migration: pgloader
+    data_migration: catalog
   - name: mysql
     versions: ["8.0"]
-    objects: [tables]
-    data_migration: pgloader
+    objects: [tables, views, functions, stored_procedures, triggers]
+    data_migration: catalog
     note: "Views/functions experimental — review output before deploying to production"
+  - name: mariadb
+    versions: ["10.4", "10.11", "11.x"]
+    objects: [tables, views, functions, stored_procedures, triggers]
+    data_migration: catalog
+    note: "Uses MySQL wire protocol; views/functions experimental"
   - name: oracle
     versions: ["19c", "21c", "23c"]
     objects: [views, functions, stored_procedures, triggers]
     data_migration: llm
-    note: "Experimental — all objects require post-conversion review"
+    note: "Disabled this release — planned for next release"
 
 # Required skill dependencies
 dependencies:
@@ -46,10 +52,6 @@ runtime_requirements:
   - name: docker
     purpose: "Source database container (Docker path only)"
     optional: true
-  - name: pgloader
-    purpose: "Table + data migration for MSSQL/MySQL"
-    install: "brew install pgloader  # or: sudo apt install pgloader"
-    optional: false
   - name: psql
     purpose: "SPG connectivity test and manual DDL execution"
     install: "brew install libpq  # or: sudo apt install postgresql-client"
@@ -68,23 +70,38 @@ catalog:
   tags:
     - mssql
     - mysql
-    - oracle
+    - mariadb
     - spg
-    - pgloader
     - migration
   icon: "🐘"
   docs_url: "https://docs.snowflake.com/en/user-guide/snowflake-postgres"
 
 # Known limitations
 limitations:
+  - "MySQL/MariaDB GROUP_CONCAT with SEPARATOR — converted to string_agg() by _convert_group_concat() (balanced-paren parser)"
+  - "MySQL charset introducers (_utf8mb4, _utf8) stripped automatically in view conversion"
+  - "MySQL POINT/GEOMETRY columns converted from WKB to WKT at copy time (requires shapely for best results)"
+  - "MySQL BLOB/binary columns stored as bytea hex encoding"
   - "MSSQL CLR objects cannot be migrated — must be rewritten as PL/pgSQL"
   - "MSSQL Linked Server references cannot be migrated — remove or replace with Snowflake external functions"
   - "MSSQL User-Defined Table Types (UDTTs) have no direct SPG equivalent — recommend array or JSONB"
-  - "Oracle pgloader support is not yet available — all Oracle objects use LLM conversion"
-  - "MySQL stored procedures and functions are best-effort — review before production deployment"
+  - "Oracle support is disabled this release"
 
 # Changelog
 changelog:
+  - version: "1.1.0"
+    date: "2026-08-19"
+    notes:
+      - "Added MariaDB source support (uses MySQL wire protocol)"
+      - "Catalog-based parallel table deployment replaces pgloader for all sources"
+      - "GROUP_CONCAT SEPARATOR → string_agg() balanced-paren converter"
+      - "MySQL charset introducer stripping (_utf8mb4, _utf8, _latin1)"
+      - "MySQL POINT/GEOMETRY WKB→WKT conversion in data copy"
+      - "MySQL BLOB/TINYBLOB binary safe copy path"
+      - "Deadlock retry (3 attempts with back-off) in data copy"
+      - "MSSQL parameter extraction fix: @beginning_date BEGIN\\b word boundary"
+      - "MSSQL SET ROWCOUNT N → EWI comment with LIMIT guidance"
+      - "LLM repair prompt: output params 'DROP PROCEDURE FIRST' hint"
   - version: "1.0.0"
     date: "2025-07-01"
     notes:

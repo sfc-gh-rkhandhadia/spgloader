@@ -85,3 +85,20 @@ Owner runs aggregator  →  sees ranked patterns  →  tells CoCo "fix top 3"
                     ▼
 CoCo applies fixes  →  verifies (replay + pytest + parity)  →  owner approves commit
 ```
+
+## Known Error Classes and Fixes Applied
+
+| error_class | Root cause | Fix location | Fixed in |
+|---|---|---|---|
+| `syntax_error` (reads sql data) | `READS SQL DATA` leaking into RETURNS or body | `convert_objects.py` RETURNS regex + body strip | 1.1.0 |
+| `syntax_error` (GROUP_CONCAT SEPARATOR) | `SEPARATOR` keyword not valid in PG; broken `([^)]+)` regex in YAML | `_convert_group_concat()` in `convert_objects.py`; removed YAML rule | 1.1.0 |
+| `syntax_error` (SET ROWCOUNT) | T-SQL `SET ROWCOUNT N` not converted | Body substitution in `convert_procedure` | 1.1.0 |
+| `syntax_error` (beginning_date) | `^\s*BEGIN\s*` without `\b` matched `begin` in `@beginning_date` param name | `^\s*BEGIN\b\s*` fix + extended `as_body` regex | 1.1.0 |
+| `type_does_not_exist` (_utf8mb4) | MySQL charset introducer `_utf8mb4'str'` leaking into view SQL | Stripped in `convert_view()` for mysql/mariadb | 1.1.0 |
+| `relation_does_not_exist` | Trigger functions deploy before schema search_path includes their schema | `deploy_procedures.py` injects `SET search_path` | existing |
+| `column_does_not_exist` (name as alias) | Single-quoted T-SQL aliases: `AS 'Name'` invalid in PG | `AS 'x'` → `AS "x"` in body + `single_quoted_alias` rule | 1.0.1 |
+| `rowcount_conversion_bug` | `@@ROWCOUNT` → `@ROWCOUNT` after `@(\w+)` stripper ate one `@` | Explicit `@@ROWCOUNT` → `GET DIAGNOSTICS` before generic stripper | 1.0.1 |
+| `cannot_change_output_params` | Proc re-created with changed OUT params without DROP first | `procedure-repair-prompt.md` hint: emit DROP PROCEDURE IF EXISTS first | 1.1.0 |
+| `invalid_geometry` | MySQL POINT/GEOMETRY WKB binary not converted for PostGIS | `_mysql_geometry_to_wkt()` in `copy_source_data.py` | 1.1.0 |
+| `unterminated_csv_quoted_field` | MySQL BLOB/TINYBLOB binary data breaks COPY text format | `bytea_cols` detection + bytes passthrough in `_convert_row_mysql` | 1.1.0 |
+| `deadlock_detected` | Concurrent table copy workers hit SPG lock contention | 3-attempt retry with exponential back-off in `_copy_table` | 1.1.0 |

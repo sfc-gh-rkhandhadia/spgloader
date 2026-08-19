@@ -65,7 +65,10 @@ Use this reference when performing LLM-based conversion of MySQL objects (views,
 | `IF(cond, a, b)` | `CASE WHEN cond THEN a ELSE b END` |
 | `GREATEST(a, b)` | `GREATEST(a, b)` — same |
 | `LEAST(a, b)` | `LEAST(a, b)` — same |
-| `GROUP_CONCAT(col)` | `STRING_AGG(col, ',')` |
+| `GROUP_CONCAT(col)` | `string_agg(col, ',')` |
+| `GROUP_CONCAT(col SEPARATOR 'sep')` | `string_agg(col, 'sep')` |
+| `GROUP_CONCAT([DISTINCT] col [ORDER BY x] SEPARATOR 'sep')` | `string_agg([DISTINCT] col, 'sep' [ORDER BY x])` — handled by `_convert_group_concat()` in `convert_objects.py` (balanced-paren parser; do NOT add a regex rule in `function-substitutions.yaml`) |
+| `_utf8mb4'string'` (charset introducer) | `'string'` — stripped in `convert_view()` for MySQL/MariaDB sources |
 | `CONCAT(a, b)` | `CONCAT(a, b)` or `a || b` |
 | `SUBSTR(s, pos, len)` | `SUBSTRING(s FROM pos FOR len)` |
 | `INSTR(str, sub)` | `POSITION(sub IN str)` |
