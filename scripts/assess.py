@@ -26,7 +26,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="SPG Compatibility Assessment — scans DDL for Snowflake Postgres compatibility"
     )
-    parser.add_argument("--source-type", required=True, choices=["mssql", "mysql", "oracle"])
+    parser.add_argument("--source-type", required=True, choices=["mssql", "mysql", "mariadb", "oracle"])
     parser.add_argument("--ddl-objects", default=None,
                         help="Path to ddl_objects.json (from extract_ddl.py)")
     parser.add_argument("--ddl-file", default=None,

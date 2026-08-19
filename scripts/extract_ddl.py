@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Extract DDL from MSSQL, MySQL, or Oracle → ddl_objects.json"
     )
-    parser.add_argument("--source-type", required=True, choices=["mssql", "mysql", "oracle"])
+    parser.add_argument("--source-type", required=True, choices=["mssql", "mysql", "mariadb", "oracle"])
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--database", default="")

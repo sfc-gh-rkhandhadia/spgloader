@@ -33,10 +33,8 @@ substitutions:
 
   # ── String functions ──────────────────────────────────────────────────────
 
-  - pattern:     '\bGROUP_CONCAT\s*\(([^)]+)\)'
-    replacement: 'string_agg(\1, ",")'
-    ewi_code:    SPG-EWI-0002
-    note:        'MySQL GROUP_CONCAT → PostgreSQL string_agg; ORDER BY inside may need adjustment'
+  # GROUP_CONCAT is handled by _convert_group_concat() in convert_objects.py
+  # (balanced-paren parser with SEPARATOR + ORDER BY support — do not add a regex rule here)
 
   - pattern:     '\bCONCAT_WS\s*\('
     replacement: 'concat_ws('

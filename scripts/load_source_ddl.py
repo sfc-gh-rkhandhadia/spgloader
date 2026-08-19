@@ -78,6 +78,14 @@ CONTAINER_INFO = {
         "default_db": "mysql",
         "default_user": "root",
         "password_env": "MYSQL_ROOT_PASSWORD",
+        "client": "mysql",
+    },
+    "mariadb": {
+        "container": "spgloader_mariadb",
+        "default_db": "mysql",
+        "default_user": "root",
+        "password_env": "MYSQL_ROOT_PASSWORD",
+        "client": "mariadb",
     },
 }
 
@@ -308,7 +316,7 @@ def load_mssql(ddl_file: Path, database: str, password: str, container: str,
 # MySQL loader
 # ---------------------------------------------------------------------------
 
-def load_mysql(ddl_file: Path, database: str, password: str, container: str) -> None:
+def load_mysql(ddl_file: Path, database: str, password: str, container: str, client: str = "mysql") -> None:
     print(f"  Container : {container}")
     print(f"  Database  : {database}")
     print(f"  DDL file  : {ddl_file}")
@@ -317,7 +325,7 @@ def load_mysql(ddl_file: Path, database: str, password: str, container: str) -> 
     print(f"  Creating database '{database}' (if not exists)...")
     run([
         "docker", "exec", container,
-        "mysql", f"-uroot", f"-p{password}",
+        client, f"-uroot", f"-p{password}",
         "-e", f"CREATE DATABASE IF NOT EXISTS `{database}`",
     ])
 
@@ -330,7 +338,7 @@ def load_mysql(ddl_file: Path, database: str, password: str, container: str) -> 
     print(f"  Loading DDL into `{database}`...")
     result = run([
         "docker", "exec", "-i", container,
-        "mysql", f"-uroot", f"-p{password}", database,
+        client, f"-uroot", f"-p{password}", database,
         "-e", f"source {container_path}",
     ], check=False)
 
@@ -658,7 +666,7 @@ def main() -> None:
             "the source DB (Docker container or SPCS/remote host via TCP)."
         )
     )
-    parser.add_argument("--source-type", required=True, choices=["mssql", "mysql"],
+    parser.add_argument("--source-type", required=True, choices=["mssql", "mysql", "mariadb"],
                         help="Source database type")
     parser.add_argument("--host",
                         help="Remote host (SPCS DNS name or IP). If omitted, uses Docker.")
@@ -748,8 +756,8 @@ def main() -> None:
         if args.source_type == "mssql":
             load_mssql(ddl_file, args.database, password, container, info["sqlcmd"],
                        run_fk_pass=run_fk_pass)
-        elif args.source_type == "mysql":
-            load_mysql(ddl_file, args.database, password, container)
+        elif args.source_type in ("mysql", "mariadb"):
+            load_mysql(ddl_file, args.database, password, container, client=info.get("client", "mysql"))
 
     update_source_conn_env(work_dir, args.database)
 

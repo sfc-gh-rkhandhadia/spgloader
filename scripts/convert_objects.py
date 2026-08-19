@@ -153,6 +153,71 @@ def fix_view_alias_syntax(ddl: str) -> str:
     return ddl
 
 
+def _convert_group_concat(sql: str) -> str:
+    """Convert MySQL GROUP_CONCAT(...) to PostgreSQL string_agg(...).
+
+    Handles SEPARATOR clause, ORDER BY clause, and DISTINCT prefix.
+    Uses balanced-paren extraction to handle nested function calls.
+    """
+    result = []
+    i = 0
+    while i < len(sql):
+        m = re.search(r'\bGROUP_CONCAT\s*\(', sql[i:], re.IGNORECASE)
+        if not m:
+            result.append(sql[i:])
+            break
+        result.append(sql[i: i + m.start()])
+        open_pos = i + m.end()
+        depth = 1
+        j = open_pos
+        while j < len(sql) and depth > 0:
+            if sql[j] == '(':
+                depth += 1
+            elif sql[j] == ')':
+                depth -= 1
+            j += 1
+        inner = sql[open_pos: j - 1].strip()
+
+        # Strip DISTINCT prefix
+        distinct = ""
+        d_m = re.match(r'^(DISTINCT\s+)', inner, re.IGNORECASE)
+        if d_m:
+            distinct = "DISTINCT "
+            inner = inner[d_m.end():]
+
+        # Extract SEPARATOR clause (always last, outside any parens)
+        sep = ","
+        sep_m = re.search(r"\bSEPARATOR\s+'([^']*)'\s*$", inner, re.IGNORECASE)
+        if sep_m:
+            sep = sep_m.group(1)
+            inner = inner[:sep_m.start()].strip().rstrip(",").strip()
+
+        # Extract top-level ORDER BY clause
+        order_part = ""
+        depth2 = 0
+        order_start = None
+        k = 0
+        while k < len(inner):
+            c = inner[k]
+            if c == '(':
+                depth2 += 1
+            elif c == ')':
+                depth2 -= 1
+            elif depth2 == 0 and inner[k: k + 8].upper() == 'ORDER BY':
+                order_start = k
+                break
+            k += 1
+        if order_start is not None:
+            expr_part = inner[:order_start].strip().rstrip(",").strip()
+            order_part = " " + inner[order_start:].strip()
+        else:
+            expr_part = inner
+
+        result.append(f"string_agg({distinct}{expr_part}, '{sep}'{order_part})")
+        i = j
+    return "".join(result)
+
+
 def convert_view(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
     """Convert a T-SQL / MySQL view to PostgreSQL CREATE OR REPLACE VIEW."""
     codes = []
@@ -172,6 +237,15 @@ def convert_view(ddl: str, source_type: str = "mssql") -> tuple[str, list[str]]:
     ddl = re.sub(r"CREATE\s+VIEW", "CREATE OR REPLACE VIEW", ddl, flags=re.IGNORECASE)
     ddl = strip_brackets(ddl)
     ddl = downcase_identifiers(ddl)
+    if source_type in ("mysql", "mariadb"):
+        # Strip MySQL charset introducers: _utf8mb4'str' → 'str'
+        ddl = re.sub(
+            r"\b_(?:utf8mb4|utf8mb3|utf8|latin1|ascii|binary)\b\s*(?=')",
+            "", ddl, flags=re.IGNORECASE,
+        )
+        # Convert GROUP_CONCAT(... SEPARATOR ...) → string_agg(...)
+        # Must run before apply_type_mappings which has a simpler (broken) fallback
+        ddl = _convert_group_concat(ddl)
     ddl, tc = apply_type_mappings(ddl, source_type)
     codes.extend(tc)
     ddl = fix_view_alias_syntax(ddl)
@@ -223,7 +297,8 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
         body_start = ddl.find('\n', end)
     else:
         name_end = m_name.end()
-        as_body = re.search(r"(?:^|\n)\s*AS\s*(?:\n|$)", ddl[name_end:], re.IGNORECASE)
+        # AS on its own line, OR at end of a parameter line (e.g. "@p datetime AS\n")
+        as_body = re.search(r"(?:^|\n)\s*AS\s*(?:\n|$)|\s+AS\s*\n", ddl[name_end:], re.IGNORECASE)
         if as_body:
             params_section = ddl[name_end: name_end + as_body.start()]
             body_start = name_end + as_body.end() - 1
@@ -280,6 +355,13 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
 
     body = re.sub(r"\bSET\s+NOCOUNT\s+ON\s*;?", "", body, flags=re.IGNORECASE)
     body = re.sub(r"\bSET\s+XACT_ABORT\s+ON\s*;?", "", body, flags=re.IGNORECASE)
+    # SET ROWCOUNT 0 resets limit (no-op in PG); SET ROWCOUNT N → LIMIT N comment
+    body = re.sub(r"\bSET\s+ROWCOUNT\s+0\s*;?", "", body, flags=re.IGNORECASE)
+    body = re.sub(
+        r"\bSET\s+ROWCOUNT\s+(\d+)\s*;?\s*\n?",
+        r"-- [EWI] SET ROWCOUNT \1: T-SQL only; add LIMIT \1 to the following SELECT\n    ",
+        body, flags=re.IGNORECASE,
+    )
     # Strip MySQL session variables (no PG equivalent)
     body = re.sub(r"\bUNIQUE_CHECKS\s*:?=\s*\d+\s*;?", "-- UNIQUE_CHECKS (MySQL only)", body, flags=re.IGNORECASE)
     body = re.sub(r"\bFOREIGN_KEY_CHECKS\s*:?=\s*\d+\s*;?", "-- FOREIGN_KEY_CHECKS (MySQL only)", body, flags=re.IGNORECASE)
@@ -354,7 +436,7 @@ def convert_procedure(ddl: str, source_type: str = "mssql") -> tuple[str, list[s
                   body, flags=re.IGNORECASE)
     body = re.sub(r"@(\w+)", r"\1", body)
     body = re.sub(r"\bGO\b", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"^\s*BEGIN\s*;?\s*\n?", "", body, flags=re.IGNORECASE)
+    body = re.sub(r"^\s*BEGIN\b\s*;?\s*\n?", "", body, flags=re.IGNORECASE)
     body = re.sub(r"\n?\s*END\s*;?\s*$", "", body.strip(), flags=re.IGNORECASE)
 
     param_str = ",\n".join(params) if params else ""

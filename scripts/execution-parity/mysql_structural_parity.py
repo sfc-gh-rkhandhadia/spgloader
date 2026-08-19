@@ -87,7 +87,9 @@ def _spg_cursor(spg_service: str):
     db   = cfg.get("dbname", "postgres")
     port = int(cfg.get("port", 5432))
     pw   = _read_pgpass(host, db, user)
-    conn = psycopg2.connect(host=host, port=port, user=user, password=pw, dbname=db)
+    # Use hostaddr (resolved IP) if present — bypasses stale local DNS
+    connect_host = cfg.get("hostaddr") or os.environ.get("PGHOSTADDR") or host
+    conn = psycopg2.connect(host=connect_host, port=port, user=user, password=pw, dbname=db)
     conn.autocommit = True
     return conn, conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
