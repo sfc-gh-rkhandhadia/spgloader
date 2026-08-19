@@ -52,6 +52,10 @@ Apply these rules when rewriting the procedure:
   - Example fix — change header: `RETURNS void LANGUAGE plpgsql` → `RETURNS SETOF record LANGUAGE plpgsql`
   - Then use: `RETURN QUERY SELECT col1, col2, ... FROM ...;`
   - Add `RETURN;` at the end of the function body (required after the last `RETURN QUERY`).
+- **`cannot change whether a procedure has output parameters`** — This means the procedure already exists in SPG with a different OUT parameter signature. The fix is to emit a `DROP PROCEDURE` before the `CREATE OR REPLACE`:
+  - Emit: `DROP PROCEDURE IF EXISTS <proc_name>(<param_types>);` immediately before the `CREATE OR REPLACE PROCEDURE` statement.
+  - Use the exact parameter types from the new signature in the DROP statement.
+  - Example: error says `Use DROP PROCEDURE salesbycategory(character varying,character varying) first` → add `DROP PROCEDURE IF EXISTS salesbycategory(character varying, character varying);` before the CREATE.
 
 **Data types**
 - `nvarchar(n)`, `varchar(n)`, `nchar(n)`, `char(n)`, `ntext` → `text`

@@ -170,15 +170,58 @@ def _convert_row(row: tuple) -> tuple:
     return tuple(_pg_value(v) for v in row)
 
 
-def _convert_row_mysql(row: tuple, col_names: list[str], bool_cols: set[str]) -> tuple:
-    """Like _convert_row but converts MySQL TINYINT(1) 0/1 to Python bool for boolean columns."""
+def _convert_row_mysql(
+    row: tuple,
+    col_names: list[str],
+    bool_cols: set[str],
+    geometry_cols: set[str] = frozenset(),
+    bytea_cols: set[str] = frozenset(),
+) -> tuple:
+    """Like _convert_row but handles MySQL-specific column types:
+    - TINYINT(1) 0/1 → Python bool for boolean columns
+    - GEOMETRY/POINT (MySQL WKB bytes) → WKT string for PostGIS columns
+    - BLOB/TINYBLOB (binary bytes) → hex bytea string
+    """
     result = []
     for val, col in zip(row, col_names):
-        if col in bool_cols and isinstance(val, int):
+        if val is None:
+            result.append(None)
+        elif col in bool_cols and isinstance(val, int):
             result.append(bool(val))
+        elif col in geometry_cols and isinstance(val, (bytes, bytearray)):
+            # MySQL stores geometry as 4-byte SRID prefix + WKB; strip prefix and convert
+            result.append(_mysql_geometry_to_wkt(val))
+        elif col in bytea_cols and isinstance(val, (bytes, bytearray)):
+            # Binary BLOB — keep as bytes; the COPY path will hex-encode it
+            result.append(bytes(val))
         else:
             result.append(_pg_value(val))
     return tuple(result)
+
+
+def _mysql_geometry_to_wkt(wkb_with_srid: bytes) -> "str | bytes | None":
+    """Convert MySQL geometry bytes (4-byte SRID + WKB) to WKT string.
+
+    Returns:
+      str  — WKT string when shapely is available (e.g. 'POINT (1.0 2.0)')
+      bytes — raw WKB when shapely is not available (COPY path hex-encodes for PostGIS)
+      None  — on any error (column stored as NULL rather than crashing the copy)
+    """
+    try:
+        # MySQL prepends a 4-byte little-endian SRID to the standard WKB
+        raw_wkb = wkb_with_srid[4:] if len(wkb_with_srid) > 4 else wkb_with_srid
+        # Try shapely first (fast, no external process)
+        try:
+            from shapely.wkb import loads as wkb_loads
+            geom = wkb_loads(raw_wkb)
+            return geom.wkt  # PostGIS accepts WKT strings directly
+        except ImportError:
+            pass
+        # Fallback: return raw WKB bytes — the COPY path will hex-encode as \x<hex>
+        # which PostGIS can accept as bytea-encoded WKB
+        return raw_wkb
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +288,9 @@ def _copy_table(
         identity_cols = {c for c, m in spg_meta.items() if m["is_identity"] == "YES"}
         bool_cols = {c for c, m in spg_meta.items() if m["data_type"] == "boolean"}
         generated_cols = {c for c, m in spg_meta.items() if m["is_generated"] == "ALWAYS"}
+        # MySQL geometry columns → WKT; MySQL BLOB columns → hex bytea
+        geometry_cols = {c for c, m in spg_meta.items() if m["data_type"] in ("geometry", "geography")}
+        bytea_cols = {c for c, m in spg_meta.items() if m["data_type"] == "bytea"}
 
         # Fetch column names from source (use buffered cursor for MySQL to avoid "Unread result" errors)
         if source_type == "mssql":
@@ -307,7 +353,11 @@ def _copy_table(
             batch = src_cur.fetchmany(batch_size)
             if not batch:
                 break
-            converted = [_convert_row_mysql(row, col_names, bool_cols) if source_type != "mssql" else _convert_row(row) for row in batch]
+            converted = [
+                _convert_row_mysql(row, col_names, bool_cols, geometry_cols, bytea_cols)
+                if source_type != "mssql" else _convert_row(row)
+                for row in batch
+            ]
             # Build TSV buffer for COPY
             buf = io.StringIO()
             for row in converted:
@@ -326,9 +376,21 @@ def _copy_table(
                         fields.append(s)
                 buf.write('\t'.join(fields) + '\n')
             buf.seek(0)
-            with pg_conn.cursor() as pg_cur:
-                pg_cur.copy_expert(copy_sql, buf)
-            pg_conn.commit()
+            # Deadlock retry: up to 3 attempts with exponential back-off
+            for _attempt in range(3):
+                try:
+                    buf.seek(0)
+                    with pg_conn.cursor() as pg_cur:
+                        pg_cur.copy_expert(copy_sql, buf)
+                    pg_conn.commit()
+                    break
+                except Exception as _e:
+                    import psycopg2.errors as _pgerr
+                    if isinstance(_e, _pgerr.DeadlockDetected) and _attempt < 2:
+                        pg_conn.rollback()
+                        import time as _t; _t.sleep(0.5 * (2 ** _attempt))
+                    else:
+                        raise
             total_rows += len(batch)
 
         src_cur.close()
